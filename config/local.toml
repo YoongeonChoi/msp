@@ -1,0 +1,23 @@
+[app]
+name = "MSP"
+environment = "local"
+
+[database]
+path = "data/msp.sqlite3"
+
+[trading]
+account_id = "paper-main"
+allow_live_mode = false
+initial_cash_krw = 10000000
+
+[workers]
+interval_seconds = 2.0
+lease_ttl_seconds = 15
+
+[broker]
+adapter = "paper"
+enable_real_broker = false
+
+[toss]
+base_url = "https://openapi.tossinvest.com"
+timeout_seconds = 10.0
