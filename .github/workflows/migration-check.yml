@@ -1,0 +1,40 @@
+name: migration-check
+
+on:
+  pull_request:
+    paths:
+      - "supabase/migrations/**"
+      - "supabase/seed.sql"
+  push:
+    branches: [main, develop]
+    paths:
+      - "supabase/migrations/**"
+      - "supabase/seed.sql"
+
+permissions:
+  contents: read
+
+jobs:
+  migration-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate migration filenames
+        run: |
+          test -f supabase/migrations/0001_schema.sql
+          test -f supabase/migrations/0002_rls.sql
+          test -f supabase/migrations/0003_realtime.sql
+          test -f supabase/migrations/0004_retention.sql
+      - name: Require RLS for public tables
+        run: |
+          for table in $(rg '^create table public\\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
+            rg "alter table public\\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          done
+      - name: Block destructive migration patterns
+        run: |
+          ! rg -i "drop table|drop column|truncate table" supabase/migrations
+      - name: Check singleton safety seed
+        run: |
+          rg "'singleton'" supabase/seed.sql
+          rg "false,\\s*'paper',\\s*false" supabase/seed.sql
+

@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install worker
+        working-directory: apps/worker
+        run: python -m pip install -e ".[dev]"
+      - name: Ruff
+        working-directory: apps/worker
+        run: python -m ruff check app
+      - name: Mypy
+        working-directory: apps/worker
+        run: python -m mypy app
+      - name: Pytest
+        working-directory: apps/worker
+        run: python -m pytest
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm install
+      - name: Lint
+        run: npm run desktop:lint
+      - name: Typecheck
+        run: npm run desktop:typecheck
+      - name: Build
+        run: npm run desktop:build
+
+  migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration order
+        run: test "$(ls supabase/migrations/*.sql | sort)" = "$(ls supabase/migrations/*.sql)"
+      - name: Check RLS enabled
+        run: |
+          for table in $(rg '^create table public\\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
+            rg "alter table public\\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          done
+      - name: Check safety seed
+        run: rg "enabled,\\s*mode,\\s*live_order_allowed" supabase/seed.sql && rg "false,\\s*'paper',\\s*false" supabase/seed.sql
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required docs exist
+        run: |
+          test -f docs/API_CONNECTIONS.md
+          test -f docs/API_GAPS.md
+          test -f docs/RISK_POLICY.md
+          test -f docs/THREAT_MODEL.md
+

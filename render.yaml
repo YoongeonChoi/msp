@@ -1,0 +1,48 @@
+services:
+  - type: worker
+    name: kr-trading-worker
+    runtime: python
+    region: singapore
+    plan: starter
+    branch: main
+    rootDir: apps/worker
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
+    autoDeployTrigger: "off"
+    numInstances: 1
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: ENV
+        value: production
+      - key: MOCK_PROVIDERS
+        value: "false"
+      - key: TZ
+        value: Asia/Seoul
+      - key: BOT_DEFAULT_MODE
+        value: paper
+      - key: LOOP_INTERVAL_SEC
+        value: "30"
+      - key: HEARTBEAT_INTERVAL_SEC
+        value: "30"
+      - key: MAX_CONCURRENT_API_CALLS
+        value: "5"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: TOSS_CLIENT_ID
+        sync: false
+      - key: TOSS_CLIENT_SECRET
+        sync: false
+      - key: TOSS_ACCOUNT_ID
+        sync: false
+      - key: OPENDART_API_KEY
+        sync: false
+      - key: KRX_API_KEY
+        sync: false
+      - key: NAVER_CLIENT_ID
+        sync: false
+      - key: NAVER_CLIENT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
