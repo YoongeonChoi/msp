@@ -162,13 +162,14 @@ def test_toss_readonly_command_masks_account_identifiers() -> None:
 
 
 def _settings() -> Settings:
-    kwargs = {
-        "MOCK_PROVIDERS": False,
-        "TOSS_CLIENT_ID": SecretStr("client-id"),
-        "TOSS_CLIENT_SECRET": SecretStr("client-secret"),
-        "TOSS_ACCOUNT_ID": SecretStr("1"),
-    }
-    return Settings(**kwargs)
+    return Settings.model_validate(
+        {
+            "MOCK_PROVIDERS": False,
+            "TOSS_CLIENT_ID": SecretStr("client-id"),
+            "TOSS_CLIENT_SECRET": SecretStr("client-secret"),
+            "TOSS_ACCOUNT_ID": SecretStr("1"),
+        }
+    )
 
 
 def _client_with_responses(
