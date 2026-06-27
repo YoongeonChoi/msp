@@ -12,3 +12,23 @@ OpenAI: structured outputs classify news/disclosures and propose monthly strateg
 
 Feature storage uses typed columns for queryable fields and JSONB only for snapshots.
 
+## Outcome Tracking
+
+`python -m app.tools.update_outcomes_once` builds paper-trading outcomes from stored database facts only:
+
+- `decision_snapshots` provides `symbol`, `action`, decision time, and `feature_snapshot.price_at_decision`.
+- `features_daily` provides verified cached future close prices by trading date.
+- `orders` provides linked paper order amount, price, and quantity when available.
+- `outcomes` is upserted by `decision_id`, so reruns update the same row instead of creating duplicates.
+
+The command does not call Toss order APIs, does not create orders, does not create decision snapshots, and does not send account data to OpenAI. Non-trading days are handled by using the next available `features_daily.trade_date` rows rather than calendar-day interpolation.
+
+Outcome fields:
+
+- `return_1d`, `return_5d`, `return_20d`
+- `max_drawdown_20d`
+- `hit_target`, `hit_stop`
+- `realized_pnl_krw`
+- `outcome_status`: `pending`, `partial`, `complete`, or `skipped`
+
+`return_pct` and `pnl_krw` remain populated from the 20-day outcome for compatibility with monthly research summaries.
