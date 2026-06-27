@@ -36,3 +36,32 @@ Navigation:
 
 Dangerous changes require confirmation. Live trading requires typed Korean phrase.
 
+## Strategy Lab
+
+Purpose:
+
+- Paper Trading 성과 분석과 AI strategy candidate 검토.
+- Desktop은 Supabase publishable key와 RLS만 사용한다.
+- Toss/OpenAI/Naver/KRX/OpenDART API를 Desktop에서 직접 호출하지 않는다.
+- Supabase secret/service_role key를 Desktop에 두지 않는다.
+
+Sections:
+
+- Current strategy: active paper strategy, version, status, `weights_json`, `params_json`, `deployed_at`, `created_at`.
+- Editable JSON form is shown only for `draft` or `proposed` strategy rows where RLS permits update.
+- Paper performance: recent `outcomes`, return_1d/5d/20d averages, win rate, max drawdown, order count, blocked reason counts.
+- Backtest: recent `backtest_runs` when the table and admin read policy exist, including return, CAGR, MDD, win rate, turnover, fee/slippage assumptions.
+- AI candidates: `ai_upgrade_candidates`, candidate weights, rationale, expected improvement, risk notes, required backtests, approve/reject controls.
+
+Safety UX:
+
+- Approving an AI candidate changes candidate review status only, currently `approved_for_paper`.
+- Approval does not deploy a strategy, does not call the worker, does not create orders, and does not change `live_order_allowed`.
+- Paper promotion is confirmation-gated and remains a runbook/manual workflow until a server-side safe promotion use case exists.
+- Live promotion is disabled and visibly marked as not implemented.
+- Anything related to live trading must use danger styling and text labels, not color alone.
+
+Empty/error states:
+
+- Empty Strategy Lab sections must explain the next safe action: seed strategy, run outcome update, run backtest, or generate monthly AI candidate.
+- `backtest_runs` missing table or RLS read policy should show a warning instead of breaking the entire page.
