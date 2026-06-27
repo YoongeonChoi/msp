@@ -1,12 +1,96 @@
 from __future__ import annotations
 
-from app.domain.common.errors import ProviderUnavailableError
+import json
+
+import httpx
+
+from app.adapters.ai.openai_schemas import (
+    monthly_candidate_response_format_schema,
+    parse_monthly_candidate_json,
+)
+from app.domain.common.errors import ProviderSchemaError, ProviderUnavailableError
+from app.domain.common.json import JsonObject, json_object
 from app.domain.news_intel.entities import NewsClassification
+from app.domain.strategy.research import AIUpgradeCandidate
+
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
 
 class OpenAIClient:
+    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini") -> None:
+        self.api_key = api_key
+        self.model = model
+        self.client = httpx.AsyncClient(
+            timeout=30.0,
+            headers={
+                "authorization": f"Bearer {api_key}" if api_key else "",
+                "content-type": "application/json",
+            },
+        )
+
     async def provider_health(self) -> bool:
-        return False
+        return bool(self.api_key)
 
     async def classify_news(self, symbol: str, title: str, summary: str) -> NewsClassification:
         raise ProviderUnavailableError("openai", "openai_structured_output_not_configured")
+
+    async def generate_monthly_candidate(self, dataset_payload: JsonObject) -> AIUpgradeCandidate:
+        if not self.api_key:
+            raise ProviderUnavailableError("openai", "openai_api_key_missing")
+        response = await self.client.post(
+            OPENAI_RESPONSES_URL,
+            json={
+                "model": self.model,
+                "input": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a research assistant for a Korean paper trading system. "
+                            "Never place trades, deploy strategies, or request secrets. "
+                            "Return only the required structured strategy candidate."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(dataset_payload, ensure_ascii=False),
+                    },
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "monthly_upgrade_candidate",
+                        "schema": monthly_candidate_response_format_schema(),
+                        "strict": True,
+                    }
+                },
+            },
+        )
+        response.raise_for_status()
+        candidate_text = _extract_response_text(json_object(response.json()))
+        return parse_monthly_candidate_json(candidate_text).to_domain(
+            base_strategy_version_id=None
+        )
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+
+def _extract_response_text(payload: JsonObject) -> str:
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text:
+        return output_text
+    output = payload.get("output")
+    if not isinstance(output, list):
+        raise ProviderSchemaError("openai", "missing_response_output_text")
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for content_item in content:
+            if isinstance(content_item, dict):
+                text = content_item.get("text")
+                if isinstance(text, str) and text:
+                    return text
+    raise ProviderSchemaError("openai", "missing_response_output_text")
