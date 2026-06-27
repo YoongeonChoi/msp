@@ -24,8 +24,33 @@ Official documentation consulted or linked for implementation verification:
 | OpenAI Structured Outputs | https://platform.openai.com/docs/guides/structured-outputs | Pydantic schema mirrors expected output |
 | OpenAI Batch API | https://platform.openai.com/docs/guides/batch | reserved for monthly offline jobs |
 | OpenAI data controls | https://platform.openai.com/docs/guides/your-data | no secrets and data minimization |
-| Toss Securities Open API | https://developers.tossinvest.com/docs | live order implementation blocked until endpoint contract verified |
-| Toss Securities llms index | https://developers.tossinvest.com/llms.txt | points to official OpenAPI docs for future contract work |
+| Toss Securities Open API | https://developers.tossinvest.com/docs | read-only adapter only; live order execution remains disabled |
+| Toss Securities llms index | https://developers.tossinvest.com/llms.txt | official index for Markdown docs and canonical OpenAPI JSON |
+| Toss Securities OpenAPI JSON | https://openapi.tossinvest.com/openapi-docs/latest/openapi.json | verified `oauth2/token`, `accounts`, `holdings`, `prices`, `candles`, and read-only order status schemas |
 
 No provider-specific endpoint, parameter, auth flow, rate limit, or response schema is implemented unless represented by a typed placeholder, mock adapter, and `API_GAPS.md` entry.
 
+## Toss Securities Read-Only Contract
+
+Verified from the official Toss Securities OpenAPI document:
+
+- Base URL: `https://openapi.tossinvest.com`
+- Auth: `POST /oauth2/token` with OAuth2 Client Credentials Grant, `application/x-www-form-urlencoded`, fields `grant_type=client_credentials`, `client_id`, `client_secret`
+- API auth header: `Authorization: Bearer {access_token}`
+- Account scoped read APIs use `X-Tossinvest-Account`; the value is the `accountSeq` returned by `GET /api/v1/accounts`
+- Read-only endpoints implemented in worker adapter:
+  - `GET /api/v1/accounts`
+  - `GET /api/v1/holdings`
+  - `GET /api/v1/prices`
+  - `GET /api/v1/candles`
+  - `GET /api/v1/orders`
+  - `GET /api/v1/orders/{orderId}`
+
+Not implemented:
+
+- `POST /api/v1/orders`
+- order cancel
+- order modify
+- any broker live order execution path
+
+`TOSS_ACCOUNT_ID` is kept for env compatibility, but for Toss it must contain the server-side `accountSeq`, not a raw account number. Never put Toss credentials in Desktop or Git.
