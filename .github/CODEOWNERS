@@ -1,9 +1,11 @@
 * @choey
 
-apps/worker/app/application/services/risk_service.py @choey
-apps/worker/app/application/services/execution_service.py @choey
-apps/worker/app/adapters/broker/ @choey
-supabase/migrations/ @choey
+apps/worker/**/risk* @choey
+apps/worker/**/execution* @choey
+apps/worker/app/**/risk* @choey
+apps/worker/app/**/execution* @choey
+apps/worker/**/broker* @choey
+apps/worker/app/adapters/broker/** @choey
+supabase/migrations/** @choey
 render.yaml @choey
-.github/workflows/ @choey
-
+.github/workflows/** @choey

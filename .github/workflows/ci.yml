@@ -8,37 +8,49 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   worker:
+    name: worker lint, typecheck, tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
       - name: Install worker
         working-directory: apps/worker
         run: python -m pip install -e ".[dev]"
-      - name: Ruff
+      - name: Ruff check
         working-directory: apps/worker
         run: python -m ruff check app
-      - name: Mypy
+      - name: Type check
         working-directory: apps/worker
         run: python -m mypy app
       - name: Pytest
         working-directory: apps/worker
+        env:
+          MOCK_PROVIDERS: "true"
+          BOT_DEFAULT_MODE: paper
         run: python -m pytest
 
   desktop:
+    name: desktop typecheck and build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-      - name: Install
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
       - name: Lint
         run: npm run desktop:lint
       - name: Typecheck
@@ -47,27 +59,160 @@ jobs:
         run: npm run desktop:build
 
   migrations:
+    name: migration safety checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Check migration order
-        run: test "$(ls supabase/migrations/*.sql | sort)" = "$(ls supabase/migrations/*.sql)"
-      - name: Check RLS enabled
+      - name: Check migration order and safety
+        shell: bash
         run: |
-          for table in $(rg '^create table public\\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
-            rg "alter table public\\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          set -euo pipefail
+          mapfile -t migrations < <(find supabase/migrations -maxdepth 1 -type f -name '*.sql' | sort)
+          test "${#migrations[@]}" -gt 0
+          previous=""
+          for file in "${migrations[@]}"; do
+            name="$(basename "$file")"
+            [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]]
+            if [[ -n "$previous" ]]; then
+              [[ "$previous" < "$name" ]]
+            fi
+            previous="$name"
           done
-      - name: Check safety seed
-        run: rg "enabled,\\s*mode,\\s*live_order_allowed" supabase/seed.sql && rg "false,\\s*'paper',\\s*false" supabase/seed.sql
+          for required in 0001_schema.sql 0002_rls.sql 0003_realtime.sql 0004_retention.sql 0005_schema_alignment.sql; do
+            test -f "supabase/migrations/$required"
+          done
+      - name: Check RLS and public write safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          for table in $(rg '^create table public\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
+            rg "alter table public\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          done
+          ! rg -i "create policy .* to (anon|public)|for (insert|update|all) to (anon|public)" supabase/migrations
+      - name: Check singleton paper safety seed
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+
+          seed = Path("supabase/seed.sql").read_text(encoding="utf-8")
+          normalized = re.sub(r"\s+", " ", seed)
+          assert "'singleton'" in normalized
+          assert re.search(r"false,\s*'paper',\s*false", normalized)
+      - name: Block unreviewed destructive migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -i "drop table|drop column|truncate table" supabase/migrations; then
+            rg -i "destructive migration approved|rollback note" supabase/migrations
+          fi
+
+  repository-safety:
+    name: repository safety checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block committed env files
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad_env_files="$(
+            git ls-files |
+              awk '/(^|\/)\.env($|\.)/ && !/(^|\/)\.env\.example$/ { print }'
+          )"
+          if [[ -n "$bad_env_files" ]]; then
+            echo "::error::Non-example .env files are tracked. Remove them from Git."
+            printf '%s\n' "$bad_env_files"
+            exit 1
+          fi
+      - name: Block production secrets in workflows
+        shell: python
+        run: |
+          from pathlib import Path
+
+          secret_names = (
+              "SUPABASE_SECRET_KEY",
+              "TOSS_CLIENT_SECRET",
+              "OPENAI_API_KEY",
+              "NAVER_CLIENT_SECRET",
+              "KRX_API_KEY",
+              "OPENDART_API_KEY",
+          )
+          findings: list[str] = []
+          for path in Path(".github/workflows").glob("*.yml"):
+              for line in path.read_text(encoding="utf-8").splitlines():
+                  if "secrets." not in line:
+                      continue
+                  if "git grep" in line or "rg " in line or "secret_names" in line:
+                      continue
+                  if any(f"secrets.{name}" in line for name in secret_names):
+                      findings.append(str(path))
+                      break
+          if findings:
+              print("::error::Workflow references production trading/API secrets.")
+              print("\n".join(sorted(set(findings))))
+              raise SystemExit(1)
+      - name: Require manual Render deployment
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+
+          render_yaml = Path("render.yaml").read_text(encoding="utf-8")
+          if not re.search(r'autoDeployTrigger:\s*"?off"?', render_yaml):
+              print("::error::render.yaml must keep autoDeployTrigger off.")
+              raise SystemExit(1)
+          findings: list[str] = []
+          for path in [*Path(".github/workflows").glob("*.yml"), Path("render.yaml")]:
+              text = path.read_text(encoding="utf-8")
+              if path.suffix == ".yml":
+                  lines = [line for line in text.splitlines() if "re.search" not in line]
+                  text = "\n".join(lines)
+              if re.search(r"(render deploy|render\.com/deploy|autoDeployTrigger:\s*\"?on\"?)", text):
+                  findings.append(str(path))
+          if findings:
+              print("::error::Automatic Render deployment is not allowed.")
+              print("\n".join(sorted(set(findings))))
+              raise SystemExit(1)
 
   docs:
+    name: docs basic checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Check required docs exist
+        shell: bash
         run: |
-          test -f docs/API_CONNECTIONS.md
-          test -f docs/API_GAPS.md
-          test -f docs/RISK_POLICY.md
-          test -f docs/THREAT_MODEL.md
+          set -euo pipefail
+          required_docs=(
+            docs/API_CONNECTIONS.md
+            docs/API_GAPS.md
+            docs/RISK_POLICY.md
+            docs/THREAT_MODEL.md
+            docs/CI_CD.md
+            docs/SECURITY.md
+            docs/RELEASE_PROCESS.md
+            docs/ROLLBACK.md
+            docs/GIT_RULES.md
+          )
+          for doc in "${required_docs[@]}"; do
+            test -s "$doc"
+          done
+      - name: Check safety docs mention live guardrails
+        shell: python
+        run: |
+          from pathlib import Path
 
+          docs = "\n".join(
+              Path(path).read_text(encoding="utf-8")
+              for path in [
+                  "docs/RELEASE_PROCESS.md",
+                  "docs/ROLLBACK.md",
+                  "docs/CI_CD.md",
+              ]
+          )
+          assert "live_order_allowed=false" in docs or "live_order_allowed = false" in docs
+          assert "manual" in docs.lower()

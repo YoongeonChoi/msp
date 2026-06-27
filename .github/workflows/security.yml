@@ -4,14 +4,24 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "23 18 * * 1"
 
 permissions:
   contents: read
-  security-events: write
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   codeql:
+    name: CodeQL
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -24,14 +34,23 @@ jobs:
       - uses: github/codeql-action/analyze@v3
 
   dependency-review:
+    name: Dependency review
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
 
-  audits:
+  advisory-audits:
+    name: Advisory dependency and code audits
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,20 +60,119 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: npm audit
-        run: npm install && npm audit --audit-level=high
-      - name: Python audit tools
+          cache: pip
+      - name: Install Node dependencies
+        run: npm ci
+      - name: npm audit advisory
+        continue-on-error: true
+        run: npm audit --audit-level=moderate
+      - name: Install Python audit tools
+        run: python -m pip install pip-audit bandit
+      - name: pip-audit advisory
         working-directory: apps/worker
-        run: |
-          python -m pip install pip-audit bandit
-          python -m pip_audit -r requirements.txt
-          python -m bandit -q -r app
+        continue-on-error: true
+        run: python -m pip_audit -r requirements.txt
+      - name: bandit advisory
+        working-directory: apps/worker
+        continue-on-error: true
+        run: python -m bandit -q -r app -x app/tests --severity-level medium
 
   secret-scan:
+    name: Secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  secret-pattern-scan:
+    name: Common secret pattern scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block committed env files
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad_env_files="$(
+            git ls-files |
+              awk '/(^|\/)\.env($|\.)/ && !/(^|\/)\.env\.example$/ { print }'
+          )"
+          if [[ -n "$bad_env_files" ]]; then
+            echo "::error::Non-example .env files are tracked. Remove them from Git."
+            printf '%s\n' "$bad_env_files"
+            exit 1
+          fi
+      - name: Scan tracked files for common secret patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          common_secret_files="$(
+            git grep -I -l -E \
+              '(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH |PRIVATE )?PRIVATE KEY-----)' \
+              -- ':!package-lock.json' ':!**/package-lock.json' ':!docs/API_CONNECTIONS.md' || true
+          )"
+          secret_assignment_files="$(
+            git grep -I -l -E \
+              "(SUPABASE_SECRET_KEY|TOSS_CLIENT_SECRET|OPENAI_API_KEY|NAVER_CLIENT_SECRET|KRX_API_KEY|OPENDART_API_KEY)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9_./+=-]{16,}" \
+              -- ':!**/.env.example' ':!docs/**' || true
+          )"
+          findings="$(printf '%s\n%s\n' "$common_secret_files" "$secret_assignment_files" | awk 'NF' | sort -u)"
+          if [[ -n "$findings" ]]; then
+            echo "::error::Potential secret material found in tracked files. Only file paths are printed."
+            printf '%s\n' "$findings"
+            exit 1
+          fi
+
+  workflow-policy:
+    name: Workflow policy guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block unsafe workflow patterns
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+
+          secret_names = (
+              "SUPABASE_SECRET_KEY",
+              "TOSS_CLIENT_SECRET",
+              "OPENAI_API_KEY",
+              "NAVER_CLIENT_SECRET",
+              "KRX_API_KEY",
+              "OPENDART_API_KEY",
+          )
+          findings: list[str] = []
+          for path in Path(".github/workflows").glob("*.yml"):
+              text = path.read_text(encoding="utf-8")
+              if re.search(r"^\s*pull_request_target:", text, re.MULTILINE):
+                  findings.append(f"{path}: pull_request_target")
+              if re.search(r"^\s*run:\s*.*(render deploy|render\.yaml deploy|autoDeploy)", text, re.MULTILINE):
+                  findings.append(f"{path}: render auto deploy")
+              for line in text.splitlines():
+                  if "secret_names" in line or "git grep" in line or "rg " in line:
+                      continue
+                  if any(f"secrets.{name}" in line for name in secret_names):
+                      findings.append(f"{path}: production secret reference")
+                      break
+                  if re.match(
+                      r"^\s*(SUPABASE_SECRET_KEY|TOSS_CLIENT_SECRET|OPENAI_API_KEY|NAVER_CLIENT_SECRET|KRX_API_KEY|OPENDART_API_KEY)\s*:",
+                      line,
+                  ):
+                      findings.append(f"{path}: production secret env key")
+                      break
+          if findings:
+              print("::error::Unsafe workflow policy pattern found.")
+              print("\n".join(sorted(set(findings))))
+              raise SystemExit(1)

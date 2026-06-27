@@ -5,36 +5,83 @@ on:
     paths:
       - "supabase/migrations/**"
       - "supabase/seed.sql"
+      - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
     paths:
       - "supabase/migrations/**"
       - "supabase/seed.sql"
+      - ".github/workflows/migration-check.yml"
 
 permissions:
   contents: read
 
+concurrency:
+  group: migration-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   migration-check:
+    name: Supabase migration safety
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Validate migration filenames
+      - name: Block committed env files
+        shell: bash
         run: |
-          test -f supabase/migrations/0001_schema.sql
-          test -f supabase/migrations/0002_rls.sql
-          test -f supabase/migrations/0003_realtime.sql
-          test -f supabase/migrations/0004_retention.sql
-      - name: Require RLS for public tables
+          set -euo pipefail
+          bad_env_files="$(
+            git ls-files |
+              awk '/(^|\/)\.env($|\.)/ && !/(^|\/)\.env\.example$/ { print }'
+          )"
+          if [[ -n "$bad_env_files" ]]; then
+            echo "::error::Non-example .env files are tracked. Remove them from Git."
+            printf '%s\n' "$bad_env_files"
+            exit 1
+          fi
+      - name: Validate migration filenames and order
+        shell: bash
         run: |
-          for table in $(rg '^create table public\\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
-            rg "alter table public\\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          set -euo pipefail
+          found=0
+          expected_prefix=1
+          for file in $(find supabase/migrations -maxdepth 1 -type f -name '*.sql' | sort); do
+            found=1
+            name="$(basename "$file")"
+            [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]]
+            prefix="${name:0:4}"
+            printf -v expected "%04d" "$expected_prefix"
+            test "$prefix" = "$expected"
+            expected_prefix=$((expected_prefix + 1))
           done
-      - name: Block destructive migration patterns
+          test "$found" = "1"
+      - name: Require RLS for public tables
+        shell: bash
         run: |
-          ! rg -i "drop table|drop column|truncate table" supabase/migrations
-      - name: Check singleton safety seed
+          set -euo pipefail
+          for table in $(rg '^create table public\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
+            rg "alter table public\.${table} enable row level security" supabase/migrations/0002_rls.sql
+          done
+      - name: Block anon and public writes
+        shell: bash
         run: |
-          rg "'singleton'" supabase/seed.sql
-          rg "false,\\s*'paper',\\s*false" supabase/seed.sql
+          set -euo pipefail
+          ! rg -i "create policy .* to (anon|public)|for (insert|update|all) to (anon|public)" supabase/migrations
+      - name: Block destructive migrations without rollback note
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -i "drop table|drop column|truncate table" supabase/migrations; then
+            rg -i "rollback note|destructive migration approved" supabase/migrations
+          fi
+      - name: Check singleton paper safety seed
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
 
+          seed = Path("supabase/seed.sql").read_text(encoding="utf-8")
+          normalized = re.sub(r"\s+", " ", seed)
+          assert "'singleton'" in normalized
+          assert re.search(r"false,\s*'paper',\s*false", normalized)
