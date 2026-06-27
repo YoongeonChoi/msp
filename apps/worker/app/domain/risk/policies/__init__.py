@@ -14,6 +14,8 @@ from .mode_policy import ModePolicy
 from .news_critical_policy import NewsCriticalPolicy
 from .provider_health_policy import ProviderHealthPolicy
 from .quote_freshness_policy import QuoteFreshnessPolicy
+from .settings_validity_policy import SettingsValidityPolicy
+from .strategy_version_policy import StrategyVersionPolicy
 from .volatility_policy import VolatilityPolicy
 
 __all__ = [
@@ -33,6 +35,7 @@ __all__ = [
     "NewsCriticalPolicy",
     "ProviderHealthPolicy",
     "QuoteFreshnessPolicy",
+    "SettingsValidityPolicy",
+    "StrategyVersionPolicy",
     "VolatilityPolicy",
 ]
-

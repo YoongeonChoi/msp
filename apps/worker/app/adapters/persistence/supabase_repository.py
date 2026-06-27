@@ -1,20 +1,28 @@
 from __future__ import annotations
 
-from uuid import UUID
+from collections.abc import Mapping
+from urllib.parse import quote
 
 import httpx
 
-from app.adapters.persistence.models import decision_to_row, order_to_row
+from app.adapters.persistence.models import ai_candidate_to_row, decision_to_row, order_to_row
+from app.adapters.persistence.supabase_row_parsing import strategy_version_from_row
 from app.config import Settings
+from app.domain.common.json import JsonObject, json_object
 from app.domain.risk.entities import RiskResult
+from app.domain.strategy.entities import StrategyVersion
+from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
 from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order
+
+PAPER_STRATEGY_VERSION = "strategy_v1_weighted_factor"
 
 
 class SupabaseRepository:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, forced_settings: BotSettings | None = None) -> None:
         if not settings.supabase_url or not settings.supabase_secret_key:
             raise ValueError("Supabase repository requires SUPABASE_URL and SUPABASE_SECRET_KEY")
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1"
+        self.forced_settings = forced_settings
         self.headers = {
             "apikey": settings.supabase_secret_key.get_secret_value(),
             "authorization": "Bearer " + settings.supabase_secret_key.get_secret_value(),
@@ -23,11 +31,13 @@ class SupabaseRepository:
         }
         self.client = httpx.AsyncClient(timeout=10.0, headers=self.headers)
 
-    async def _insert(self, table: str, row: dict[str, object]) -> None:
+    async def _insert(self, table: str, row: Mapping[str, object]) -> None:
         response = await self.client.post(f"{self.base_url}/{table}", json=row)
         response.raise_for_status()
 
     async def load_bot_settings(self) -> BotSettings:
+        if self.forced_settings is not None:
+            return self.forced_settings
         response = await self.client.get(f"{self.base_url}/bot_settings?select=*&id=eq.singleton")
         response.raise_for_status()
         rows = response.json()
@@ -51,15 +61,25 @@ class SupabaseRepository:
         response.raise_for_status()
         return [str(row["symbol"]) for row in response.json()]
 
-    async def load_active_strategy_version_id(self) -> UUID:
-        response = await self.client.get(
-            f"{self.base_url}/strategy_versions?select=id&status=eq.active&limit=1"
+    async def load_active_strategy_version(self) -> StrategyVersion | None:
+        rows = await self._select_strategy_versions(
+            "version=eq.strategy_v1_weighted_factor&status=in.(paper,active)&order=created_at.desc&limit=1"
         )
+        if not rows:
+            rows = await self._select_strategy_versions(
+                "status=in.(paper,active)&order=created_at.desc&limit=1"
+            )
+        if not rows:
+            return None
+        return strategy_version_from_row(rows[0])
+
+    async def _select_strategy_versions(self, query: str) -> list[JsonObject]:
+        response = await self.client.get(f"{self.base_url}/strategy_versions?select=*&{query}")
         response.raise_for_status()
         rows = response.json()
-        if not rows:
-            raise ValueError("No active strategy version")
-        return UUID(str(rows[0]["id"]))
+        if not isinstance(rows, list):
+            return []
+        return [json_object(row) for row in rows]
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None:
         await self._insert("decision_snapshots", decision_to_row(snapshot))
@@ -94,3 +114,121 @@ class SupabaseRepository:
         )
         response.raise_for_status()
         return bool(response.json())
+
+    async def load_monthly_research_rows(self, period: MonthPeriod) -> MonthlyResearchRows:
+        strategy = await self.load_active_strategy_version()
+        start_time = quote(period.start_datetime.isoformat(), safe="")
+        end_time = quote(period.end_datetime.isoformat(), safe="")
+        start_date = period.start_date.isoformat()
+        end_date = period.end_date.isoformat()
+        decisions = await self._select_rows(
+            "decision_snapshots",
+            f"select=*&created_at=gte.{start_time}&created_at=lt.{end_time}&order=created_at.asc",
+        )
+        outcomes = await self._select_rows(
+            "outcomes",
+            f"select=*&created_at=gte.{start_time}&created_at=lt.{end_time}&order=created_at.asc",
+        )
+        orders = await self._select_rows(
+            "orders",
+            f"select=*&created_at=gte.{start_time}&created_at=lt.{end_time}&order=created_at.asc",
+        )
+        news_events = await self._select_rows(
+            "news_events",
+            f"select=symbol,title,source,published_at,sentiment,event_type,risk_level,"
+            f"summary_short,trading_relevance,confidence,created_at"
+            f"&created_at=gte.{start_time}&created_at=lt.{end_time}&order=created_at.asc",
+        )
+        features_daily = await self._select_rows(
+            "features_daily",
+            f"select=*&trade_date=gte.{start_date}&trade_date=lt.{end_date}&order=trade_date.asc",
+        )
+        api_health = await self._select_rows(
+            "api_health",
+            f"select=provider,healthy,status,latency_ms,checked_at,message,error_code"
+            f"&checked_at=gte.{start_time}&checked_at=lt.{end_time}&order=checked_at.asc",
+        )
+        backtest_runs = await self._select_optional_rows(
+            "backtest_runs",
+            "select=strategy,strategy_version,period_start,period_end,total_return,cagr,"
+            "max_drawdown,win_rate,turnover,blocked_reason_counts,assumptions,created_at"
+            "&order=created_at.desc&limit=20",
+        )
+        return MonthlyResearchRows(
+            base_strategy_version_id=strategy.id if strategy is not None else None,
+            base_strategy_version=(
+                strategy.version if strategy is not None else PAPER_STRATEGY_VERSION
+            ),
+            decisions=decisions,
+            outcomes=outcomes,
+            orders=orders,
+            news_events=news_events,
+            features_daily=features_daily,
+            api_health=api_health,
+            backtest_runs=backtest_runs,
+        )
+
+    async def persist_ai_upgrade_candidate(self, candidate: AIUpgradeCandidate) -> None:
+        await self._insert("ai_upgrade_candidates", ai_candidate_to_row(candidate))
+
+    async def _select_rows(self, table: str, query: str) -> list[JsonObject]:
+        response = await self.client.get(f"{self.base_url}/{table}?{query}")
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            return []
+        return [json_object(row) for row in rows]
+
+    async def _select_optional_rows(self, table: str, query: str) -> list[JsonObject]:
+        try:
+            return await self._select_rows(table, query)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {400, 404}:
+                return []
+            raise
+
+    async def upsert_watchlist_demo(self) -> None:
+        await self._upsert(
+            "watchlist",
+            {
+                "symbol": "005930",
+                "market": "KR",
+                "name": "삼성전자",
+                "sector": "반도체",
+                "enabled": True,
+                "notes": "paper trading demo seed",
+            },
+            "symbol,market",
+        )
+
+    async def upsert_strategy_v1(self) -> None:
+        await self._upsert(
+            "strategy_versions",
+            {
+                "version": PAPER_STRATEGY_VERSION,
+                "version_name": PAPER_STRATEGY_VERSION,
+                "status": "paper",
+                "strategy_type": "WeightedFactorStrategyV1",
+                "weights": {
+                    "technical": 0.35,
+                    "fundamental": 0.25,
+                    "market_sector": 0.15,
+                    "news_event": 0.15,
+                    "portfolio": 0.10,
+                },
+                "params": {"buy_threshold": 0.68, "sell_threshold": 0.25},
+            },
+            "version",
+        )
+
+    async def _upsert(self, table: str, row: Mapping[str, object], on_conflict: str) -> None:
+        headers = self.headers | {"prefer": "resolution=merge-duplicates,return=minimal"}
+        response = await self.client.post(
+            f"{self.base_url}/{table}?on_conflict={on_conflict}",
+            json=row,
+            headers=headers,
+        )
+        response.raise_for_status()
+
+    async def aclose(self) -> None:
+        await self.client.aclose()

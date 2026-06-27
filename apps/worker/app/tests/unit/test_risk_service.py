@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from uuid import uuid4
 
 from app.application.services.risk_service import RiskService
 from app.domain.common.time import now_utc
@@ -39,6 +40,7 @@ def _risk_input(settings: BotSettings | None = None) -> RiskInput:
         volatility_ok=True,
         cooldown_active=False,
         duplicate_order=False,
+        strategy_version_id=uuid4(),
     )
 
 
@@ -79,3 +81,109 @@ def test_critical_news_blocks_new_buy() -> None:
 
     assert result.allowed is False
     assert "critical_negative_news_risk" in result.reasons
+
+
+def test_critical_news_blocks_paper_buy() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), critical_news_risk=True)
+    )
+
+    assert result.allowed is False
+    assert "critical_negative_news_risk" in result.reasons
+
+
+def test_missing_quote_blocks_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(replace(_risk_input(settings), quote=None))
+
+    assert result.allowed is False
+    assert "missing_quote" in result.reasons
+
+
+def test_provider_health_bad_blocks_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), provider_health={"supabase": True, "toss": False})
+    )
+
+    assert result.allowed is False
+    assert "critical_provider_unhealthy:toss" in result.reasons
+
+
+def test_position_limits_block_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), existing_position_pct=settings.max_position_pct)
+    )
+
+    assert result.allowed is False
+    assert "max_position_pct_exceeded" in result.reasons
+
+
+def test_sector_limits_block_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), sector_position_pct=settings.max_sector_pct)
+    )
+
+    assert result.allowed is False
+    assert "max_sector_pct_exceeded" in result.reasons
+
+
+def test_daily_order_count_blocks_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    base_input = _risk_input(settings)
+    assert base_input.account_state is not None
+    account = replace(base_input.account_state, daily_order_count=settings.max_daily_order_count)
+
+    result = RiskService().evaluate_paper_order(replace(base_input, account_state=account))
+
+    assert result.allowed is False
+    assert "max_daily_order_count_exceeded" in result.reasons
+
+
+def test_daily_loss_blocks_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    base_input = _risk_input(settings)
+    assert base_input.account_state is not None
+    account = replace(base_input.account_state, daily_loss_pct=settings.max_daily_loss_pct)
+
+    result = RiskService().evaluate_paper_order(replace(base_input, account_state=account))
+
+    assert result.allowed is False
+    assert "max_daily_loss_pct_exceeded" in result.reasons
+
+
+def test_max_order_amount_blocks_paper_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    base_input = _risk_input(settings)
+    signal = replace(base_input.signal, order_amount_krw=settings.max_order_amount_krw + 1)
+
+    result = RiskService().evaluate_paper_order(replace(base_input, signal=signal))
+
+    assert result.allowed is False
+    assert "max_order_amount_krw_exceeded" in result.reasons
+
+
+def test_missing_strategy_version_blocks_order() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), strategy_version_id=None)
+    )
+
+    assert result.allowed is False
+    assert "missing_strategy_version" in result.reasons
+
+
+def test_invalid_settings_block_order() -> None:
+    settings = BotSettings(
+        enabled=True,
+        mode="paper",
+        live_order_allowed=False,
+        max_order_amount_krw=100_000_001,
+    )
+    result = RiskService().evaluate_paper_order(_risk_input(settings))
+
+    assert result.allowed is False
+    assert "invalid_max_order_amount_krw" in result.reasons

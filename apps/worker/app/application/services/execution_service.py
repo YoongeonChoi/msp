@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, assert_never
 from uuid import uuid4
 
 from app.application.ports.broker_port import BrokerOrderRequest, BrokerPort
@@ -27,34 +27,64 @@ class ExecutionService:
     async def create_paper_order(
         self,
         decision: DecisionSnapshot,
-        reason: str | None = None,
+        risk_result: RiskResult,
+        idempotency_key: str,
     ) -> Order | None:
-        if decision.signal.action == "buy":
-            action: Literal["buy", "sell"] = "buy"
-        elif decision.signal.action == "sell":
-            action = "sell"
-        else:
-            return None
-        key = build_idempotency_key(
-            mode="paper",
-            decision_id=str(decision.id),
-            symbol=decision.signal.symbol,
-            action=action,
-            amount_krw=decision.signal.order_amount_krw,
-        )
+        match decision.signal.action:
+            case "buy":
+                action: Literal["buy", "sell"] = "buy"
+            case "sell":
+                action = "sell"
+            case "hold":
+                return None
+            case unreachable:
+                assert_never(unreachable)
+        key = idempotency_key
+        reason = None if risk_result.allowed else risk_result.safe_message
+        status: Literal["paper", "blocked"] = "paper" if risk_result.allowed else "blocked"
+        if await self.repository.idempotency_key_exists(key):
+            key = build_idempotency_key(
+                mode="paper_blocked",
+                decision_id=str(decision.id),
+                symbol=decision.signal.symbol,
+                action=action,
+                amount_krw=decision.signal.order_amount_krw,
+            )
+            reason = reason or "duplicate_idempotency_key"
+            status = "blocked"
+        if not decision.signal.reason_json:
+            reason = "missing_reason_json"
+            status = "blocked"
+        if not decision.feature_snapshot:
+            reason = "missing_feature_snapshot"
+            status = "blocked"
+        if not decision.risk_snapshot:
+            reason = "missing_risk_snapshot"
+            status = "blocked"
         order = Order(
             id=uuid4(),
             decision_id=decision.id,
             symbol=decision.signal.symbol,
             action=action,
             mode="paper",
-            status="paper",
+            status=status,
             amount_krw=decision.signal.order_amount_krw,
             idempotency_key=key,
             reason=reason,
             created_at=decision.created_at,
         )
-        await self.repository.persist_order(order)
+        await self.repository.persist_order(order, risk_result)
+        if order.status == "blocked":
+            await self.repository.record_engine_event(
+                "warning",
+                "paper_execution",
+                "paper_order_blocked",
+                {
+                    "symbol": order.symbol,
+                    "reason": order.reason or "unknown",
+                    "risk_reasons": risk_result.reasons,
+                },
+            )
         return order
 
     async def propose_live_order(
@@ -62,12 +92,15 @@ class ExecutionService:
         decision: DecisionSnapshot,
         risk_input: RiskInput,
     ) -> tuple[Order, RiskResult]:
-        if decision.signal.action == "buy":
-            action: Literal["buy", "sell"] = "buy"
-        elif decision.signal.action == "sell":
-            action = "sell"
-        else:
-            raise KnownFailClosedError("execution", "live_order_requires_buy_or_sell_decision")
+        match decision.signal.action:
+            case "buy":
+                action: Literal["buy", "sell"] = "buy"
+            case "sell":
+                action = "sell"
+            case "hold":
+                raise KnownFailClosedError("execution", "live_order_requires_buy_or_sell_decision")
+            case unreachable:
+                assert_never(unreachable)
         final_risk = self.risk_service.evaluate_live_order(risk_input)
         key = build_idempotency_key(
             mode="live",

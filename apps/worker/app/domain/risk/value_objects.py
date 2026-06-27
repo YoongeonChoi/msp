@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID
 
 from app.domain.trading.entities import AccountState, BotSettings, Quote, Signal
 
@@ -23,4 +24,5 @@ class RiskInput:
     volatility_ok: bool | None
     cooldown_active: bool
     duplicate_order: bool
+    strategy_version_id: UUID | None
     shutdown_requested: bool = False

@@ -18,6 +18,8 @@ from app.domain.risk.policies import (
     NewsCriticalPolicy,
     ProviderHealthPolicy,
     QuoteFreshnessPolicy,
+    SettingsValidityPolicy,
+    StrategyVersionPolicy,
     VolatilityPolicy,
 )
 from app.domain.risk.policies.base import RiskPolicy
@@ -25,9 +27,15 @@ from app.domain.risk.value_objects import RiskInput
 
 
 class RiskService:
-    def __init__(self, policies: list[RiskPolicy] | None = None) -> None:
-        self.policies = policies or [
+    def __init__(
+        self,
+        live_policies: list[RiskPolicy] | None = None,
+        paper_policies: list[RiskPolicy] | None = None,
+    ) -> None:
+        self.live_policies = live_policies or [
             BotEnabledPolicy(),
+            SettingsValidityPolicy(),
+            StrategyVersionPolicy(),
             ModePolicy(),
             LivePermissionPolicy(),
             MarketOpenPolicy(),
@@ -45,9 +53,32 @@ class RiskService:
             VolatilityPolicy(),
             CooldownPolicy(),
         ]
+        self.paper_policies = paper_policies or [
+            BotEnabledPolicy(),
+            SettingsValidityPolicy(),
+            StrategyVersionPolicy(),
+            MarketOpenPolicy(),
+            QuoteFreshnessPolicy(),
+            AccountSyncPolicy(),
+            ProviderHealthPolicy(),
+            MaxPositionPolicy(),
+            MaxSectorPolicy(),
+            MaxDailyLossPolicy(),
+            MaxDailyOrderCountPolicy(),
+            MaxOrderAmountPolicy(),
+            DuplicateOrderPolicy(),
+            NewsCriticalPolicy(),
+            LiquidityPolicy(),
+            VolatilityPolicy(),
+            CooldownPolicy(),
+        ]
 
     def evaluate_live_order(self, risk_input: RiskInput) -> RiskResult:
-        policy_results = [policy.evaluate(risk_input) for policy in self.policies]
+        policy_results = [policy.evaluate(risk_input) for policy in self.live_policies]
+        return self._aggregate(policy_results)
+
+    def evaluate_paper_order(self, risk_input: RiskInput) -> RiskResult:
+        policy_results = [policy.evaluate(risk_input) for policy in self.paper_policies]
         return self._aggregate(policy_results)
 
     def _aggregate(self, policy_results: list[PolicyResult]) -> RiskResult:
@@ -64,4 +95,3 @@ class RiskService:
             policy_results=policy_results,
             safe_message=safe_message,
         )
-

@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     naver_client_id: SecretStr | None = Field(default=None, alias="NAVER_CLIENT_ID")
     naver_client_secret: SecretStr | None = Field(default=None, alias="NAVER_CLIENT_SECRET")
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    paper_health_db_warning_bytes: int = Field(
+        default=450_000_000, alias="PAPER_HEALTH_DB_WARNING_BYTES"
+    )
+    outcome_tracking_decision_limit: int = Field(
+        default=500, alias="OUTCOME_TRACKING_DECISION_LIMIT"
+    )
+    outcome_tracking_price_limit: int = Field(default=5000, alias="OUTCOME_TRACKING_PRICE_LIMIT")
 
     def use_supabase_repository(self) -> bool:
         return bool(self.supabase_url and self.supabase_secret_key and not self.mock_providers)
@@ -31,4 +39,3 @@ class Settings(BaseSettings):
 
 def load_settings() -> Settings:
     return Settings()
-

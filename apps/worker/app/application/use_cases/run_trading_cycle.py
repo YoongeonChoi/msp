@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import assert_never
 from uuid import uuid4
 
 from app.application.ports.market_data_port import MarketDataPort
@@ -11,10 +13,10 @@ from app.application.services.risk_service import RiskService
 from app.application.services.signal_service import WeightedFactorStrategyV1
 from app.domain.common.time import now_utc
 from app.domain.risk.value_objects import RiskInput
-from app.domain.strategy.entities import StrategyContext
-from app.domain.trading.entities import AccountState, DecisionSnapshot
-from app.domain.trading.policies import validate_settings
-from app.domain.trading.value_objects import StrategyWeights
+from app.domain.strategy.entities import FeatureVector, StrategyContext
+from app.domain.trading.entities import AccountState, DecisionSnapshot, Signal
+from app.domain.trading.policies import settings_validation_reasons
+from app.infrastructure.idempotency import build_idempotency_key
 
 
 class RunTradingCycle:
@@ -40,10 +42,13 @@ class RunTradingCycle:
         now = now_utc()
         await self.repository.record_heartbeat("ok", {"cycle_id": str(cycle_id)})
         settings = await self.repository.load_bot_settings()
-        validate_settings(settings)
         if not settings.enabled:
+            await self.health_service.check()
+            return
+        settings_errors = settings_validation_reasons(settings)
+        if settings_errors:
             await self.repository.record_engine_event(
-                "info", "trading_loop", "bot_disabled_no_orders_created", {}
+                "warning", "settings", "invalid_settings", {"reasons": settings_errors}
             )
             return
         provider_health = await self.health_service.check()
@@ -63,7 +68,12 @@ class RunTradingCycle:
             return
         symbols = await self.repository.load_enabled_watchlist()
         quotes = await self.market_data.get_quotes(symbols)
-        strategy_id = await self.repository.load_active_strategy_version_id()
+        strategy_version = await self.repository.load_active_strategy_version()
+        if strategy_version is None:
+            await self.repository.record_engine_event(
+                "warning", "strategy", "missing_strategy_version", {}
+            )
+            return
         account = AccountState(
             synced=True,
             cash_krw=10_000_000,
@@ -83,11 +93,20 @@ class RunTradingCycle:
             signal = self.strategy.score(
                 features,
                 StrategyContext(
-                    strategy_version_id=strategy_id,
-                    weights=StrategyWeights(),
+                    strategy_version_id=strategy_version.id,
+                    weights=strategy_version.weights,
+                    buy_threshold=strategy_version.buy_threshold,
+                    sell_threshold=strategy_version.sell_threshold,
                     order_amount_krw=settings.max_order_amount_krw,
                     sector="technology",
                 ),
+            )
+            paper_idempotency_key = paper_signal_idempotency_key(
+                signal, now, strategy_version.version
+            )
+            duplicate_order = (
+                paper_idempotency_key is not None
+                and await self.repository.idempotency_key_exists(paper_idempotency_key)
             )
             risk_input = RiskInput(
                 settings=settings,
@@ -103,21 +122,69 @@ class RunTradingCycle:
                 liquidity_ok=True,
                 volatility_ok=True,
                 cooldown_active=False,
-                duplicate_order=False,
+                duplicate_order=duplicate_order,
+                strategy_version_id=strategy_version.id,
             )
-            risk_result = self.risk_service.evaluate_live_order(risk_input)
+            match settings.mode:
+                case "paper":
+                    risk_result = self.risk_service.evaluate_paper_order(risk_input)
+                case "live":
+                    risk_result = self.risk_service.evaluate_live_order(risk_input)
+                case unreachable:
+                    assert_never(unreachable)
             snapshot = DecisionSnapshot.create(
                 cycle_id=cycle_id,
                 signal=signal,
-                strategy_version_id=strategy_id,
+                strategy_version_id=strategy_version.id,
                 created_at=now,
-                feature_snapshot=features.raw,
+                feature_snapshot=feature_snapshot_from_signal(features, signal),
                 risk_snapshot=risk_result.to_dict(),
             )
             await self.repository.persist_decision_snapshot(snapshot)
-            if signal.action not in {"buy", "sell"}:
+            if paper_idempotency_key is None:
                 continue
-            if settings.mode == "paper":
-                await self.execution_service.create_paper_order(snapshot)
-            else:
-                await self.execution_service.propose_live_order(snapshot, risk_input)
+            match settings.mode:
+                case "paper":
+                    await self.execution_service.create_paper_order(
+                        snapshot, risk_result, paper_idempotency_key
+                    )
+                case "live":
+                    await self.execution_service.propose_live_order(snapshot, risk_input)
+                case unreachable:
+                    assert_never(unreachable)
+
+
+def paper_signal_idempotency_key(
+    signal: Signal,
+    created_at: datetime,
+    strategy_version: str,
+) -> str | None:
+    match signal.action:
+        case "hold":
+            return None
+        case "buy" | "sell":
+            cooldown_bucket = created_at.strftime("%Y%m%d%H")
+            return build_idempotency_key(
+                mode="paper",
+                decision_id=f"{cooldown_bucket}:{strategy_version}",
+                symbol=signal.symbol,
+                action=signal.action,
+                amount_krw=signal.order_amount_krw,
+            )
+        case unreachable:
+            assert_never(unreachable)
+
+
+def feature_snapshot_from_signal(
+    features: FeatureVector,
+    signal: Signal,
+) -> dict[str, object]:
+    return {
+        "technical_score": features.technical_score,
+        "fundamental_score": features.fundamental_score,
+        "market_sector_score": features.market_sector_score,
+        "news_event_score": features.news_event_score,
+        "portfolio_score": features.portfolio_score,
+        "final_score": signal.final_score,
+        "raw": features.raw,
+    }

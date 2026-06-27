@@ -27,3 +27,13 @@ class StrategyContext:
     order_amount_krw: int = 100_000
     sector: str = "unknown"
 
+
+@dataclass(frozen=True, slots=True)
+class StrategyVersion:
+    id: UUID
+    version: str
+    status: str
+    strategy_type: str
+    weights: StrategyWeights
+    buy_threshold: float
+    sell_threshold: float
