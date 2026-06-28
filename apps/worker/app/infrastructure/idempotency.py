@@ -11,5 +11,4 @@ def build_idempotency_key(
     amount_krw: int,
 ) -> str:
     raw = "|".join([mode, decision_id, symbol, action, str(amount_krw)])
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

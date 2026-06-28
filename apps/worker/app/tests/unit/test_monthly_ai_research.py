@@ -4,16 +4,23 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import httpx
 import pytest
 
+from app.adapters.ai.openai_client import (
+    OPENAI_DEFAULT_STRUCTURED_OUTPUT_MODEL,
+    OpenAIClient,
+    is_structured_output_model_verified,
+)
 from app.adapters.ai.openai_schemas import (
     MonthlyUpgradeCandidateSchema,
+    monthly_candidate_response_format_schema,
     parse_monthly_candidate_json,
 )
 from app.adapters.persistence.sql_repository import InMemoryRepository
 from app.application.services.monthly_dataset_builder import MonthlyResearchDatasetBuilder
 from app.application.services.monthly_research_service import MonthlyResearchService
-from app.domain.common.errors import ProviderSchemaError
+from app.domain.common.errors import ProviderSchemaError, ProviderUnavailableError
 from app.domain.common.json import JsonObject
 from app.domain.news_intel.entities import NewsClassification
 from app.domain.strategy.research import (
@@ -197,7 +204,12 @@ def test_monthly_candidate_schema_accepts_required_shape() -> None:
                 "news_event": 0.2,
                 "portfolio": 0.1,
             },
-            "candidate_params": {"buy_threshold": 0.7},
+            "candidate_params": {
+                "buy_threshold": 0.7,
+                "sell_threshold": 0.25,
+                "max_position_pct": 0.1,
+                "news_risk_penalty": 0.05,
+            },
             "rationale": "뉴스 위험을 조금 더 보수적으로 반영합니다.",
             "expected_improvement": "drawdown 완화 후보",
             "risk_notes": "과최적화 주의",
@@ -210,9 +222,60 @@ def test_monthly_candidate_schema_accepts_required_shape() -> None:
     assert candidate.candidate_weights.news_event == 0.2
 
 
+def test_openai_monthly_candidate_schema_is_strict_structured_output_shape() -> None:
+    schema = monthly_candidate_response_format_schema()
+
+    assert schema["additionalProperties"] is False
+    required = schema["required"]
+    assert isinstance(required, list)
+    assert "approval_required" in required
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    params = properties["candidate_params"]
+    assert isinstance(params, dict)
+    assert params["additionalProperties"] is False
+    assert params["required"] == [
+        "buy_threshold",
+        "sell_threshold",
+        "max_position_pct",
+        "news_risk_penalty",
+    ]
+
+
 def test_invalid_openai_response_is_rejected() -> None:
     with pytest.raises(ProviderSchemaError):
         parse_monthly_candidate_json('{"candidate_name":"missing required fields"}')
+
+
+def test_openai_structured_output_model_allowlist_tracks_verified_models() -> None:
+    assert OPENAI_DEFAULT_STRUCTURED_OUTPUT_MODEL == "gpt-5.5"
+    assert is_structured_output_model_verified("gpt-5.5")
+    assert is_structured_output_model_verified("gpt-4o-mini")
+    assert is_structured_output_model_verified("gpt-4o-2024-08-06")
+    assert not is_structured_output_model_verified("text-embedding-3-small")
+
+
+async def test_openai_client_blocks_unverified_structured_output_model_before_request() -> None:
+    requested = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested = True
+        return httpx.Response(500, request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIClient(
+        api_key="test-key",
+        model="text-embedding-3-small",
+        client=http_client,
+    )
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        await client.generate_monthly_candidate({"base_strategy_version": "strategy_v1"})
+
+    assert exc_info.value.safe_message == "openai_structured_output_model_not_verified"
+    assert requested is False
+    await http_client.aclose()
 
 
 async def test_monthly_candidate_is_stored_as_proposed_without_strategy_deployment() -> None:
@@ -265,7 +328,12 @@ class FixedCandidateAI:
                 news_event=0.2,
                 portfolio=0.1,
             ),
-            candidate_params={"buy_threshold": 0.7},
+            candidate_params={
+                "buy_threshold": 0.7,
+                "sell_threshold": 0.25,
+                "max_position_pct": 0.1,
+                "news_risk_penalty": 0.05,
+            },
             rationale="뉴스 위험을 조금 더 보수적으로 반영합니다.",
             expected_improvement="drawdown 완화 후보",
             risk_notes="과최적화 주의",

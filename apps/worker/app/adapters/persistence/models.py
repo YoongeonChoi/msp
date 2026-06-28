@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Literal, cast
+from uuid import UUID
+
 from app.domain.common.json import JsonObject, json_object
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.research import AIUpgradeCandidate
-from app.domain.trading.entities import DecisionSnapshot, Order
+from app.domain.trading.entities import DecisionSnapshot, Order, OrderStatus, TradingMode
 
 
 def decision_to_row(snapshot: DecisionSnapshot) -> JsonObject:
@@ -18,6 +23,7 @@ def decision_to_row(snapshot: DecisionSnapshot) -> JsonObject:
         "feature_snapshot": snapshot.feature_snapshot,
         "risk_snapshot": snapshot.risk_snapshot,
         "created_at": snapshot.created_at.isoformat(),
+        "decided_at": snapshot.created_at.isoformat(),
     }
 
 
@@ -31,10 +37,34 @@ def order_to_row(order: Order, risk_result: RiskResult | None = None) -> JsonObj
         "status": order.status,
         "amount_krw": order.amount_krw,
         "idempotency_key": order.idempotency_key,
+        "provider_order_id": order.provider_order_id,
         "reason": order.reason,
         "risk_result": json_object(risk_result.to_dict()) if risk_result else None,
+        "provider_payload_summary": (
+            json_object(order.provider_payload_summary)
+            if order.provider_payload_summary is not None
+            else None
+        ),
         "created_at": order.created_at.isoformat(),
     }
+
+
+def order_from_row(row: Mapping[str, object]) -> Order:
+    action = _order_action_value(row, "side")
+    return Order(
+        id=UUID(_string_value(row, "id")),
+        decision_id=UUID(_string_value(row, "decision_id")),
+        symbol=_string_value(row, "symbol"),
+        action=action,
+        mode=cast(TradingMode, _string_value(row, "mode", "paper")),
+        status=cast(OrderStatus, _string_value(row, "status", "unknown_requires_manual_check")),
+        amount_krw=_int_value(row, "amount_krw", 0),
+        idempotency_key=_string_value(row, "idempotency_key"),
+        provider_order_id=_optional_string_value(row, "provider_order_id"),
+        reason=_optional_string_value(row, "reason"),
+        provider_payload_summary=_optional_json_object(row, "provider_payload_summary"),
+        created_at=_datetime_value(row, "created_at"),
+    )
 
 
 def ai_candidate_to_row(candidate: AIUpgradeCandidate) -> JsonObject:
@@ -55,3 +85,58 @@ def ai_candidate_to_row(candidate: AIUpgradeCandidate) -> JsonObject:
         "approval_required": True,
         "created_at": candidate.created_at.isoformat(),
     }
+
+
+def _string_value(row: Mapping[str, object], key: str, default: str = "") -> str:
+    value = row.get(key)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _optional_string_value(row: Mapping[str, object], key: str) -> str | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _int_value(row: Mapping[str, object], key: str, default: int) -> int:
+    value = row.get(key)
+    match value:
+        case bool() | None:
+            return default
+        case int() as number:
+            return number
+        case float() as number:
+            return int(number)
+        case str() as text:
+            try:
+                return int(text)
+            except ValueError:
+                return default
+        case _:
+            return default
+
+
+def _datetime_value(row: Mapping[str, object], key: str) -> datetime:
+    value = row.get(key)
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    raise ValueError(f"{key}_datetime_missing")
+
+
+def _optional_json_object(row: Mapping[str, object], key: str) -> dict[str, object] | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    return dict(json_object(value))
+
+
+def _order_action_value(row: Mapping[str, object], key: str) -> Literal["buy", "sell"]:
+    value = _string_value(row, key, "buy")
+    if value not in {"buy", "sell"}:
+        raise ValueError(f"{key}_invalid_order_action")
+    return cast(Literal["buy", "sell"], value)

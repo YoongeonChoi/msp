@@ -40,6 +40,11 @@ python -m app.tools.seed_watchlist_demo
 python -m app.tools.seed_strategy_v1
 python -m app.tools.run_paper_cycle_once
 python -m app.tools.run_backtest --strategy strategy_v1_weighted_factor --start YYYY-MM-DD --end YYYY-MM-DD
+python -m app.tools.reconcile_live_orders_once --limit 50
+python -m app.tools.run_live_execution_safety_drill_once
+python -m app.tools.run_live_recovery_drill_once
+python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
+python -m app.tools.cancel_live_order_once --order-id ORDER_UUID
 ```
 
 `run_paper_cycle_once` forces `enabled=true`, `mode='paper'`, and `live_order_allowed=false` for that one cycle only. It uses mock broker execution and does not print secrets.
@@ -53,7 +58,28 @@ Backtesting:
 
 Live trading:
 
-- Toss live order execution is not implemented in this MVP.
+- Toss live order creation is implemented only as a guarded worker-owned KRX `LIMIT` order path.
+- The scheduled worker cycle never uses simulated paper account data in live mode.
+- Live cycles read Toss cash buying power and holdings through official read-only endpoints.
+- Toss broker-wide or externally placed daily order history remains unverified because
+  `GET /api/v1/orders status=CLOSED` is documented as `400 closed-not-supported`.
+- System-created live order count is verified from local `orders` rows for the current KST trading day
+  before risk evaluation; repository count failure blocks with `daily_order_count_unverified` before
+  any broker call.
+- Live market-open state uses Toss KR `regularMarket` calendar and stops before the documented
+  `singlePriceAuctionStartTime` when present.
+- Worker cycles reconcile existing live `sent`, `partial_filled`, or `unknown_requires_manual_check`
+  orders through Toss order reads before new decisions.
+- A local `unknown_requires_manual_check` order is never auto-cleared by reconciliation. A later provider
+  status observation records `live_order_manual_check_provider_status_observed` and leaves the order in
+  manual recovery until operator review.
+- If any of those live orders remains pending after reconciliation, the cycle records
+  `live_pending_reconciliation_blocks_new_decisions` and stops before new live decisions
+  or broker calls.
+- Manual live cancellation is available only through the worker CLI for one local open live order at a time.
+  The worker confirms the original provider order is `CANCELED` before marking local `canceled`; timeout,
+  unknown provider results, or non-`CANCELED` confirmation require manual review. Modify remains disabled
+  until provider contracts, price/quantity policy, and rollback workflows exist.
 - UI and OpenAI output cannot call broker execution.
 - `live_order_allowed=false` blocks live proposals before any broker call.
 

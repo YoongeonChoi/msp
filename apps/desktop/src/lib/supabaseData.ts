@@ -9,6 +9,7 @@ import {
   mapEngineEvent,
   mapFundamental,
   mapHeartbeat,
+  mapManualCommand,
   mapNewsEvent,
   mapOrder,
   mapOutcome,
@@ -24,6 +25,7 @@ import type {
   DecisionSnapshot,
   EngineEventRow,
   FundamentalRow,
+  ManualCommandRow,
   NewsEventRow,
   OrderRow,
   OutcomeRow,
@@ -88,6 +90,19 @@ export interface StrategyJsonPatch {
 
 export type AiCandidateReviewStatus = "approved_for_paper" | "rejected";
 
+export interface LiveEnableRequestInput {
+  readonly providerContractVersion: string;
+  readonly riskReportId: string;
+  readonly releaseVersion: string;
+  readonly expiresInMinutes: number;
+}
+
+export interface LiveEnableReviewInput {
+  readonly id: string;
+  readonly status: "accepted" | "rejected";
+  readonly rejectionReason?: string;
+}
+
 export function isSupabaseReady(): boolean {
   return hasSupabaseConfig && supabase !== null;
 }
@@ -134,8 +149,8 @@ export async function fetchTodayDecisions(): Promise<DecisionSnapshot[]> {
   const result = await client
     .from("decision_snapshots")
     .select("*")
-    .gte("decided_at", startOfKstTodayIso())
-    .order("decided_at", { ascending: false })
+    .gte("created_at", startOfKstTodayIso())
+    .order("created_at", { ascending: false })
     .limit(500);
   failOnError("decision_snapshots", result.error);
   return (result.data ?? []).map(mapDecision);
@@ -146,7 +161,7 @@ export async function fetchRecentDecisions(limit = 50): Promise<DecisionSnapshot
   const result = await client
     .from("decision_snapshots")
     .select("*")
-    .order("decided_at", { ascending: false })
+    .order("created_at", { ascending: false })
     .limit(limit);
   failOnError("decision_snapshots", result.error);
   return (result.data ?? []).map(mapDecision);
@@ -290,6 +305,66 @@ export async function fetchAiUpgradeCandidates(limit = 50): Promise<AiUpgradeCan
   return (result.data ?? []).map(mapAiUpgradeCandidate);
 }
 
+export async function fetchLiveEnableCommands(limit = 10): Promise<ManualCommandRow[]> {
+  const client = requireClient();
+  const result = await client
+    .from("manual_commands")
+    .select("*")
+    .eq("command_type", "request_live_enable")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  failOnError("manual_commands", result.error);
+  return (result.data ?? []).map(mapManualCommand);
+}
+
+export async function fetchCurrentUserId(): Promise<string | null> {
+  const client = requireClient();
+  const userResult = await client.auth.getUser();
+  if (userResult.error || !userResult.data.user) {
+    return null;
+  }
+  return userResult.data.user.id;
+}
+
+export async function requestLiveEnable(input: LiveEnableRequestInput): Promise<void> {
+  const client = requireClient();
+  const userId = await requireUserId();
+  const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
+  const result = await client.from("manual_commands").insert({
+    command_type: "request_live_enable",
+    payload: {
+      provider_contract_version: input.providerContractVersion,
+      risk_report_id: input.riskReportId,
+      release_version: input.releaseVersion
+    },
+    requested_by: userId,
+    expires_at: expiresAt,
+    status: "pending"
+  });
+  failOnError("manual_commands", result.error);
+}
+
+export async function reviewLiveEnableCommand(input: LiveEnableReviewInput): Promise<void> {
+  const client = requireClient();
+  const userId = await requireUserId();
+  const result = await client
+    .from("manual_commands")
+    .update({
+      status: input.status,
+      reviewed_by: userId,
+      reviewed_at: new Date().toISOString(),
+      rejection_reason: input.status === "rejected" ? input.rejectionReason ?? "rejected" : null
+    })
+    .eq("id", input.id)
+    .eq("command_type", "request_live_enable")
+    .eq("status", "pending")
+    .select("id");
+  failOnError("manual_commands", result.error);
+  if ((result.data ?? []).length !== 1) {
+    throw new CockpitDataError("manual_commands", "검토할 pending Live 승인 요청을 찾지 못했습니다.");
+  }
+}
+
 export async function updateDraftStrategyJson(input: StrategyJsonPatch): Promise<void> {
   const client = requireClient();
   const result = await client
@@ -374,6 +449,15 @@ function failOnError(table: string, error: unknown): void {
     throw new CockpitDataError(table, stringValue(error.message, `${table} query failed`));
   }
   throw new CockpitDataError(table, `${table} query failed`);
+}
+
+async function requireUserId(): Promise<string> {
+  const client = requireClient();
+  const userResult = await client.auth.getUser();
+  if (userResult.error || !userResult.data.user) {
+    throw new CockpitDataError("auth", "Supabase Auth 로그인 세션이 필요합니다.");
+  }
+  return userResult.data.user.id;
 }
 
 function isOptionalTableUnavailable(error: unknown): boolean {

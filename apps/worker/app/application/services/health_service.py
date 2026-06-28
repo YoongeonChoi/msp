@@ -17,11 +17,12 @@ class HealthService:
         fundamentals: FundamentalsPort,
         news: NewsPort,
         ai: AIPort,
+        market_data_provider_name: str = "krx",
     ) -> None:
         self.repository = repository
         self.providers = {
             "toss": broker.provider_health,
-            "krx": market_data.provider_health,
+            market_data_provider_name: market_data.provider_health,
             "opendart": fundamentals.provider_health,
             "naver": news.provider_health,
             "openai": ai.provider_health,
@@ -34,4 +35,3 @@ class HealthService:
             result[provider] = healthy
             await self.repository.record_api_health(provider, healthy, {})
         return result
-

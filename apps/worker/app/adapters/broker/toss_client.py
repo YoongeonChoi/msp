@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from typing import TypeVar
 
 import httpx
@@ -12,15 +14,25 @@ from app.adapters.broker.toss_models import (
     TossAccount,
     TossApiErrorEnvelope,
     TossApiResponse,
+    TossBuyingPowerResponse,
     TossCandlePage,
     TossCandleQuery,
     TossHoldingsOverview,
+    TossKrMarketCalendarResponse,
     TossOrder,
+    TossOrderCreateResult,
     TossOrderListQuery,
+    TossOrderOperationResult,
     TossOrderPage,
     TossPriceResponse,
 )
-from app.application.ports.broker_port import BrokerOrderRequest, BrokerOrderResult
+from app.application.ports.broker_port import (
+    BrokerCancelOrderResult,
+    BrokerOrderReconciliationStatus,
+    BrokerOrderRequest,
+    BrokerOrderResult,
+    BrokerOrderStatusResult,
+)
 from app.config import Settings
 from app.domain.common.errors import (
     ProviderAuthError,
@@ -31,6 +43,7 @@ from app.domain.common.errors import (
     ProviderUnavailableError,
     ProviderUnknownError,
 )
+from app.domain.trading.entities import AccountState
 
 ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
 
@@ -39,6 +52,13 @@ ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
 class TossGetRequest:
     path: str
     params: Mapping[str, str | int | bool] | None = None
+    account_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TossPostRequest:
+    path: str
+    json: Mapping[str, str | int | bool]
     account_seq: int | None = None
 
 
@@ -87,12 +107,55 @@ class TossClient:
         )
         return envelope.result
 
+    async def get_buying_power(
+        self,
+        currency: str = "KRW",
+        account_seq: int | None = None,
+    ) -> TossBuyingPowerResponse:
+        envelope = await self._get_model(
+            TossGetRequest(
+                "/api/v1/buying-power",
+                params={"currency": currency},
+                account_seq=self._resolve_account_seq(account_seq),
+            ),
+            TossApiResponse[TossBuyingPowerResponse],
+        )
+        return envelope.result
+
+    async def get_account_state(self, now: datetime) -> AccountState:
+        buying_power = await self.get_buying_power("KRW")
+        holdings = await self.get_holdings()
+        if buying_power.currency != "KRW":
+            raise ProviderSchemaError("toss", "toss_buying_power_currency_not_krw")
+        cash_krw = _decimal_krw_to_int(buying_power.cash_buying_power)
+        holdings_krw = _decimal_krw_to_int(holdings.market_value.amount_after_cost.krw)
+        return AccountState(
+            synced=True,
+            cash_krw=cash_krw,
+            equity_krw=cash_krw + holdings_krw,
+            daily_loss_pct=_daily_loss_pct(holdings),
+            daily_order_count=0,
+            synced_at=now,
+            daily_order_count_verified=False,
+        )
+
     async def get_prices(self, symbols: Sequence[str]) -> list[TossPriceResponse]:
         if not symbols:
             raise ProviderSchemaError("toss", "toss_prices_symbols_empty")
         envelope = await self._get_model(
             TossGetRequest("/api/v1/prices", params={"symbols": ",".join(symbols)}),
             TossApiResponse[list[TossPriceResponse]],
+        )
+        return envelope.result
+
+    async def get_kr_market_calendar(
+        self,
+        target_date: date | None = None,
+    ) -> TossKrMarketCalendarResponse:
+        params = {"date": target_date.isoformat()} if target_date is not None else None
+        envelope = await self._get_model(
+            TossGetRequest("/api/v1/market-calendar/KR", params=params),
+            TossApiResponse[TossKrMarketCalendarResponse],
         )
         return envelope.result
 
@@ -143,8 +206,94 @@ class TossClient:
         )
         return envelope.result
 
+    async def get_order_status(self, provider_order_id: str) -> BrokerOrderStatusResult:
+        order = await self.get_order(provider_order_id)
+        status = _map_toss_order_status(order.status)
+        reason = (
+            None
+            if status != "unknown_requires_manual_check"
+            else f"toss_order_status_{order.status}"
+        )
+        return BrokerOrderStatusResult(
+            provider_order_id=order.order_id,
+            status=status,
+            reason=reason,
+            raw_summary={
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "side": order.side,
+                "order_type": order.order_type,
+                "status": order.status,
+                "quantity": str(order.quantity),
+                "filled_quantity": str(order.execution.filled_quantity),
+                "average_filled_price": (
+                    str(order.execution.average_filled_price)
+                    if order.execution.average_filled_price is not None
+                    else None
+                ),
+                "filled_amount": (
+                    str(order.execution.filled_amount)
+                    if order.execution.filled_amount is not None
+                    else None
+                ),
+                "ordered_at": order.ordered_at.isoformat(),
+                "canceled_at": order.canceled_at.isoformat() if order.canceled_at else None,
+            },
+        )
+
+    async def cancel_order(self, provider_order_id: str) -> BrokerCancelOrderResult:
+        if not provider_order_id:
+            raise ProviderSchemaError("toss", "toss_cancel_order_id_missing")
+        envelope = await self._post_model(
+            TossPostRequest(
+                f"/api/v1/orders/{provider_order_id}/cancel",
+                json={},
+                account_seq=self._resolve_account_seq(None),
+            ),
+            TossApiResponse[TossOrderOperationResult],
+        )
+        cancel_order_id = envelope.result.order_id
+        return BrokerCancelOrderResult(
+            original_provider_order_id=provider_order_id,
+            cancel_provider_order_id=cancel_order_id,
+            raw_summary={
+                "original_order_id": provider_order_id,
+                "cancel_order_id": cancel_order_id,
+            },
+        )
+
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
-        raise ProviderUnavailableError("toss", "toss_live_order_endpoint_not_implemented")
+        _validate_live_order_request(request)
+        envelope = await self._post_model(
+            TossPostRequest(
+                "/api/v1/orders",
+                json={
+                    "clientOrderId": request.idempotency_key,
+                    "symbol": request.symbol,
+                    "side": "BUY" if request.side == "buy" else "SELL",
+                    "orderType": "LIMIT",
+                    "quantity": str(request.quantity),
+                    "price": str(request.limit_price_krw),
+                    "confirmHighValueOrder": request.amount_krw >= 100_000_000,
+                },
+                account_seq=self._resolve_account_seq(None),
+            ),
+            TossApiResponse[TossOrderCreateResult],
+        )
+        result = envelope.result
+        return BrokerOrderResult(
+            provider_order_id=result.order_id,
+            status="sent",
+            raw_summary={
+                "order_id": result.order_id,
+                "client_order_id": result.client_order_id,
+                "symbol": request.symbol,
+                "side": request.side,
+                "order_type": "LIMIT",
+                "quantity": request.quantity,
+                "limit_price_krw": request.limit_price_krw,
+            },
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -172,6 +321,28 @@ class TossClient:
             raise ProviderUnavailableError("toss", "toss_read_request_failed") from exc
         except ValidationError as exc:
             raise ProviderSchemaError("toss", "toss_read_schema_invalid") from exc
+
+    async def _post_model(
+        self,
+        request: TossPostRequest,
+        model_type: type[ParsedModel],
+    ) -> ParsedModel:
+        try:
+            response = await self.client.post(
+                f"{self.base_url}{request.path}",
+                json=request.json,
+                headers=await self._headers(request.account_seq),
+            )
+            _raise_for_toss_status(response)
+            return model_type.model_validate_json(response.text)
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeoutError("toss", "toss_write_timeout") from exc
+        except httpx.HTTPStatusError as exc:
+            raise _provider_error_from_response(exc.response) from exc
+        except httpx.RequestError as exc:
+            raise ProviderUnavailableError("toss", "toss_write_request_failed") from exc
+        except ValidationError as exc:
+            raise ProviderSchemaError("toss", "toss_write_schema_invalid") from exc
 
     async def _headers(self, account_seq: int | None = None) -> dict[str, str]:
         token = await self.auth.access_token()
@@ -216,3 +387,47 @@ def _safe_error_code(response: httpx.Response) -> str:
     except ValidationError:
         return f"toss_http_{response.status_code}"
     return f"toss_{error_envelope.error.code}"
+
+
+def _map_toss_order_status(status: str) -> BrokerOrderReconciliationStatus:
+    match status:
+        case "PENDING" | "PENDING_CANCEL" | "PENDING_REPLACE":
+            return "sent"
+        case "PARTIAL_FILLED":
+            return "partial_filled"
+        case "FILLED":
+            return "filled"
+        case "CANCELED":
+            return "canceled"
+        case "REJECTED":
+            return "rejected"
+        case _:
+            return "unknown_requires_manual_check"
+
+
+def _decimal_krw_to_int(value: Decimal) -> int:
+    if value < 0 or value != value.to_integral_value():
+        raise ProviderSchemaError("toss", "toss_krw_amount_not_nonnegative_integer")
+    return int(value)
+
+
+def _daily_loss_pct(holdings: TossHoldingsOverview) -> float:
+    daily_amount = holdings.daily_profit_loss.amount.krw
+    daily_rate = holdings.daily_profit_loss.rate
+    if daily_amount >= 0 and daily_rate >= 0:
+        return 0.0
+    return abs(float(daily_rate))
+
+
+def _validate_live_order_request(request: BrokerOrderRequest) -> None:
+    if not request.idempotency_key or len(request.idempotency_key) > 36:
+        raise ProviderSchemaError("toss", "toss_client_order_id_invalid")
+    if not all(
+        character.isalnum() or character in {"-", "_"}
+        for character in request.idempotency_key
+    ):
+        raise ProviderSchemaError("toss", "toss_client_order_id_invalid")
+    if request.quantity <= 0:
+        raise ProviderSchemaError("toss", "toss_order_quantity_invalid")
+    if request.limit_price_krw <= 0:
+        raise ProviderSchemaError("toss", "toss_order_price_invalid")

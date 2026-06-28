@@ -2,6 +2,13 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "./supabaseClient";
 
+type ViteRealtimeEnv = {
+  readonly VITE_SUPABASE_REALTIME_DISABLED?: string;
+};
+
+const env = (import.meta as ImportMeta & { readonly env?: ViteRealtimeEnv }).env ?? {};
+const realtimeDisabled = env.VITE_SUPABASE_REALTIME_DISABLED === "true";
+
 const realtimeTables = [
   "bot_settings",
   "worker_heartbeats",
@@ -16,7 +23,7 @@ export function useRealtimeInvalidation(): void {
 
   useEffect(() => {
     const client = supabase;
-    if (!client) {
+    if (!client || realtimeDisabled) {
       return;
     }
     const channel = client.channel("desktop-paper-cockpit");

@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
+    "test": "tsx tests/index.test.ts",
+    "e2e": "playwright test",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -23,6 +25,10 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@playwright/test": "^1.61.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jsdom": "^28.0.3",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^8.6.0",
@@ -31,8 +37,10 @@
     "autoprefixer": "^10.4.20",
     "eslint": "^9.11.1",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
+    "jsdom": "^29.1.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.2",
     "vite": "^8.1.0"
   }

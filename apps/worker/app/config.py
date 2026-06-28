@@ -24,7 +24,13 @@ class Settings(BaseSettings):
     naver_client_id: SecretStr | None = Field(default=None, alias="NAVER_CLIENT_ID")
     naver_client_secret: SecretStr | None = Field(default=None, alias="NAVER_CLIENT_SECRET")
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
-    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
+    alert_webhook_url: SecretStr | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
+    alert_webhook_timeout_sec: float = Field(default=5.0, alias="ALERT_WEBHOOK_TIMEOUT_SEC")
+    alert_drill_max_latency_ms: int = Field(default=2_000, alias="ALERT_DRILL_MAX_LATENCY_MS")
+    live_system_order_count_scope_accepted: bool = Field(
+        default=False, alias="LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED"
+    )
     paper_health_db_warning_bytes: int = Field(
         default=450_000_000, alias="PAPER_HEALTH_DB_WARNING_BYTES"
     )

@@ -33,6 +33,7 @@ async def _run() -> None:
     risk = RiskService()
     cycle = RunTradingCycle(
         repository=repository,
+        broker=broker,
         market_data=market_data,
         health_service=HealthService(
             repository,

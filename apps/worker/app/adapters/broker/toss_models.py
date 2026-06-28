@@ -55,6 +55,13 @@ class TossAccount(BaseModel):
     account_type: str = Field(alias="accountType")
 
 
+class TossBuyingPowerResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    currency: str
+    cash_buying_power: Decimal = Field(alias="cashBuyingPower")
+
+
 class TossPriceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -151,6 +158,41 @@ class TossHoldingsOverview(BaseModel):
     items: list[TossHoldingItem]
 
 
+class TossRegularMarketSession(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    start_time: datetime = Field(alias="startTime")
+    single_price_auction_start_time: datetime | None = Field(
+        default=None,
+        alias="singlePriceAuctionStartTime",
+    )
+    end_time: datetime = Field(alias="endTime")
+
+
+class TossIntegratedMarketHours(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    regular_market: TossRegularMarketSession | None = Field(
+        default=None,
+        alias="regularMarket",
+    )
+
+
+class TossKrMarketDay(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    date: date
+    integrated: TossIntegratedMarketHours | None = None
+
+
+class TossKrMarketCalendarResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    today: TossKrMarketDay
+    previous_business_day: TossKrMarketDay = Field(alias="previousBusinessDay")
+    next_business_day: TossKrMarketDay = Field(alias="nextBusinessDay")
+
+
 class TossCandle(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -198,6 +240,19 @@ class TossOrder(BaseModel):
     ordered_at: datetime = Field(alias="orderedAt")
     canceled_at: datetime | None = Field(default=None, alias="canceledAt")
     execution: TossOrderExecution
+
+
+class TossOrderCreateResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    order_id: str = Field(alias="orderId")
+    client_order_id: str | None = Field(default=None, alias="clientOrderId")
+
+
+class TossOrderOperationResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    order_id: str = Field(alias="orderId")
 
 
 class TossOrderLifecycleStatus(StrEnum):

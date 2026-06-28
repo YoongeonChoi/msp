@@ -14,19 +14,29 @@ from app.domain.news_intel.entities import NewsClassification
 from app.domain.strategy.research import AIUpgradeCandidate
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+OPENAI_DEFAULT_STRUCTURED_OUTPUT_MODEL = "gpt-5.5"
+_STRUCTURED_OUTPUT_MODEL_PREFIXES = (
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-4o",
+)
 
 
 class OpenAIClient:
-    def __init__(self, api_key: str | None = None, model: str = "gpt-4o-mini") -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = OPENAI_DEFAULT_STRUCTURED_OUTPUT_MODEL,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.api_key = api_key
         self.model = model
-        self.client = httpx.AsyncClient(
-            timeout=30.0,
-            headers={
-                "authorization": f"Bearer {api_key}" if api_key else "",
-                "content-type": "application/json",
-            },
-        )
+        headers = {
+            "authorization": f"Bearer {api_key}" if api_key else "",
+            "content-type": "application/json",
+        }
+        self.headers = headers
+        self.client = client or httpx.AsyncClient(timeout=30.0, headers=headers)
 
     async def provider_health(self) -> bool:
         return bool(self.api_key)
@@ -37,8 +47,11 @@ class OpenAIClient:
     async def generate_monthly_candidate(self, dataset_payload: JsonObject) -> AIUpgradeCandidate:
         if not self.api_key:
             raise ProviderUnavailableError("openai", "openai_api_key_missing")
+        if not is_structured_output_model_verified(self.model):
+            raise ProviderUnavailableError("openai", "openai_structured_output_model_not_verified")
         response = await self.client.post(
             OPENAI_RESPONSES_URL,
+            headers=self.headers,
             json={
                 "model": self.model,
                 "input": [
@@ -94,3 +107,13 @@ def _extract_response_text(payload: JsonObject) -> str:
                 if isinstance(text, str) and text:
                     return text
     raise ProviderSchemaError("openai", "missing_response_output_text")
+
+
+def is_structured_output_model_verified(model: str) -> bool:
+    normalized = model.strip().lower()
+    return any(
+        normalized == prefix
+        or normalized.startswith(f"{prefix}-")
+        or normalized.startswith(f"{prefix}.")
+        for prefix in _STRUCTURED_OUTPUT_MODEL_PREFIXES
+    )

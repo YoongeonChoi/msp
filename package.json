@@ -10,10 +10,11 @@
     "desktop:dev": "npm --workspace apps/desktop run dev",
     "desktop:build": "npm --workspace apps/desktop run build",
     "desktop:typecheck": "npm --workspace apps/desktop run typecheck",
-    "desktop:lint": "npm --workspace apps/desktop run lint"
+    "desktop:lint": "npm --workspace apps/desktop run lint",
+    "desktop:test": "npm --workspace apps/desktop run test",
+    "desktop:e2e": "npm --workspace apps/desktop run e2e"
   },
   "devDependencies": {
     "prettier": "^3.3.3"
   }
 }
-

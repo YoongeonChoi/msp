@@ -1,20 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import assert_never
 from uuid import uuid4
 
+from app.application.ports.alert_port import AlertNotifierPort
+from app.application.ports.broker_port import BrokerPort
 from app.application.ports.market_data_port import MarketDataPort
 from app.application.ports.repository_port import RepositoryPort
 from app.application.services.execution_service import ExecutionService
 from app.application.services.feature_service import FeatureService
 from app.application.services.health_service import HealthService
+from app.application.services.order_reconciliation_service import OrderReconciliationService
 from app.application.services.risk_service import RiskService
 from app.application.services.signal_service import WeightedFactorStrategyV1
-from app.domain.common.time import now_utc
+from app.domain.common.errors import ProviderError
+from app.domain.common.time import KST, now_utc
 from app.domain.risk.value_objects import RiskInput
 from app.domain.strategy.entities import FeatureVector, StrategyContext
-from app.domain.trading.entities import AccountState, DecisionSnapshot, Signal
+from app.domain.trading.entities import AccountState, DecisionSnapshot, Quote, Signal
 from app.domain.trading.policies import settings_validation_reasons
 from app.infrastructure.idempotency import build_idempotency_key
 
@@ -23,24 +28,34 @@ class RunTradingCycle:
     def __init__(
         self,
         repository: RepositoryPort,
+        broker: BrokerPort,
         market_data: MarketDataPort,
         health_service: HealthService,
         execution_service: ExecutionService,
         risk_service: RiskService,
         feature_service: FeatureService,
+        order_reconciliation_service: OrderReconciliationService | None = None,
+        alert_notifier: AlertNotifierPort | None = None,
+        live_system_order_count_scope_accepted: bool = False,
     ) -> None:
         self.repository = repository
+        self.broker = broker
         self.market_data = market_data
         self.health_service = health_service
         self.execution_service = execution_service
         self.risk_service = risk_service
         self.feature_service = feature_service
+        self.order_reconciliation_service = order_reconciliation_service
+        self.alert_notifier = alert_notifier
+        self.live_system_order_count_scope_accepted = live_system_order_count_scope_accepted
         self.strategy = WeightedFactorStrategyV1()
 
     async def execute(self) -> None:
         cycle_id = uuid4()
         now = now_utc()
         await self.repository.record_heartbeat("ok", {"cycle_id": str(cycle_id)})
+        if self.order_reconciliation_service is not None:
+            await self.order_reconciliation_service.reconcile_live_orders()
         settings = await self.repository.load_bot_settings()
         if not settings.enabled:
             await self.health_service.check()
@@ -50,6 +65,8 @@ class RunTradingCycle:
             await self.repository.record_engine_event(
                 "warning", "settings", "invalid_settings", {"reasons": settings_errors}
             )
+            return
+        if settings.mode == "live" and await self._has_pending_live_reconciliation():
             return
         provider_health = await self.health_service.check()
         if provider_health.get("supabase") is not True or provider_health.get("toss") is not True:
@@ -74,14 +91,7 @@ class RunTradingCycle:
                 "warning", "strategy", "missing_strategy_version", {}
             )
             return
-        account = AccountState(
-            synced=True,
-            cash_krw=10_000_000,
-            equity_krw=10_000_000,
-            daily_loss_pct=0.0,
-            daily_order_count=0,
-            synced_at=now,
-        )
+        account = await self._account_state_for_mode(settings.mode, now)
         for symbol in symbols:
             quote = quotes.get(symbol)
             if quote is None:
@@ -89,7 +99,19 @@ class RunTradingCycle:
                     "warning", "market_data", "missing_quote", {"symbol": symbol}
                 )
                 continue
-            features = self.feature_service.build_mock_features(symbol, quote)
+            features = await self._features_for_mode(settings.mode, symbol, quote)
+            if (
+                settings.mode == "live"
+                and features.raw.get("live_trading_ready") is not True
+            ):
+                await self._record_critical_event(
+                    "live_features",
+                    "live_feature_snapshot_not_ready",
+                    {
+                        "symbol": symbol,
+                        "reasons": _feature_unready_reasons(features),
+                    },
+                )
             signal = self.strategy.score(
                 features,
                 StrategyContext(
@@ -153,6 +175,119 @@ class RunTradingCycle:
                 case unreachable:
                     assert_never(unreachable)
 
+    async def _account_state_for_mode(
+        self,
+        mode: str,
+        now: datetime,
+    ) -> AccountState | None:
+        match mode:
+            case "paper":
+                return AccountState(
+                    synced=True,
+                    cash_krw=10_000_000,
+                    equity_krw=10_000_000,
+                    daily_loss_pct=0.0,
+                    daily_order_count=0,
+                    synced_at=now,
+                )
+            case "live":
+                try:
+                    account = await self.broker.get_account_state(now)
+                except ProviderError as exc:
+                    await self._record_critical_event(
+                        "live_account",
+                        "live_account_state_sync_failed",
+                        {"provider": exc.provider, "reason": exc.safe_message},
+                    )
+                    return None
+                if not self.live_system_order_count_scope_accepted:
+                    await self._record_critical_event(
+                        "live_account",
+                        "live_external_order_history_scope_not_accepted",
+                        {
+                            "required_env": "LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED",
+                            "accepted": False,
+                            "daily_order_count_scope": "system_created_live_orders_only",
+                        },
+                    )
+                    return replace(account, daily_order_count_verified=False)
+                try:
+                    day_start, day_end = kst_day_window(now)
+                    daily_order_count = (
+                        await self.repository.count_system_live_orders_created_between(
+                            day_start,
+                            day_end,
+                        )
+                    )
+                except Exception as exc:
+                    await self._record_critical_event(
+                        "live_account",
+                        "live_system_order_count_sync_failed",
+                        {"reason": type(exc).__name__},
+                    )
+                    return replace(account, daily_order_count_verified=False)
+                return replace(
+                    account,
+                    daily_order_count=daily_order_count,
+                    daily_order_count_verified=True,
+                )
+            case _:
+                return None
+
+    async def _has_pending_live_reconciliation(self) -> bool:
+        pending_orders = await self.repository.load_live_orders_for_reconciliation(limit=50)
+        if not pending_orders:
+            return False
+        status_counts: dict[str, int] = {}
+        symbols: set[str] = set()
+        for order in pending_orders:
+            status_counts[order.status] = status_counts.get(order.status, 0) + 1
+            symbols.add(order.symbol)
+        await self._record_critical_event(
+            "live_reconciliation",
+            "live_pending_reconciliation_blocks_new_decisions",
+            {
+                "pending_order_count": len(pending_orders),
+                "statuses": status_counts,
+                "symbols": sorted(symbols),
+            },
+        )
+        return True
+
+    async def _features_for_mode(
+        self,
+        mode: str,
+        symbol: str,
+        quote: Quote,
+    ) -> FeatureVector:
+        match mode:
+            case "paper":
+                return self.feature_service.build_mock_features(symbol, quote)
+            case "live":
+                return await self.feature_service.build_live_features(symbol, quote)
+            case _:
+                return self.feature_service.build_mock_features(symbol, quote)
+
+    async def _record_critical_event(
+        self,
+        component: str,
+        message: str,
+        details: dict[str, object],
+    ) -> None:
+        await self.repository.record_engine_event("critical", component, message, details)
+        if self.alert_notifier is not None:
+            await self.alert_notifier.notify_engine_event(
+                "critical",
+                component,
+                message,
+                details,
+            )
+
+
+def kst_day_window(now: datetime) -> tuple[datetime, datetime]:
+    day_start = now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start, day_start + timedelta(days=1)
+
 
 def paper_signal_idempotency_key(
     signal: Signal,
@@ -188,3 +323,10 @@ def feature_snapshot_from_signal(
         "final_score": signal.final_score,
         "raw": features.raw,
     }
+
+
+def _feature_unready_reasons(features: FeatureVector) -> list[str]:
+    reasons = features.raw.get("feature_unready_reasons")
+    if not isinstance(reasons, list):
+        return ["feature_snapshot_not_live_ready"]
+    return [reason for reason in reasons if isinstance(reason, str)]

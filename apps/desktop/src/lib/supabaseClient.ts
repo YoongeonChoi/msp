@@ -1,7 +1,13 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
+type ViteEnv = {
+  readonly VITE_SUPABASE_URL?: string;
+  readonly VITE_SUPABASE_PUBLISHABLE_KEY?: string;
+};
+
+const env = (import.meta as ImportMeta & { readonly env?: ViteEnv }).env ?? {};
+const supabaseUrl = env.VITE_SUPABASE_URL;
+const publishableKey = env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
 export const hasSupabaseConfig = Boolean(supabaseUrl && publishableKey);
 

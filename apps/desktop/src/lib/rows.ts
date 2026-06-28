@@ -200,6 +200,20 @@ export interface AiUpgradeCandidateRow {
   readonly reviewedAt: string | null;
 }
 
+export interface ManualCommandRow {
+  readonly id: string;
+  readonly commandType: string;
+  readonly status: string;
+  readonly payload: Record<string, unknown>;
+  readonly requestedBy: string | null;
+  readonly reviewedBy: string | null;
+  readonly rejectionReason: string | null;
+  readonly expiresAt: string | null;
+  readonly reviewedAt: string | null;
+  readonly createdAt: string | null;
+  readonly appliedAt: string | null;
+}
+
 export function mapBotSettings(value: unknown): BotSettings {
   const row = recordValue(value);
   return {
@@ -433,6 +447,23 @@ export function mapAiUpgradeCandidate(value: unknown): AiUpgradeCandidateRow {
     approvalRequired: booleanValue(row.approval_required, true),
     createdAt: nullableString(row.created_at),
     reviewedAt: nullableString(row.reviewed_at)
+  };
+}
+
+export function mapManualCommand(value: unknown): ManualCommandRow {
+  const row = recordValue(value);
+  return {
+    id: stringValue(row.id),
+    commandType: stringValue(row.command_type),
+    status: stringValue(row.status, "pending"),
+    payload: recordValue(row.payload),
+    requestedBy: nullableString(row.requested_by),
+    reviewedBy: nullableString(row.reviewed_by),
+    rejectionReason: nullableString(row.rejection_reason),
+    expiresAt: nullableString(row.expires_at),
+    reviewedAt: nullableString(row.reviewed_at),
+    createdAt: nullableString(row.created_at),
+    appliedAt: nullableString(row.applied_at)
   };
 }
 

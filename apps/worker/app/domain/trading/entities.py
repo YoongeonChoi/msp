@@ -12,7 +12,9 @@ OrderStatus = Literal[
     "paper",
     "blocked",
     "sent",
+    "partial_filled",
     "filled",
+    "canceled",
     "rejected",
     "failed",
     "unknown_requires_manual_check",
@@ -49,6 +51,7 @@ class AccountState:
     daily_loss_pct: float
     daily_order_count: int
     synced_at: datetime
+    daily_order_count_verified: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,3 +108,5 @@ class Order:
     idempotency_key: str
     reason: str | None
     created_at: datetime
+    provider_order_id: str | None = None
+    provider_payload_summary: dict[str, Any] | None = None

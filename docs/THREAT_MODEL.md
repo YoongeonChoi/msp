@@ -5,6 +5,7 @@ Assets:
 - Toss API credentials
 - Supabase secret key
 - OpenAI key
+- alert webhook URL/token
 - account/position data
 - order execution path
 - strategy parameters
@@ -16,6 +17,7 @@ Trust boundaries:
 - Desktop to Supabase Auth/RLS
 - Worker to Supabase secret-key channel
 - Worker to external providers
+- Worker to external alert webhook
 - OpenAI input/output boundary
 - GitHub Actions to deployment credentials
 
@@ -30,5 +32,5 @@ Trust boundaries:
 | Stale quote | Integrity | quote freshness policy | provider clock skew |
 | Worker restart mid-order | Reliability | persist before broker call, unknown status state | manual reconciliation needed |
 | DB full | Availability | 500MB budget, retention | writes may fail |
+| Alert channel leak | Information disclosure | `ALERT_WEBHOOK_URL` is worker-only, payloads/logs are redacted, Render uses `sync: false` | alert provider compromise |
 | Accidental live enable | Safety | typed confirmation, defaults false | user override |
-

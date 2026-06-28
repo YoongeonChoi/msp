@@ -36,7 +36,12 @@ class OpenAIMock:
                 news_event=0.17,
                 portfolio=0.10,
             ),
-            candidate_params={"buy_threshold": 0.69, "sell_threshold": 0.25},
+            candidate_params={
+                "buy_threshold": 0.69,
+                "sell_threshold": 0.25,
+                "max_position_pct": 0.1,
+                "news_risk_penalty": 0.05,
+            },
             rationale="월간 mock dataset 기반 후보입니다.",
             expected_improvement="paper 검증용 후보이며 성과 개선을 보장하지 않습니다.",
             risk_notes="반드시 backtest와 paper 검증 후 승인해야 합니다.",

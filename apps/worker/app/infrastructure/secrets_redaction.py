@@ -6,10 +6,17 @@ SENSITIVE_TOKENS = ("key", "secret", "token", "password", "credential", "authori
 def redact_value(value: object) -> object:
     if value is None:
         return None
-    text = str(value)
-    if len(text) <= 6:
-        return "***"
-    return text[:6] + "***"
+    return "<redacted>"
+
+
+def redact_nested(value: object) -> object:
+    if isinstance(value, dict):
+        return redact_mapping(value)
+    if isinstance(value, list):
+        return [redact_nested(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_nested(item) for item in value)
+    return value
 
 
 def redact_mapping(data: dict[str, object]) -> dict[str, object]:
@@ -18,9 +25,6 @@ def redact_mapping(data: dict[str, object]) -> dict[str, object]:
         lowered = key.lower()
         if any(token in lowered for token in SENSITIVE_TOKENS):
             redacted[key] = redact_value(value)
-        elif isinstance(value, dict):
-            redacted[key] = redact_mapping(value)
         else:
-            redacted[key] = value
+            redacted[key] = redact_nested(value)
     return redacted
-

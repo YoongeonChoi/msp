@@ -16,7 +16,7 @@ Forbidden:
 - Automatic code modification for live strategy.
 - Receiving API secrets, credentials, account numbers, or unnecessary private data.
 
-Structured outputs must validate against `openai_schemas.py`. Invalid or low-confidence output is rejected or downgraded to manual review.
+Structured outputs must validate against `openai_schemas.py`. Invalid or low-confidence output is rejected or downgraded to manual review. `OPENAI_MODEL` must be in the verified structured-output model family allowlist before the worker sends a request.
 
 ## Monthly Research Candidate Generation
 
@@ -88,7 +88,10 @@ The worker validates monthly candidates with `MonthlyUpgradeCandidateSchema`:
     "portfolio": 0.1
   },
   "candidate_params": {
-    "buy_threshold": 0.7
+    "buy_threshold": 0.7,
+    "sell_threshold": 0.25,
+    "max_position_pct": 0.1,
+    "news_risk_penalty": 0.05
   },
   "rationale": "string",
   "expected_improvement": "string",

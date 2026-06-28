@@ -46,3 +46,13 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: ALERT_WEBHOOK_URL
+        sync: false
+      - key: ALERT_WEBHOOK_TIMEOUT_SEC
+        value: "5"
+      - key: ALERT_DRILL_MAX_LATENCY_MS
+        value: "2000"
+      - key: LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED
+        value: "false"

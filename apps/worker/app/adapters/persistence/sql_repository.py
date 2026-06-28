@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from app.adapters.persistence.models import decision_to_row, order_to_row
@@ -10,7 +11,7 @@ from app.domain.common.json import JsonObject, json_object, to_json_value
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
-from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order
+from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order, OrderStatus
 from app.domain.trading.value_objects import StrategyWeights
 
 
@@ -52,6 +53,53 @@ class InMemoryRepository:
 
     async def persist_order(self, order: Order, risk_result: RiskResult | None = None) -> None:
         self.orders.append(order)
+
+    async def load_live_orders_for_reconciliation(self, limit: int = 50) -> list[Order]:
+        open_statuses = {"sent", "partial_filled", "unknown_requires_manual_check"}
+        return [
+            order for order in self.orders if order.mode == "live" and order.status in open_statuses
+        ][:limit]
+
+    async def count_system_live_orders_created_between(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> int:
+        start_utc = _aware_utc(start)
+        end_utc = _aware_utc(end)
+        return sum(
+            1
+            for order in self.orders
+            if order.mode == "live"
+            and order.status != "blocked"
+            and start_utc <= _aware_utc(order.created_at) < end_utc
+        )
+
+    async def load_order_by_id(self, order_id: str) -> Order | None:
+        return next((order for order in self.orders if str(order.id) == order_id), None)
+
+    async def update_order_status(
+        self,
+        order_id: str,
+        status: OrderStatus,
+        reason: str | None,
+        provider_payload_summary: dict[str, object] | None,
+        provider_order_id: str | None = None,
+    ) -> None:
+        self.orders = [
+            replace(
+                order,
+                status=status,
+                reason=reason,
+                provider_payload_summary=provider_payload_summary,
+                provider_order_id=provider_order_id
+                if provider_order_id is not None
+                else order.provider_order_id,
+            )
+            if str(order.id) == order_id
+            else order
+            for order in self.orders
+        ]
 
     async def record_heartbeat(self, status: str, details: dict[str, object]) -> None:
         self.heartbeats.append({"status": status, "details": details})
@@ -108,9 +156,7 @@ class InMemoryRepository:
         if not isinstance(decision_id, str):
             return
         self.outcomes = [
-            existing
-            for existing in self.outcomes
-            if existing.get("decision_id") != decision_id
+            existing for existing in self.outcomes if existing.get("decision_id") != decision_id
         ]
         self.outcomes.append(outcome)
 
@@ -139,3 +185,9 @@ class InMemoryRepository:
 
     async def persist_ai_upgrade_candidate(self, candidate: AIUpgradeCandidate) -> None:
         self.ai_upgrade_candidates.append(candidate)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

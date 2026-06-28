@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
 
-from app.adapters.persistence.models import ai_candidate_to_row, decision_to_row, order_to_row
+from app.adapters.persistence.models import (
+    ai_candidate_to_row,
+    decision_to_row,
+    order_from_row,
+    order_to_row,
+)
 from app.adapters.persistence.supabase_row_parsing import strategy_version_from_row
 from app.config import Settings
 from app.domain.common.json import JsonObject, json_object
+from app.domain.common.time import now_utc
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
-from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order
+from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order, OrderStatus
 
 PAPER_STRATEGY_VERSION = "strategy_v1_weighted_factor"
 
@@ -87,6 +94,60 @@ class SupabaseRepository:
     async def persist_order(self, order: Order, risk_result: RiskResult | None = None) -> None:
         await self._insert("orders", order_to_row(order, risk_result))
 
+    async def load_live_orders_for_reconciliation(self, limit: int = 50) -> list[Order]:
+        bounded_limit = min(max(limit, 1), 200)
+        query = (
+            "select=*&mode=eq.live&status=in.(sent,partial_filled,unknown_requires_manual_check)"
+            f"&order=created_at.asc&limit={bounded_limit}"
+        )
+        rows = await self._select_rows("orders", query)
+        return [order_from_row(row) for row in rows]
+
+    async def count_system_live_orders_created_between(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> int:
+        start_time = quote(start.astimezone(UTC).isoformat(), safe="")
+        end_time = quote(end.astimezone(UTC).isoformat(), safe="")
+        query = (
+            "select=id&mode=eq.live&status=neq.blocked"
+            f"&created_at=gte.{start_time}&created_at=lt.{end_time}"
+        )
+        rows = await self._select_rows("orders", query)
+        return len(rows)
+
+    async def load_order_by_id(self, order_id: str) -> Order | None:
+        rows = await self._select_rows(
+            "orders",
+            f"select=*&id=eq.{quote(order_id, safe='')}&limit=1",
+        )
+        if not rows:
+            return None
+        return order_from_row(rows[0])
+
+    async def update_order_status(
+        self,
+        order_id: str,
+        status: OrderStatus,
+        reason: str | None,
+        provider_payload_summary: dict[str, object] | None,
+        provider_order_id: str | None = None,
+    ) -> None:
+        row: dict[str, object] = {
+            "status": status,
+            "reason": reason,
+            "provider_payload_summary": provider_payload_summary,
+            "updated_at": now_utc().astimezone(UTC).isoformat(),
+        }
+        if provider_order_id is not None:
+            row["provider_order_id"] = provider_order_id
+        response = await self.client.patch(
+            f"{self.base_url}/orders?id=eq.{quote(order_id, safe='')}",
+            json=row,
+        )
+        response.raise_for_status()
+
     async def record_heartbeat(self, status: str, details: dict[str, object]) -> None:
         await self._insert("worker_heartbeats", {"status": status, "details": details})
 
@@ -110,7 +171,8 @@ class SupabaseRepository:
 
     async def idempotency_key_exists(self, idempotency_key: str) -> bool:
         response = await self.client.get(
-            f"{self.base_url}/orders?select=id&idempotency_key=eq.{idempotency_key}&limit=1"
+            f"{self.base_url}/orders?select=id&idempotency_key=eq."
+            f"{quote(idempotency_key, safe='')}&limit=1"
         )
         response.raise_for_status()
         return bool(response.json())
