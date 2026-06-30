@@ -76,10 +76,12 @@ class TossClient:
         self.client = client or httpx.AsyncClient(timeout=10.0)
         self._owns_client = client is None
         self.base_url = TOSS_OPENAPI_BASE_URL
+        self._cached_account_seq: int | None = None
 
     async def provider_health(self) -> bool:
         try:
             await self.list_accounts()
+            await self._resolve_account_seq(None)
         except ProviderError:
             return False
         return True
@@ -99,11 +101,12 @@ class TossClient:
         query_params: dict[str, str | int | bool] | None = (
             {"symbol": symbol} if symbol is not None else None
         )
+        resolved_account_seq = await self._resolve_account_seq(account_seq)
         envelope = await self._get_model(
             TossGetRequest(
                 "/api/v1/holdings",
                 params=query_params,
-                account_seq=self._resolve_account_seq(account_seq),
+                account_seq=resolved_account_seq,
             ),
             TossApiResponse[TossHoldingsOverview],
         )
@@ -114,11 +117,12 @@ class TossClient:
         currency: str = "KRW",
         account_seq: int | None = None,
     ) -> TossBuyingPowerResponse:
+        resolved_account_seq = await self._resolve_account_seq(account_seq)
         envelope = await self._get_model(
             TossGetRequest(
                 "/api/v1/buying-power",
                 params={"currency": currency},
-                account_seq=self._resolve_account_seq(account_seq),
+                account_seq=resolved_account_seq,
             ),
             TossApiResponse[TossBuyingPowerResponse],
         )
@@ -212,21 +216,23 @@ class TossClient:
             params["cursor"] = query.cursor
         if query.limit is not None:
             params["limit"] = query.limit
+        resolved_account_seq = await self._resolve_account_seq(query.account_seq)
         envelope = await self._get_model(
             TossGetRequest(
                 "/api/v1/orders",
                 params=params,
-                account_seq=self._resolve_account_seq(query.account_seq),
+                account_seq=resolved_account_seq,
             ),
             TossApiResponse[TossOrderPage],
         )
         return envelope.result
 
     async def get_order(self, order_id: str, account_seq: int | None = None) -> TossOrder:
+        resolved_account_seq = await self._resolve_account_seq(account_seq)
         envelope = await self._get_model(
             TossGetRequest(
                 f"/api/v1/orders/{order_id}",
-                account_seq=self._resolve_account_seq(account_seq),
+                account_seq=resolved_account_seq,
             ),
             TossApiResponse[TossOrder],
         )
@@ -274,7 +280,7 @@ class TossClient:
             TossPostRequest(
                 f"/api/v1/orders/{provider_order_id}/cancel",
                 json={},
-                account_seq=self._resolve_account_seq(None),
+                account_seq=await self._resolve_account_seq(None),
             ),
             TossApiResponse[TossOrderOperationResult],
         )
@@ -302,7 +308,7 @@ class TossClient:
                     "price": str(request.limit_price_krw),
                     "confirmHighValueOrder": request.amount_krw >= 100_000_000,
                 },
-                account_seq=self._resolve_account_seq(None),
+                account_seq=await self._resolve_account_seq(None),
             ),
             TossApiResponse[TossOrderCreateResult],
         )
@@ -377,16 +383,25 @@ class TossClient:
             headers["X-Tossinvest-Account"] = str(account_seq)
         return headers
 
-    def _resolve_account_seq(self, account_seq: int | None) -> int:
+    async def _resolve_account_seq(self, account_seq: int | None) -> int:
         if account_seq is not None:
             return account_seq
+        if self._cached_account_seq is not None:
+            return self._cached_account_seq
         if self.settings.toss_account_id is None:
-            raise ProviderAuthError("toss", "toss_account_seq_missing")
+            accounts = await self.list_accounts()
+            if len(accounts) == 1:
+                self._cached_account_seq = accounts[0].account_seq
+                return self._cached_account_seq
+            if not accounts:
+                raise ProviderAuthError("toss", "toss_account_seq_missing")
+            raise ProviderAuthError("toss", "toss_account_seq_ambiguous")
         raw_value = self.settings.toss_account_id.get_secret_value()
         try:
-            return int(raw_value)
+            self._cached_account_seq = int(raw_value)
         except ValueError as exc:
             raise ProviderAuthError("toss", "toss_account_seq_invalid") from exc
+        return self._cached_account_seq
 
 
 def _raise_for_toss_status(response: httpx.Response) -> None:

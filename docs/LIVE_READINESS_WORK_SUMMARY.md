@@ -126,17 +126,18 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `c288dcd_20260630120402`.
-- The retained report is `security-artifacts/c288dcd_20260630120402/report.md`.
-- The scan summary records 3 worklist rows, 3 completion receipts,
+  `93e239b_20260630211736`.
+- The retained report is `security-artifacts/93e239b_20260630211736/report.md`.
+- The scan summary records 1 worklist row, 1 completion receipt,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers Toss credential fail-closed startup behavior in
-  `toss_auth.py`, `toss_client.py`, and `container.py`: missing Toss credentials
-  no longer crash Render bootstrap, provider health reports unhealthy, and live
-  broker paths still fail closed before authenticated provider calls. The
-  earlier `fb223a4_20260628182340` and `83add88_20260630113328` scans remain
-  retained under `security-artifacts/` as broader historical baseline evidence.
+- The delta scan covers Toss account-scoped API readiness in `toss_client.py`:
+  missing `TOSS_ACCOUNT_ID` infers `accountSeq` only when exactly one account is
+  returned, zero or multiple accounts fail closed, account-scoped calls avoid
+  ambiguous headers, and provider health now verifies account readiness. The
+  earlier `fb223a4_20260628182340`, `83add88_20260630113328`, and
+  `c288dcd_20260630120402` scans remain retained under `security-artifacts/` as
+  broader historical baseline evidence.
 
 ## Verification Snapshot
 
@@ -152,9 +153,9 @@ The latest local verification recorded before this handoff included:
 - Browser QA for `http://localhost:1420/?page=dashboard`: dashboard/control
   navigation rendered with no relevant console warnings or errors
 - Scorecard/security evidence gates:
-  `FINAL=PASS security_scan_evidence ... worklist_rows=3 ... candidate_findings=0`
+  `FINAL=PASS security_scan_evidence ... worklist_rows=1 ... candidate_findings=0`
   and
-  `FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0`
+  `FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0`
 
 Run verification again after any source edit, commit publication, or external
 evidence update.

@@ -37,7 +37,7 @@ Verified from the official Toss Securities OpenAPI document:
 - Base URL: `https://openapi.tossinvest.com`
 - Auth: `POST /oauth2/token` with OAuth2 Client Credentials Grant, `application/x-www-form-urlencoded`, fields `grant_type=client_credentials`, `client_id`, `client_secret`
 - API auth header: `Authorization: Bearer {access_token}`
-- Account scoped read APIs use `X-Tossinvest-Account`; the value is the `accountSeq` returned by `GET /api/v1/accounts`
+- Account scoped read APIs use `X-Tossinvest-Account`; the value is the `accountSeq` returned by `GET /api/v1/accounts`. When `TOSS_ACCOUNT_ID` is not set, the worker infers this header only if `GET /api/v1/accounts` returns exactly one account; zero or multiple accounts fail closed.
 - Read-only endpoints implemented in worker adapter:
   - `GET /api/v1/accounts`
   - `GET /api/v1/buying-power`
@@ -60,4 +60,4 @@ Not implemented:
 
 - order modify
 
-`TOSS_ACCOUNT_ID` is kept for env compatibility, but for Toss it must contain the server-side `accountSeq`, not a raw account number. Never put Toss credentials in Desktop or Git.
+`TOSS_ACCOUNT_ID` is kept for env compatibility and for multi-account deployments. When set, it must contain the server-side `accountSeq`, not a raw account number. When omitted, the worker may infer a single returned account; ambiguous account lists fail closed. Never put Toss credentials in Desktop or Git.

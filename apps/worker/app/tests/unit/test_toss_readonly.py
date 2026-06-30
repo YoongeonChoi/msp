@@ -109,6 +109,95 @@ async def test_toss_client_parses_account_response() -> None:
     assert requests[-1].headers["authorization"] == "Bearer token-value"
 
 
+async def test_toss_client_infers_single_account_seq_when_not_configured() -> None:
+    client, requests = _client_with_responses(
+        {
+            "/api/v1/accounts": {
+                "result": [
+                    {
+                        "accountNo": "12345678901",
+                        "accountSeq": 7,
+                        "accountType": "BROKERAGE",
+                    }
+                ]
+            },
+            "/api/v1/holdings": _holdings_payload(),
+        },
+        settings=_settings_without_account(),
+    )
+
+    await client.get_holdings()
+    await client.get_holdings()
+
+    assert [request.url.path for request in requests].count("/api/v1/accounts") == 1
+    holdings_account_headers = [
+        request.headers["x-tossinvest-account"]
+        for request in requests
+        if request.url.path == "/api/v1/holdings"
+    ]
+    assert holdings_account_headers == ["7", "7"]
+
+
+async def test_toss_client_does_not_infer_account_seq_when_ambiguous() -> None:
+    client, requests = _client_with_responses(
+        {
+            "/api/v1/accounts": {
+                "result": [
+                    {
+                        "accountNo": "12345678901",
+                        "accountSeq": 7,
+                        "accountType": "BROKERAGE",
+                    },
+                    {
+                        "accountNo": "98765432109",
+                        "accountSeq": 8,
+                        "accountType": "BROKERAGE",
+                    },
+                ]
+            },
+            "/api/v1/holdings": _holdings_payload(),
+        },
+        settings=_settings_without_account(),
+    )
+
+    with pytest.raises(ProviderAuthError, match="toss_account_seq_ambiguous"):
+        await client.get_holdings()
+
+    assert [request.url.path for request in requests] == [
+        "/oauth2/token",
+        "/api/v1/accounts",
+    ]
+
+
+async def test_toss_client_health_fails_when_account_seq_is_ambiguous() -> None:
+    client, requests = _client_with_responses(
+        {
+            "/api/v1/accounts": {
+                "result": [
+                    {
+                        "accountNo": "12345678901",
+                        "accountSeq": 7,
+                        "accountType": "BROKERAGE",
+                    },
+                    {
+                        "accountNo": "98765432109",
+                        "accountSeq": 8,
+                        "accountType": "BROKERAGE",
+                    },
+                ]
+            },
+        },
+        settings=_settings_without_account(),
+    )
+
+    assert await client.provider_health() is False
+    assert [request.url.path for request in requests] == [
+        "/oauth2/token",
+        "/api/v1/accounts",
+        "/api/v1/accounts",
+    ]
+
+
 async def test_toss_client_parses_position_response() -> None:
     client, requests = _client_with_responses({"/api/v1/holdings": _holdings_payload()})
     now = datetime(2026, 3, 25, 1, 0, tzinfo=UTC)
@@ -341,10 +430,24 @@ def _settings() -> Settings:
     )
 
 
+def _settings_without_account() -> Settings:
+    return Settings.model_validate(
+        {
+            "MOCK_PROVIDERS": False,
+            "TOSS_CLIENT_ID": SecretStr("client-id"),
+            "TOSS_CLIENT_SECRET": SecretStr("client-secret"),
+            "TOSS_ACCOUNT_ID": None,
+        }
+    )
+
+
 def _client_with_responses(
     responses: dict[str, JsonObject | tuple[int, JsonObject]],
+    *,
+    settings: Settings | None = None,
 ) -> tuple[TossClient, list[httpx.Request]]:
     requests: list[httpx.Request] = []
+    resolved_settings = settings or _settings()
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -359,8 +462,8 @@ def _client_with_responses(
         return httpx.Response(200, json=payload, request=request)
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    auth = TossAuth(_settings(), client=http_client)
-    return TossClient(_settings(), auth=auth, client=http_client), requests
+    auth = TossAuth(resolved_settings, client=http_client)
+    return TossClient(resolved_settings, auth=auth, client=http_client), requests
 
 
 def _holdings_payload() -> JsonObject:

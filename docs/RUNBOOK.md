@@ -21,11 +21,16 @@ Toss read-only verification:
 ```text
 TOSS_CLIENT_ID=...
 TOSS_CLIENT_SECRET=...
-TOSS_ACCOUNT_ID=<Toss accountSeq from GET /api/v1/accounts>
+TOSS_ACCOUNT_ID=<optional Toss accountSeq from GET /api/v1/accounts>
 MOCK_PROVIDERS=false
 ```
 
-`TOSS_ACCOUNT_ID` must contain Toss `accountSeq`, not a raw account number. Never put these values in Desktop env vars.
+`TOSS_ACCOUNT_ID` is optional only when `GET /api/v1/accounts` returns exactly
+one account; the worker will infer that single `accountSeq`. If Toss returns no
+account or more than one account, live/account-scoped calls fail closed until
+`TOSS_ACCOUNT_ID` is set. When set, `TOSS_ACCOUNT_ID` must contain Toss
+`accountSeq`, not a raw account number. Never put these values in Desktop env
+vars.
 
 2. Keep trading fail-closed:
 
@@ -856,8 +861,8 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=c288dcd_20260630120402 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=93e239b_20260630211736 worklist_rows=1 completion_receipts=1 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0
 ```
 
 `FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier
