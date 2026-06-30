@@ -96,6 +96,20 @@ approval. The authoritative readiness score remains
   apps/desktop/.env.local` now narrow the remaining missing environment values
   to `SUPABASE_LIVE_REQUESTER_JWT` and `SUPABASE_LIVE_REVIEWER_JWT`.
 
+## 2026-06-30 Render Deploy Hook Operator Gate
+
+- Added `app.tools.trigger_render_deploy_hook`, a manual operator tool for
+  triggering a Render deploy hook without enabling automatic Render deploys.
+- The tool requires `--yes` before any network call, reads the secret-bearing
+  hook URL from `RENDER_DEPLOY_HOOK_URL` or `--hook-url`, pins `ref` to the
+  expected Git commit, and only allows `https://api.render.com/deploy/...`.
+- Output is bounded to a single `FINAL` line and never prints the hook URL,
+  secret query token, response body, or full commit hash.
+- This reduces the Render rollout gap to an executable manual trigger plus the
+  existing hosted heartbeat freshness proof. It does not claim deploy freshness
+  until `verify_worker_release_freshness` observes the new commit in hosted
+  Supabase.
+
 ## Current Status
 
 The repository is materially stronger than the original MVP, but it is still
@@ -194,34 +208,37 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `hosted_env_files_20260630142933`.
+  `render_deploy_hook_20260630144442`.
 - The retained report is
-  `security-artifacts/hosted_env_files_20260630142933/report.md`.
-- The scan summary records 3 worklist rows, 3 completion receipts,
+  `security-artifacts/render_deploy_hook_20260630144442/report.md`.
+- The scan summary records 1 worklist row, 1 completion receipt,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers explicit hosted verifier env-file loading:
-  `--env-file` is opt-in, process env and CLI args keep precedence, unreadable
-  env files do not print local paths, and verifier failure output keeps secret
-  and JWT redaction. The live-order boundary is unchanged: `RiskService`,
-  `ExecutionService`, `BrokerPort`, and desktop broker/order API paths were not
-  modified.
+- The delta scan covers the manual Render deploy hook helper: `--yes` is
+  required before any network call, only `https://api.render.com/deploy/...`
+  hook URLs are accepted, `ref` is pinned to the expected Git commit, and the
+  hook URL, token, response body, and full commit hash are not printed. The
+  live-order boundary is unchanged: `RiskService`, `ExecutionService`,
+  `BrokerPort`, and desktop broker/order API paths were not modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
   `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
-  `release_metadata_20260630132334`, `provider_detail_20260630133946`, and
-  `release_freshness_20260630140851`, remain retained under
+  `release_metadata_20260630132334`, `provider_detail_20260630133946`,
+  `hosted_env_files_20260630142933`, and `release_freshness_20260630140851`,
+  remain retained under
   `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `531 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `538 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
 - `py -m pytest app/tests/contract/test_verify_hosted_live_readiness.py app/tests/contract/test_verify_hosted_live_enable_flow.py -q --tb=short`
   from `apps/worker`: `34 passed`
+- `py -m pytest app/tests/unit/test_render_deploy_hook.py -q --tb=short`
+  from `apps/worker`: `7 passed`
 - `py supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local`:
   expected `FINAL=SKIP hosted_supabase_env_missing` with only
   `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
@@ -234,8 +251,11 @@ The latest local verification recorded before this handoff included:
 - `py -m app.tools.verify_worker_release_freshness --repo-root ...` from
   `apps/worker`: expected `FINAL=FAIL` before manual Render redeploy, with
   `reason=release_sha_mismatch`
+- `py -m app.tools.trigger_render_deploy_hook --expected-sha ...` from
+  `apps/worker`: expected `FINAL=SKIP render_deploy_hook` with
+  `reason=render_deploy_hook_env_missing` when no operator hook URL is present
 - Scorecard/security evidence gates:
-  retained scan report prepared for `hosted_env_files_20260630142933`; regenerate the
+  retained scan report prepared for `render_deploy_hook_20260630144442`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

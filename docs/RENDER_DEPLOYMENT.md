@@ -69,6 +69,19 @@ operator may also set `APP_RELEASE_SHA` to the expected commit to override the
 build file explicitly. Invalid or secret-like values are ignored rather than
 persisted.
 
+If the operator uses a Render deploy hook instead of the dashboard, keep the
+hook URL in the operator shell only as `RENDER_DEPLOY_HOOK_URL`. The URL is a
+secret because it contains the deploy token. Triggering is still a manual action:
+the helper refuses to call the hook unless `--yes` is present, appends the
+current commit as `ref=<sha>`, accepts only `https://api.render.com/deploy/...`
+hook URLs, and never prints the hook URL, token, response body, or full commit
+hash.
+
+```bash
+python -m app.tools.trigger_render_deploy_hook --repo-root . --yes
+python -m app.tools.verify_worker_release_freshness --repo-root .
+```
+
 ```sql
 select
   status,

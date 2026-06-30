@@ -845,7 +845,15 @@ printing the URI, body, or hash values on failure.
 
 Also validate the retained security scan evidence:
 
+If the operator uses a Render deploy hook instead of the Render dashboard, keep
+`RENDER_DEPLOY_HOOK_URL` only in the operator shell. It is a secret-bearing URL,
+so do not paste it into Git, logs, docs, retained evidence, or desktop env. The
+trigger remains manual: the helper requires `--yes`, sends only a POST to
+`https://api.render.com/deploy/...`, pins `ref` to the current Git commit, and
+prints only the short expected SHA plus HTTP status.
+
 ```bash
+python -m app.tools.trigger_render_deploy_hook --repo-root . --yes
 python -m app.tools.verify_security_scan_evidence --evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_worker_release_freshness --repo-root .
@@ -861,6 +869,7 @@ python -m app.tools.verify_security_scan_evidence --evidence path/to/security_sc
 On Windows:
 
 ```bash
+py -m app.tools.trigger_render_deploy_hook --repo-root . --yes
 py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_summary.json --repo-root .
 py -m app.tools.verify_live_readiness_scorecard --scorecard docs\LIVE_READINESS_SCORECARD.md --security-evidence path\to\security_scan_summary.json --repo-root .
 py -m app.tools.verify_worker_release_freshness --repo-root .
@@ -875,13 +884,19 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=hosted_env_files_20260630142933 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
+FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
+FINAL=PASS security_scan_evidence scan_id=render_deploy_hook_20260630144442 worklist_rows=1 completion_receipts=1 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
-`FINAL=FAIL security_scan_evidence` or `FINAL=FAIL worker_release_freshness`
-blocks live-mode consideration. Run the security verifier
+`FINAL=FAIL render_deploy_hook`, `FINAL=FAIL security_scan_evidence`, or
+`FINAL=FAIL worker_release_freshness` blocks live-mode consideration. A
+`FINAL=SKIP render_deploy_hook reason=render_deploy_hook_env_missing` result
+means the operator did not provide deploy-hook credentials and must deploy from
+the Render dashboard instead. A `FINAL=SKIP render_deploy_hook` result with
+`reason=confirmation_required` means no network call was made because `--yes`
+was omitted. Run the security verifier
 with `--repo-root` so it recomputes the current `source_head`/`source_diff_sha256`
 while excluding the summary and local report file; stale source bindings must fail
 before bundle collection, and source-binding collection failures must fail closed
