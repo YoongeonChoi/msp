@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from app.application.ports.fundamentals_port import FundamentalsPort
+from app.application.ports.market_sector_port import MarketSectorPort
 from app.application.ports.news_port import NewsPort
 from app.domain.common.errors import ProviderError
 from app.domain.fundamentals.entities import QuarterlyFundamentals
+from app.domain.market_data.entities import MarketSectorEvidence
 from app.domain.news_intel.entities import NewsEvent
 from app.domain.strategy.entities import FeatureVector
 from app.domain.trading.entities import Quote
 
-MOCK_SOURCES = {"", "mock", "mock_static", "krx_mock", "opendart_mock", "naver_mock"}
+MOCK_SOURCES = {
+    "",
+    "mock",
+    "mock_static",
+    "krx_mock",
+    "opendart_mock",
+    "naver_mock",
+}
+MARKET_SECTOR_MOCK_SOURCES = MOCK_SOURCES | {"fixture"}
 
 
 class FeatureService:
@@ -16,14 +26,18 @@ class FeatureService:
         self,
         fundamentals: FundamentalsPort | None = None,
         news: NewsPort | None = None,
+        market_sector: MarketSectorPort | None = None,
         *,
         fundamentals_provider_name: str = "unconfigured",
         news_provider_name: str = "unconfigured",
+        market_sector_provider_name: str = "unconfigured",
     ) -> None:
         self.fundamentals = fundamentals
         self.news = news
+        self.market_sector = market_sector
         self.fundamentals_provider_name = fundamentals_provider_name
         self.news_provider_name = news_provider_name
+        self.market_sector_provider_name = market_sector_provider_name
 
     def build_mock_features(self, symbol: str, quote: Quote) -> FeatureVector:
         liquidity = 0.8 if quote.price_krw > 0 else 0.0
@@ -50,7 +64,6 @@ class FeatureService:
             "source": quote.source,
             "feature_source": "provider_live_v1",
             "feature_evidence_version": "provider_live_v1",
-            "market_sector_source": "missing_live_sector_provider",
             "live_trading_ready": False,
         }
         unready_reasons: list[str] = []
@@ -58,13 +71,14 @@ class FeatureService:
             unready_reasons.append("quote_price_invalid")
         if _is_mock_source(quote.source):
             unready_reasons.append("quote_source_not_live_provider")
-        unready_reasons.append("market_sector_evidence_missing")
 
         fundamentals = await self._load_fundamentals(symbol, raw, unready_reasons)
         news_events = await self._load_news(symbol, raw, unready_reasons)
+        market_sector = await self._load_market_sector(symbol, raw, unready_reasons)
 
         technical_score = 0.70 if quote.price_krw > 0 else 0.0
         fundamental_score = _fundamental_score(fundamentals)
+        market_sector_score = _market_sector_score(market_sector)
         news_event_score = _news_score(news_events)
         portfolio_score = 0.8 if quote.price_krw > 0 else 0.0
         raw["feature_unready_reasons"] = unready_reasons
@@ -73,7 +87,7 @@ class FeatureService:
             symbol=symbol,
             technical_score=technical_score,
             fundamental_score=fundamental_score,
-            market_sector_score=0.50,
+            market_sector_score=market_sector_score,
             news_event_score=news_event_score,
             portfolio_score=portfolio_score,
             raw=raw,
@@ -151,9 +165,53 @@ class FeatureService:
             unready_reasons.append("news_source_not_live_provider")
         return events
 
+    async def _load_market_sector(
+        self,
+        symbol: str,
+        raw: dict[str, object],
+        unready_reasons: list[str],
+    ) -> MarketSectorEvidence | None:
+        raw["market_sector_provider"] = self.market_sector_provider_name
+        if self.market_sector is None:
+            raw["market_sector_source"] = "missing_live_sector_provider"
+            unready_reasons.append("market_sector_evidence_missing")
+            return None
+        if _is_mock_market_sector_source(self.market_sector_provider_name):
+            unready_reasons.append("market_sector_source_not_live_provider")
+        try:
+            evidence = await self.market_sector.get_sector(symbol)
+        except ProviderError as exc:
+            unready_reasons.append("market_sector_provider_error")
+            raw["market_sector_error_provider"] = exc.provider
+            raw["market_sector_error_reason"] = exc.safe_message
+            return None
+        if evidence is None:
+            raw["market_sector_source"] = "missing_live_sector_provider"
+            unready_reasons.append("market_sector_evidence_missing")
+            return None
+        raw["market_sector_source"] = evidence.source
+        raw["market_sector"] = {
+            "symbol": evidence.symbol,
+            "market": evidence.market,
+            "sector": evidence.sector,
+            "industry": evidence.industry,
+            "as_of": evidence.as_of.isoformat(),
+        }
+        if evidence.symbol != symbol:
+            unready_reasons.append("market_sector_symbol_mismatch")
+        if _is_mock_market_sector_source(evidence.source):
+            unready_reasons.append("market_sector_source_not_live_provider")
+        if not evidence.market.strip() or not evidence.sector.strip():
+            unready_reasons.append("market_sector_values_missing")
+        return evidence
+
 
 def _is_mock_source(source: str | None) -> bool:
     return source is None or source.strip().lower() in MOCK_SOURCES
+
+
+def _is_mock_market_sector_source(source: str | None) -> bool:
+    return source is None or source.strip().lower() in MARKET_SECTOR_MOCK_SOURCES
 
 
 def _has_fundamental_signal(fundamentals: QuarterlyFundamentals) -> bool:
@@ -201,6 +259,14 @@ def _news_score(events: list[NewsEvent]) -> float:
     if not events:
         return 0.0
     return _average([_news_event_score(event) for event in events], default=0.0)
+
+
+def _market_sector_score(evidence: MarketSectorEvidence | None) -> float:
+    if evidence is None:
+        return 0.50
+    if not evidence.market.strip() or not evidence.sector.strip():
+        return 0.0
+    return 0.60
 
 
 def _news_event_score(event: NewsEvent) -> float:

@@ -1,6 +1,6 @@
 # Live Readiness Work Summary
 
-Generated: 2026-06-30 KST
+Generated: 2026-07-01 KST
 
 This document summarizes the live-readiness hardening work completed in this
 checkpoint. It is a handoff summary for commit review, not a live-trading
@@ -42,6 +42,22 @@ approval. The authoritative readiness score remains
 - Focused verification:
   `py -m pytest app/tests/unit/test_render_worker_redeploy.py app/tests/unit/test_render_deploy_hook.py app/tests/unit/test_worker_release_freshness.py -q`
   returned `21 passed`; `ruff` and `mypy` passed for the new tool and tests.
+
+## 2026-07-01 Market Sector Feature Evidence Port
+
+- `FeatureService` now accepts an optional `MarketSectorPort` for verified
+  market/sector evidence instead of treating the sector feature as permanently
+  missing.
+- Missing, unconfigured, provider-error, symbol-mismatched, blank, mock, or
+  fixture market/sector evidence remains non-live-ready and records explicit
+  `feature_unready_reasons`.
+- Verified non-mock market/sector evidence can satisfy the market-sector
+  portion of `provider_live_v1`, but only when quote, valuation, and news
+  evidence are also live-ready. No broker path was loosened: `ExecutionService`
+  still blocks unless the feature snapshot itself is live-ready and non-mock.
+- This is a structural provider-evidence boundary, not a claimed KRX production
+  adapter. Real hosted/provider credential proof and retained feature-evidence
+  artifacts are still required before live readiness can advance to 100.
 
 ## 2026-06-30 Render Worker Follow-Up
 
@@ -205,8 +221,8 @@ channel ACK drills, and published retained artifacts.
   requirements so AI output remains advisory and cannot promote live execution.
 - Live mode now requires `provider_live_v1` feature snapshots built from real
   provider evidence. Mock/static paper features, missing provider valuation
-  inputs, and missing market/sector evidence stay non-live-ready and stop
-  before live order proposal creation.
+  inputs, and missing or mock market/sector evidence stay non-live-ready and
+  stop before live order proposal creation.
 
 ## Supabase Control Plane
 
@@ -266,14 +282,19 @@ channel ACK drills, and published retained artifacts.
 
 ## Security Work
 
-- The current retained Codex Security scan is
-  `paper_health_self_noise_20260630151326`.
-- The retained report is
-  `security-artifacts/paper_health_self_noise_20260630151326/report.md`.
-- The scan summary records 2 worklist rows, 2 completion receipts,
+- The market-sector evidence port change has not yet been covered by a fresh
+  Codex Security diff scan bound to the final commit. Local tests, lint, and
+  type checks passed, but release evidence still requires a regenerated
+  security summary and remote report verification after push.
+- The latest retained Codex Security scan referenced by the scorecard is
+  `d4415550-5104-47e5-a896-32ca72005b89`, with retained repo artifact
+  `security-artifacts/feature_evidence_bundle_20260701/report.md`.
+- That retained scan records 8 worklist rows, 8 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
-  0 surviving reportable findings.
-- The delta scan covers paper health self-diagnostic filtering: only
+  0 surviving reportable findings for the provider-live feature evidence
+  bundle gate work.
+- The earlier `paper_health_self_noise_20260630151326` delta scan covers paper
+  health self-diagnostic filtering: only
   `paper_ops/paper_health_report` rows are removed from rendered recent critical
   event output, while worker/provider/live execution/alerting critical events
   still render and still block. The live-order boundary is unchanged:
@@ -300,9 +321,10 @@ Current feature-evidence bundle gate update:
   and can verify those published artifact bytes with
   `--verify-remote-feature-artifacts`.
 - Latest local verification from `apps/worker` after this update:
-  `py -m pytest -q` returned `553 passed`, the focused bundle/collector tests
-  returned `178 passed`, `ruff` passed on the changed files, and `mypy` reported
-  no issues on the changed source/test files.
+  `py -m pytest -q` returned `561 passed`; focused
+  feature/trading-cycle/execution tests returned `30 passed`; focused
+  bundle/collector tests returned `183 passed`; `ruff` passed for
+  `. ../../supabase`; and `mypy` reported no issues across 242 source files.
 
 The latest local verification recorded before this handoff included:
 
