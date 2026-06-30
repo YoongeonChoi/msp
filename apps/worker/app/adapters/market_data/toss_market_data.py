@@ -30,13 +30,22 @@ class TossMarketDataClient(Protocol):
 class TossMarketData:
     def __init__(self, toss: TossMarketDataClient) -> None:
         self.toss = toss
+        self._provider_health_details: dict[str, object] = {}
 
     async def provider_health(self) -> bool:
+        self._provider_health_details = {}
         try:
             await self.toss.get_kr_market_calendar(now_kst().date())
-        except ProviderError:
+        except ProviderError as exc:
+            self._provider_health_details = {
+                "error_type": type(exc).__name__,
+                "reason": exc.safe_message,
+            }
             return False
         return True
+
+    def provider_health_details(self) -> dict[str, object]:
+        return dict(self._provider_health_details)
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         if not symbols:

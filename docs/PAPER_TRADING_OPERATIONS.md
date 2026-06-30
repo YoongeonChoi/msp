@@ -24,7 +24,7 @@ SUPABASE_SECRET_KEY=...
 PAPER_HEALTH_DB_WARNING_BYTES=450000000
 ```
 
-The command prints a safe report and writes one `engine_events` summary row with `component='paper_ops'` and `message='paper_health_report'`. It does not print API keys, provider secrets, account identifiers, or raw provider payload details.
+The command prints a safe report and writes one `engine_events` summary row with `component='paper_ops'` and `message='paper_health_report'`. It does not print API keys, provider secrets, account identifiers, or raw provider payload details. Its own `paper_ops` summary events are excluded from the repeated-critical-event count so the report cannot keep itself failing, but operational critical events from worker/provider components still count.
 
 ## Report Sections
 
@@ -58,7 +58,8 @@ The command returns `FAIL` when any of these are true:
 - any `sent`, `filled`, or `partial_filled` order exists
 - duplicate `idempotency_key` exists
 - latest heartbeat is missing or older than 5 minutes
-- two or more recent critical `engine_events` exist
+- two or more recent operational critical `engine_events` exist, excluding
+  `component='paper_ops'` and `message='paper_health_report'`
 - Supabase query fails
 
 ## Warnings

@@ -22,6 +22,10 @@ Unit:
 - paper health report duplicate idempotency detection
 - paper health report stale heartbeat detection
 - paper health report output does not print secrets
+- paper health report ignores its own `paper_ops/paper_health_report` critical
+  events for repeated-critical counts while still failing on worker criticals
+- provider health failure details persist only safe bounded fields and redact
+  secret-looking keys or values
 - provider error mapping
 - redaction
 - config validation

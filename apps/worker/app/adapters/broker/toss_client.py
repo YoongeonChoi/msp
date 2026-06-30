@@ -77,14 +77,23 @@ class TossClient:
         self._owns_client = client is None
         self.base_url = TOSS_OPENAPI_BASE_URL
         self._cached_account_seq: int | None = None
+        self._provider_health_details: dict[str, object] = {}
 
     async def provider_health(self) -> bool:
+        self._provider_health_details = {}
         try:
             await self.list_accounts()
             await self._resolve_account_seq(None)
-        except ProviderError:
+        except ProviderError as exc:
+            self._provider_health_details = {
+                "error_type": type(exc).__name__,
+                "reason": exc.safe_message,
+            }
             return False
         return True
+
+    def provider_health_details(self) -> dict[str, object]:
+        return dict(self._provider_health_details)
 
     async def list_accounts(self) -> list[TossAccount]:
         envelope = await self._get_model(

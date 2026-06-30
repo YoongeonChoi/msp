@@ -1,6 +1,6 @@
 # Live Readiness Work Summary
 
-Generated: 2026-06-29 KST
+Generated: 2026-06-30 KST
 
 This document summarizes the live-readiness hardening work completed in this
 checkpoint. It is a handoff summary for commit review, not a live-trading
@@ -30,6 +30,32 @@ approval. The authoritative readiness score remains
   `supabase/migrations/0005_schema_alignment.sql`; the runtime compatibility
   changes keep the worker alive on the base schema but do not replace migration
   verification.
+
+## 2026-06-30 Hosted Paper Health Diagnostics Follow-Up
+
+- Hosted Supabase paper health was checked with the server-side worker env. The
+  worker heartbeat was fresh at the time of the check (`latest_heartbeat_age_sec=23`),
+  and the safety flags remained disabled (`mode=paper`, `live_order_allowed=false`).
+- The report still returned `FINAL=FAIL` because hosted data contained repeated
+  operational `worker` critical events with `error_type='HTTPStatusError'`, and
+  `toss` plus `toss_market_data` provider health was degraded.
+- The latest hosted `api_health` rows for the Toss providers still had
+  `details={}` because the deployed worker had not yet emitted this patched
+  diagnostic path. `HealthService` now persists safe provider failure details
+  (`error_type`, `reason`) for unhealthy providers and redacts secret-like
+  keys/values before writing `api_health.details`.
+- `TossClient.provider_health()` and `TossMarketData.provider_health()` now keep
+  read-only safe failure details from `ProviderError.safe_message`, while broker
+  order creation paths remain unchanged and still fail closed through the
+  existing execution/risk gates.
+- `paper_health_report` now excludes its own
+  `component='paper_ops'`, `message='paper_health_report'` diagnostic events
+  from the repeated-critical-event count, preventing self-sustaining FAIL
+  reports. Operational critical events from `worker` and provider components
+  still count and still block.
+- Render still requires a manual redeploy because `render.yaml` keeps
+  `autoDeployTrigger: "off"`. After redeploy, retain hosted `api_health.details`
+  rows and paper health output before treating this blocker as closed.
 
 ## Current Status
 
@@ -126,36 +152,36 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `93e239b_20260630211736`.
-- The retained report is `security-artifacts/93e239b_20260630211736/report.md`.
-- The scan summary records 1 worklist row, 1 completion receipt,
+  `3649a5f_20260630214017`.
+- The retained report is
+  `security-artifacts/3649a5f_20260630214017/report.md`.
+- The scan summary records 4 worklist rows, 4 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers Toss account-scoped API readiness in `toss_client.py`:
-  missing `TOSS_ACCOUNT_ID` infers `accountSeq` only when exactly one account is
-  returned, zero or multiple accounts fail closed, account-scoped calls avoid
-  ambiguous headers, and provider health now verifies account readiness. The
-  earlier `fb223a4_20260628182340`, `83add88_20260630113328`, and
-  `c288dcd_20260630120402` scans remain retained under `security-artifacts/` as
-  broader historical baseline evidence.
+- The delta scan covers provider-health diagnostic persistence and paper-health
+  aggregation in `toss_client.py`, `toss_market_data.py`, `health_service.py`,
+  and `paper_health_report_service.py`: unsafe provider detail persistence is
+  bounded and redacted, raised fail-closed errors are sanitized, Toss provider
+  health remains read-only and fail-closed, and paper health excludes only its
+  own diagnostic events from repeated-critical counting. The earlier
+  `fb223a4_20260628182340`, `83add88_20260630113328`,
+  `c288dcd_20260630120402`, and `93e239b_20260630211736` scans remain retained
+  under `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `499 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `510 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `npm run desktop:typecheck`: passed
-- `npm run desktop:build`: passed
-- `npm run desktop:test`: passed
-- `npm run desktop:e2e`: `2 passed`
-- Browser QA for `http://localhost:1420/?page=dashboard`: dashboard/control
-  navigation rendered with no relevant console warnings or errors
+- `py -m pytest app/tests/unit/test_toss_readonly.py app/tests/unit/test_toss_market_data.py -q --tb=short`
+  from `apps/worker`: `19 passed`
 - Scorecard/security evidence gates:
-  `FINAL=PASS security_scan_evidence ... worklist_rows=1 ... candidate_findings=0`
-  and
-  `FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0`
+  retained scan report prepared for `3649a5f_20260630214017`; regenerate the
+  source-bound `security_scan_summary.json` after the final commit hash exists,
+  then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
+  before release bundle assembly.
 
 Run verification again after any source edit, commit publication, or external
 evidence update.

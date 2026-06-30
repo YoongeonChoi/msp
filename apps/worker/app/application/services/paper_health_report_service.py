@@ -142,7 +142,7 @@ def _findings(
         findings.append(_critical("heartbeat_missing", "worker heartbeat is missing"))
     elif heartbeat_age_seconds > STALE_HEARTBEAT_SECONDS:
         findings.append(_critical("heartbeat_stale", "worker heartbeat is stale over 5 minutes"))
-    if _critical_event_count(recent_events) >= REPEATED_CRITICAL_EVENT_COUNT:
+    if _operational_critical_event_count(recent_events) >= REPEATED_CRITICAL_EVENT_COUNT:
         findings.append(_critical("repeated_critical_events", "repeated critical events exist"))
     degraded = [provider.provider for provider in providers if not provider.healthy]
     if degraded:
@@ -194,5 +194,13 @@ def _warning(code: str, message: str) -> PaperHealthFinding:
     return PaperHealthFinding(PaperHealthSeverity.WARNING, code, message)
 
 
-def _critical_event_count(events: Sequence[EngineEventSummary]) -> int:
-    return sum(1 for event in events if event.level == "critical")
+def _operational_critical_event_count(events: Sequence[EngineEventSummary]) -> int:
+    return sum(
+        1
+        for event in events
+        if event.level == "critical"
+        and not (
+            event.component == "paper_ops"
+            and event.message == "paper_health_report"
+        )
+    )

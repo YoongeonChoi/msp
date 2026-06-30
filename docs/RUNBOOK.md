@@ -861,8 +861,8 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=93e239b_20260630211736 worklist_rows=1 completion_receipts=1 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=3649a5f_20260630214017 worklist_rows=4 completion_receipts=4 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=4 candidate_findings=0 reportable_findings=0
 ```
 
 `FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier
@@ -1117,6 +1117,12 @@ py -m app.tools.paper_health_report
 - `FINAL=WARN`: follow up on warnings; Paper Trading can remain fail-closed
 - `FINAL=FAIL`: keep `live_order_allowed=false`, stop enabling paper cycles, and inspect findings
 
+The report writes one `engine_events` row with `component='paper_ops'` and
+`message='paper_health_report'`. Those diagnostic rows are excluded from the
+repeated-critical-event count so the report cannot make future reports fail by
+itself. Operational critical events from `worker`, provider, live execution, or
+alerting components still count and must be investigated.
+
 4. Verify the summary event:
 
 ```sql
@@ -1196,6 +1202,13 @@ select * from public.worker_heartbeats order by created_at desc limit 10;
 ```sql
 select distinct on (provider) * from public.api_health order by provider, checked_at desc;
 ```
+
+After the provider-health diagnostics patch is deployed, unhealthy Toss-related
+rows should include safe `details.error_type` and `details.reason` fields when
+the provider can explain the failure. `details` must not contain credentials,
+bearer tokens, account identifiers, raw provider payloads, or secret-looking
+keys. Empty `details={}` on hosted Supabase means the deployed worker has not
+yet emitted the patched diagnostic path or the provider returned no safe reason.
 
 8. Verify watchlist upsert:
 

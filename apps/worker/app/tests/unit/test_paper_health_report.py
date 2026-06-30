@@ -91,6 +91,37 @@ async def test_report_output_does_not_print_secrets() -> None:
     assert "[redacted]" in rendered
 
 
+async def test_report_ignores_own_critical_events_for_repeated_critical_count() -> None:
+    rows = _normal_rows(
+        recent_engine_events=[
+            _engine_event("critical", "paper_ops", "paper_health_report"),
+            _engine_event("critical", "paper_ops", "paper_health_report"),
+        ]
+    )
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+
+    assert report.result == PaperHealthResult.PASS
+    assert "repeated_critical_events" not in _finding_codes(report)
+
+
+async def test_report_still_fails_on_repeated_operational_critical_events() -> None:
+    rows = _normal_rows(
+        recent_engine_events=[
+            _engine_event("critical", "worker", "unexpected error; live orders blocked"),
+            _engine_event("critical", "worker", "unexpected error; live orders blocked"),
+            _engine_event("critical", "paper_ops", "paper_health_report"),
+        ]
+    )
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+
+    assert report.result == PaperHealthResult.FAIL
+    assert "repeated_critical_events" in _finding_codes(report)
+
+
 @dataclass(slots=True)
 class FakePaperHealthRepository:
     settings: BotSettings = field(default_factory=lambda: BotSettings(enabled=True))
@@ -157,6 +188,15 @@ def _api_health(provider: str, healthy: bool = True) -> JsonObject:
         "healthy": healthy,
         "status": "ok" if healthy else "error",
         "checked_at": NOW.isoformat(),
+    }
+
+
+def _engine_event(level: str, component: str, message: str) -> JsonObject:
+    return {
+        "level": level,
+        "component": component,
+        "message": message,
+        "created_at": NOW.isoformat(),
     }
 
 
