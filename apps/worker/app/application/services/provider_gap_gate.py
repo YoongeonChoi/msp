@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
+from urllib.request import Request, urlopen
 
 ALLOWED_PROVIDER_GAP_STATUSES = {
     "partial-system-only-accepted-fail-closed",
@@ -22,6 +25,8 @@ ALLOWED_PROVIDER_GAP_STATUSES = {
 }
 NO_PROVIDER_WARNING_GAP_IDS = "none"
 MAX_PROVIDER_GAP_EVIDENCE_FUTURE_SKEW_SECONDS = 5 * 60
+REMOTE_PROVIDER_GAP_ARTIFACT_TIMEOUT_SECONDS = 10
+MAX_PROVIDER_GAP_REMOTE_ARTIFACT_BYTES = 5_000_000
 SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,120}$")
 PROVIDER_GAP_ID_RE = re.compile(r"^[a-z0-9]+:[a-z0-9-]+:[a-z0-9-]+$")
@@ -57,6 +62,9 @@ PRIVATE_RETAINED_DNS_SUFFIXES = (
 
 class ProviderGapEvidenceValidationError(ValueError):
     pass
+
+
+RemoteArtifactFetcher = Callable[[str, int], bytes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +210,9 @@ def verify_provider_gap_evidence(
     evidence: Mapping[str, object],
     *,
     now: datetime | None = None,
+    verify_remote_artifacts: bool = False,
+    remote_fetcher: RemoteArtifactFetcher | None = None,
+    remote_timeout_seconds: int = REMOTE_PROVIDER_GAP_ARTIFACT_TIMEOUT_SECONDS,
 ) -> ProviderGapEvidenceSummary:
     errors: list[str] = []
     _scan_for_sensitive_keys(evidence, "provider_gap_evidence", errors)
@@ -286,10 +297,33 @@ def verify_provider_gap_evidence(
         errors.append("provider_gap_evidence.source_artifacts_must_cover_every_gap")
     if errors:
         raise ProviderGapEvidenceValidationError(_join_errors(errors))
+    if verify_remote_artifacts:
+        verify_provider_gap_remote_artifacts(
+            evidence,
+            fetcher=remote_fetcher,
+            timeout_seconds=remote_timeout_seconds,
+        )
     return ProviderGapEvidenceSummary(
         gap_count=len(expected_gap_ids),
         source_artifacts=source_artifact_count,
     )
+
+
+def verify_provider_gap_remote_artifacts(
+    evidence: Mapping[str, object],
+    *,
+    fetcher: RemoteArtifactFetcher | None = None,
+    timeout_seconds: int = REMOTE_PROVIDER_GAP_ARTIFACT_TIMEOUT_SECONDS,
+) -> None:
+    errors: list[str] = []
+    _validate_provider_gap_source_artifacts_remote_fetch(
+        evidence,
+        fetcher=fetcher or _default_remote_provider_gap_artifact_fetcher,
+        timeout_seconds=timeout_seconds,
+        errors=errors,
+    )
+    if errors:
+        raise ProviderGapEvidenceValidationError(_join_errors(errors))
 
 
 def provider_api_gap_id(gap: ProviderApiGap) -> str:
@@ -402,6 +436,69 @@ def _validate_provider_gap_source_artifact(
 
     artifact_captured_at = _require_timestamp(artifact, "captured_at", path, errors)
     _require_not_future(artifact_captured_at, f"{path}.captured_at", errors, now)
+
+
+def _validate_provider_gap_source_artifacts_remote_fetch(
+    evidence: Mapping[str, object],
+    *,
+    fetcher: RemoteArtifactFetcher,
+    timeout_seconds: int,
+    errors: list[str],
+) -> None:
+    source_artifacts = evidence.get("source_artifacts")
+    if not isinstance(source_artifacts, list):
+        return
+
+    for index, item in enumerate(source_artifacts):
+        if not isinstance(item, Mapping):
+            continue
+        artifact = cast(Mapping[str, object], item)
+        artifact_uri = artifact.get("artifact_uri")
+        artifact_sha256 = artifact.get("artifact_sha256")
+        if not isinstance(artifact_uri, str) or not isinstance(artifact_sha256, str):
+            continue
+
+        path = f"provider_gap_evidence.source_artifacts[{index}]"
+        if _provider_gap_artifact_uri_is_github_blob_page(artifact_uri):
+            errors.append(
+                f"{path}.artifact_uri_remote_must_reference_raw_artifact_bytes"
+            )
+            continue
+
+        try:
+            body = fetcher(artifact_uri, timeout_seconds)
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+            errors.append(f"{path}.artifact_uri_remote_fetch_failed")
+            continue
+
+        if len(body) > MAX_PROVIDER_GAP_REMOTE_ARTIFACT_BYTES:
+            errors.append(f"{path}.artifact_uri_remote_artifact_too_large")
+            continue
+
+        actual_sha256 = hashlib.sha256(body).hexdigest()
+        if actual_sha256 != artifact_sha256.lower():
+            errors.append(f"{path}.artifact_uri_remote_sha256_mismatch")
+
+
+def _provider_gap_artifact_uri_is_github_blob_page(uri: str) -> bool:
+    parsed = urlsplit(uri)
+    host = parsed.hostname.rstrip(".").casefold() if parsed.hostname else ""
+    if host not in {"github.com", "www.github.com"}:
+        return False
+    path_parts = [unquote(part) for part in parsed.path.split("/") if part]
+    return len(path_parts) >= 5 and path_parts[2] == "blob"
+
+
+def _default_remote_provider_gap_artifact_fetcher(
+    uri: str,
+    timeout_seconds: int,
+) -> bytes:
+    request = Request(
+        uri,
+        headers={"User-Agent": "kr-auto-trading-lab-live-readiness-verifier"},
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return cast(bytes, response.read(MAX_PROVIDER_GAP_REMOTE_ARTIFACT_BYTES + 1))
 
 
 def _reject_unknown_keys(

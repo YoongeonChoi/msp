@@ -114,6 +114,7 @@ class CollectorConfig:
     system_order_scope_evidence: Path
     system_order_scope_accepted_by: str
     output: Path
+    verify_remote_provider_gap_artifacts: bool = False
 
 
 CommandRunner = Callable[[CommandSpec], CommandResult]
@@ -287,6 +288,21 @@ def collect_live_readiness_evidence_bundle(
         },
     }
 
+    provider_contract_gaps_command: tuple[str, ...] = (
+        sys.executable,
+        "-m",
+        "app.tools.check_provider_contract_gaps",
+        "--system-order-scope-evidence",
+        str(config.system_order_scope_evidence),
+        "--provider-gap-evidence",
+        str(config.provider_gap_evidence),
+    )
+    if config.verify_remote_provider_gap_artifacts:
+        provider_contract_gaps_command = (
+            *provider_contract_gaps_command,
+            "--verify-remote-provider-gap-artifacts",
+        )
+
     local_checks = {
         "worker_release_freshness": _run_check(
             CommandSpec(
@@ -346,15 +362,7 @@ def collect_live_readiness_evidence_bundle(
         "provider_contract_gaps": _run_check(
             CommandSpec(
                 name="provider_contract_gaps",
-                command=(
-                    sys.executable,
-                    "-m",
-                    "app.tools.check_provider_contract_gaps",
-                    "--system-order-scope-evidence",
-                    str(config.system_order_scope_evidence),
-                    "--provider-gap-evidence",
-                    str(config.provider_gap_evidence),
-                ),
+                command=provider_contract_gaps_command,
                 cwd=apps_worker,
             ),
             runner,
@@ -434,6 +442,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--accept-system-order-scope", action="store_true")
     parser.add_argument("--system-order-scope-evidence", required=True, type=Path)
     parser.add_argument("--system-order-scope-accepted-by", required=True)
+    parser.add_argument(
+        "--verify-remote-provider-gap-artifacts",
+        action="store_true",
+        help=(
+            "Pass through provider gap artifact byte verification after publishing "
+            "retained source artifacts."
+        ),
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
 
@@ -452,6 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         system_order_scope_evidence=args.system_order_scope_evidence.resolve(),
         system_order_scope_accepted_by=args.system_order_scope_accepted_by,
         output=args.output.resolve(),
+        verify_remote_provider_gap_artifacts=args.verify_remote_provider_gap_artifacts,
     )
     try:
         _, summary = collect_live_readiness_evidence_bundle(config)

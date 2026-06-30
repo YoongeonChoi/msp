@@ -88,6 +88,33 @@ def test_live_readiness_evidence_collector_passes_gap_and_scope_evidence_to_prov
     assert "--provider-gap-evidence" in observed_command
     provider_gap_arg_index = observed_command.index("--provider-gap-evidence") + 1
     assert observed_command[provider_gap_arg_index] == str(config.provider_gap_evidence)
+    assert "--verify-remote-provider-gap-artifacts" not in observed_command
+
+
+def test_live_readiness_evidence_collector_can_verify_remote_provider_gap_artifacts(
+    tmp_path: Path,
+) -> None:
+    config = replace(
+        _config(tmp_path, output_path=tmp_path / "bundle.json"),
+        verify_remote_provider_gap_artifacts=True,
+    )
+    observed_command: tuple[str, ...] | None = None
+
+    def runner(spec: CommandSpec) -> CommandResult:
+        nonlocal observed_command
+        if spec.name == "provider_contract_gaps":
+            observed_command = spec.command
+        return _pass_runner(spec)
+
+    collect_live_readiness_evidence_bundle(
+        config,
+        command_runner=runner,
+        git_evidence_reader=_git_evidence,
+        clock=_clock(),
+    )
+
+    assert observed_command is not None
+    assert "--verify-remote-provider-gap-artifacts" in observed_command
 
 
 def test_live_readiness_evidence_collector_accepts_production_readiness_live_evidence(

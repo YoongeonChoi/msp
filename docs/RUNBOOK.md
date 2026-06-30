@@ -271,7 +271,8 @@ Provider contract gap gate:
 ```bash
 python -m app.tools.check_provider_contract_gaps \
   --system-order-scope-evidence path/to/system_order_scope_evidence.json \
-  --provider-gap-evidence path/to/provider_gap_evidence.json
+  --provider-gap-evidence path/to/provider_gap_evidence.json \
+  --verify-remote-provider-gap-artifacts
 ```
 
 On Windows:
@@ -279,7 +280,8 @@ On Windows:
 ```bash
 py -m app.tools.check_provider_contract_gaps `
   --system-order-scope-evidence path\to\system_order_scope_evidence.json `
-  --provider-gap-evidence path\to\provider_gap_evidence.json
+  --provider-gap-evidence path\to\provider_gap_evidence.json `
+  --verify-remote-provider-gap-artifacts
 ```
 
 2. The command must print a counted final line before production live operation is considered ready:
@@ -299,6 +301,10 @@ Running it without a valid `--provider-gap-evidence` manifest must return
 `docs/API_GAPS.md` SHA-256, every parsed provider gap id in order, and retained
 HTTPS source artifacts with provider-matching gap coverage, unique retained URI,
 unique SHA-256, non-future `captured_at`, and no secret-like keys.
+After retained provider-source artifacts are published, run with
+`--verify-remote-provider-gap-artifacts`; the gate rejects GitHub `blob` pages,
+caps response size, and requires downloaded bytes to match
+`artifact_sha256` without printing URI, body, or hash details on failure.
 The live-readiness bundle verifier rejects a bare `FINAL=PASS` because it hides
 whether unknown, invalid, partial, system-order-scope acceptance, or provider
 gap source evidence was present.
@@ -885,8 +891,8 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
-FINAL=PASS security_scan_evidence scan_id=render_deploy_hook_20260630144442 worklist_rows=1 completion_receipts=1 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=provider_gap_remote_artifacts_20260630150324 worklist_rows=2 completion_receipts=2 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=2 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
@@ -942,6 +948,7 @@ python -m app.tools.collect_live_readiness_evidence_bundle \
   --accept-system-order-scope \
   --system-order-scope-evidence path/to/system_order_scope_evidence.json \
   --system-order-scope-accepted-by scope-admin \
+  --verify-remote-provider-gap-artifacts \
   --output path/to/live_readiness_evidence_bundle.json
 ```
 
@@ -959,6 +966,7 @@ py -m app.tools.collect_live_readiness_evidence_bundle `
   --accept-system-order-scope `
   --system-order-scope-evidence path\to\system_order_scope_evidence.json `
   --system-order-scope-accepted-by scope-admin `
+  --verify-remote-provider-gap-artifacts `
   --output path\to\live_readiness_evidence_bundle.json
 ```
 

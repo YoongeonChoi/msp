@@ -110,6 +110,22 @@ approval. The authoritative readiness score remains
   until `verify_worker_release_freshness` observes the new commit in hosted
   Supabase.
 
+## 2026-06-30 Provider Gap Remote Source Proof
+
+- `verify_provider_gap_evidence` now has an optional remote-byte proof path for
+  retained provider API gap source artifacts.
+- `check_provider_contract_gaps --verify-remote-provider-gap-artifacts` fetches
+  each `source_artifacts[].artifact_uri`, rejects GitHub `blob` pages, caps
+  response size, and requires downloaded bytes to match
+  `source_artifacts[].artifact_sha256`.
+- The CLI still emits only the counted `FINAL=PASS/FAIL provider_contract_gaps`
+  line, so failed remote source proof cannot leak artifact URI, response body,
+  or hash details through operator output.
+- `collect_live_readiness_evidence_bundle` can pass the same remote provider-gap
+  source check with `--verify-remote-provider-gap-artifacts`, keeping the
+  default local fixture flow offline while making published release evidence
+  stricter.
+
 ## Current Status
 
 The repository is materially stronger than the original MVP, but it is still
@@ -208,33 +224,37 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `render_deploy_hook_20260630144442`.
+  `provider_gap_remote_artifacts_20260630150324`.
 - The retained report is
-  `security-artifacts/render_deploy_hook_20260630144442/report.md`.
-- The scan summary records 1 worklist row, 1 completion receipt,
+  `security-artifacts/provider_gap_remote_artifacts_20260630150324/report.md`.
+- The scan summary records 2 worklist rows, 2 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers the manual Render deploy hook helper: `--yes` is
-  required before any network call, only `https://api.render.com/deploy/...`
-  hook URLs are accepted, `ref` is pinned to the expected Git commit, and the
-  hook URL, token, response body, and full commit hash are not printed. The
-  live-order boundary is unchanged: `RiskService`, `ExecutionService`,
-  `BrokerPort`, and desktop broker/order API paths were not modified.
+- The delta scan covers provider gap remote source-artifact verification and
+  collector pass-through: the remote check is opt-in, GitHub `blob` pages are
+  rejected before fetch, response bytes are capped, and mismatch/fetch failures
+  use fixed reason codes without printing artifact URI, response body, declared
+  hash, or calculated hash. The live-order boundary is unchanged:
+  `RiskService`, `ExecutionService`, `BrokerPort`, and desktop broker/order API
+  paths were not modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
   `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
   `release_metadata_20260630132334`, `provider_detail_20260630133946`,
-  `hosted_env_files_20260630142933`, and `release_freshness_20260630140851`,
-  remain retained under
+  `hosted_env_files_20260630142933`, `release_freshness_20260630140851`, and
+  `render_deploy_hook_20260630144442`, remain retained under
   `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `538 passed`
-- `py -m ruff check .` from `apps/worker`: passed
-- `py -m mypy .` from `apps/worker`: passed
+- `py -m pytest -q --tb=short` from `apps/worker`: `543 passed`
+- `py -m pytest app/tests/unit/test_provider_gap_gate.py app/tests/unit/test_live_readiness_evidence_collector.py app/tests/unit/test_live_readiness_evidence_bundle.py -q`
+  from `apps/worker`: `183 passed`
+- `py -m ruff check . ../../supabase` from `apps/worker`: passed
+- `py -m mypy . ../../supabase/_hosted_env.py ../../supabase/verify_hosted_live_readiness.py ../../supabase/verify_hosted_live_enable_flow.py`
+  from `apps/worker`: `238 source files`
 - `py -m pytest app/tests/contract/test_verify_hosted_live_readiness.py app/tests/contract/test_verify_hosted_live_enable_flow.py -q --tb=short`
   from `apps/worker`: `34 passed`
 - `py -m pytest app/tests/unit/test_render_deploy_hook.py -q --tb=short`
@@ -255,8 +275,9 @@ The latest local verification recorded before this handoff included:
   `apps/worker`: expected `FINAL=SKIP render_deploy_hook` with
   `reason=render_deploy_hook_env_missing` when no operator hook URL is present
 - Scorecard/security evidence gates:
-  retained scan report prepared for `render_deploy_hook_20260630144442`; regenerate the
-  source-bound `security_scan_summary.json` after the final commit hash exists,
+  retained scan report prepared for
+  `provider_gap_remote_artifacts_20260630150324`; regenerate the source-bound
+  `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.
 

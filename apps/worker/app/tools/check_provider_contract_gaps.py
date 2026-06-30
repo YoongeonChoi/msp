@@ -43,6 +43,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             "to official source artifacts."
         ),
     )
+    parser.add_argument(
+        "--verify-remote-provider-gap-artifacts",
+        action="store_true",
+        help=(
+            "Fetch every source_artifacts[].artifact_uri over HTTPS and require "
+            "the downloaded bytes to match source_artifacts[].artifact_sha256."
+        ),
+    )
     args = parser.parse_args([] if argv is None else argv)
 
     api_gaps_markdown = API_GAPS.read_text(encoding="utf-8")
@@ -59,6 +67,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         verify_provider_gap_evidence(
             api_gaps_markdown,
             cast(dict[str, object], provider_gap_evidence_payload),
+            verify_remote_artifacts=args.verify_remote_provider_gap_artifacts,
         )
     except (OSError, json.JSONDecodeError, ProviderGapEvidenceValidationError):
         provider_gap_evidence_verified = False

@@ -211,6 +211,52 @@ def test_provider_gap_gate_cli_accepts_warning_with_system_order_scope_evidence(
     assert captured.err == ""
 
 
+def test_provider_gap_gate_cli_remote_flag_outputs_single_final_line_on_raw_requirement(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_gaps = tmp_path / "API_GAPS.md"
+    api_gaps.write_text(
+        "\n".join(
+            [
+                "| Provider | Gap | Status | Exact verification step |",
+                "| --- | --- | --- | --- |",
+                "| Toss | order create | verified-limit-implemented | checked |",
+                "| Toss | order modify | verified-not-implemented | intentionally blocked |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    provider_gap_evidence = _write_provider_gap_evidence(tmp_path, api_gaps)
+    evidence = json.loads(provider_gap_evidence.read_text(encoding="utf-8"))
+    evidence["source_artifacts"][0]["artifact_uri"] = (
+        "https://github.com/example-org/example-repo/blob/main/toss-openapi.json"
+    )
+    provider_gap_evidence.write_text(json.dumps(evidence), encoding="utf-8")
+    monkeypatch.setattr(check_provider_contract_gaps, "API_GAPS", api_gaps)
+
+    with pytest.raises(SystemExit) as exc_info:
+        check_provider_contract_gaps.main(
+            [
+                "--provider-gap-evidence",
+                str(provider_gap_evidence),
+                "--verify-remote-provider-gap-artifacts",
+            ]
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    stdout_lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert stdout_lines == [
+        "FINAL=FAIL provider_contract_gaps total_gaps=2 "
+        "blocking_unknown_gaps=0 invalid_status_gaps=0 warning_partial_gaps=0 "
+        "warning_partial_gap_ids=none system_order_scope_accepted=0 "
+        "provider_gap_evidence=0"
+    ]
+    assert captured.err == ""
+
+
 def test_provider_gap_evidence_binds_api_gaps_hash_and_all_gap_ids(tmp_path: Path) -> None:
     api_gaps = tmp_path / "API_GAPS.md"
     api_gaps.write_text(
@@ -233,6 +279,120 @@ def test_provider_gap_evidence_binds_api_gaps_hash_and_all_gap_ids(tmp_path: Pat
 
     assert summary.gap_count == 2
     assert summary.source_artifacts == 1
+
+
+def test_provider_gap_evidence_verifies_remote_artifact_bytes(tmp_path: Path) -> None:
+    api_gaps = tmp_path / "API_GAPS.md"
+    api_gaps.write_text(
+        "\n".join(
+            [
+                "| Provider | Gap | Status | Exact verification step |",
+                "| --- | --- | --- | --- |",
+                "| Toss | order create | verified-limit-implemented | checked |",
+                "| Toss | order modify | verified-not-implemented | intentionally blocked |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    evidence = json.loads(_write_provider_gap_evidence(tmp_path, api_gaps).read_text())
+    artifact_body = b'{"openapi":"3.0.0","paths":{}}\n'
+    artifact_uri = evidence["source_artifacts"][0]["artifact_uri"]
+    evidence["source_artifacts"][0]["artifact_sha256"] = hashlib.sha256(
+        artifact_body
+    ).hexdigest()
+    calls: list[tuple[str, int]] = []
+
+    def fetcher(uri: str, timeout_seconds: int) -> bytes:
+        calls.append((uri, timeout_seconds))
+        return artifact_body
+
+    summary = verify_provider_gap_evidence(
+        api_gaps.read_text(encoding="utf-8"),
+        evidence,
+        verify_remote_artifacts=True,
+        remote_fetcher=fetcher,
+        remote_timeout_seconds=3,
+    )
+
+    assert summary.gap_count == 2
+    assert summary.source_artifacts == 1
+    assert calls == [(artifact_uri, 3)]
+
+
+def test_provider_gap_evidence_rejects_remote_artifact_hash_mismatch_safely(
+    tmp_path: Path,
+) -> None:
+    api_gaps = tmp_path / "API_GAPS.md"
+    api_gaps.write_text(
+        "\n".join(
+            [
+                "| Provider | Gap | Status | Exact verification step |",
+                "| --- | --- | --- | --- |",
+                "| Toss | order create | verified-limit-implemented | checked |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    evidence = json.loads(_write_provider_gap_evidence(tmp_path, api_gaps).read_text())
+    artifact_uri = evidence["source_artifacts"][0]["artifact_uri"]
+    artifact_sha256 = evidence["source_artifacts"][0]["artifact_sha256"]
+
+    with pytest.raises(ValueError) as exc_info:
+        verify_provider_gap_evidence(
+            api_gaps.read_text(encoding="utf-8"),
+            evidence,
+            verify_remote_artifacts=True,
+            remote_fetcher=lambda _uri, _timeout: b"published-provider-gap-bytes",
+        )
+
+    reason = str(exc_info.value)
+    assert (
+        "provider_gap_evidence.source_artifacts[0]."
+        "artifact_uri_remote_sha256_mismatch"
+    ) in reason
+    assert artifact_uri not in reason
+    assert artifact_sha256 not in reason
+    assert "published-provider-gap-bytes" not in reason
+
+
+def test_provider_gap_evidence_rejects_github_blob_artifact_uri_before_fetch(
+    tmp_path: Path,
+) -> None:
+    api_gaps = tmp_path / "API_GAPS.md"
+    api_gaps.write_text(
+        "\n".join(
+            [
+                "| Provider | Gap | Status | Exact verification step |",
+                "| --- | --- | --- | --- |",
+                "| Toss | order create | verified-limit-implemented | checked |",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    evidence = json.loads(_write_provider_gap_evidence(tmp_path, api_gaps).read_text())
+    evidence["source_artifacts"][0]["artifact_uri"] = (
+        "https://github.com/example-org/example-repo/blob/main/toss-openapi.json"
+    )
+    calls = 0
+
+    def fetcher(_uri: str, _timeout_seconds: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        return b"unused"
+
+    with pytest.raises(ValueError) as exc_info:
+        verify_provider_gap_evidence(
+            api_gaps.read_text(encoding="utf-8"),
+            evidence,
+            verify_remote_artifacts=True,
+            remote_fetcher=fetcher,
+        )
+
+    assert (
+        "provider_gap_evidence.source_artifacts[0]."
+        "artifact_uri_remote_must_reference_raw_artifact_bytes"
+    ) in str(exc_info.value)
+    assert calls == 0
 
 
 def test_provider_gap_evidence_rejects_api_gaps_hash_mismatch(
