@@ -856,8 +856,8 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=83add88_20260630113328 worklist_rows=16 completion_receipts=16 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=16 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=c288dcd_20260630120402 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
 ```
 
 `FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier

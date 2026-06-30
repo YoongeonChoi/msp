@@ -126,17 +126,17 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `83add88_20260630113328`.
-- The retained report is `security-artifacts/83add88_20260630113328/report.md`.
-- The scan summary records 16 worklist rows, 16 completion receipts,
+  `c288dcd_20260630120402`.
+- The retained report is `security-artifacts/c288dcd_20260630120402/report.md`.
+- The scan summary records 3 worklist rows, 3 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers the Render worker startup compatibility update,
-  desktop dashboard/signal rendering, Toss holdings and market-data reads,
-  Supabase persistence/schema fallback, feature/portfolio sync, risk policy
-  scoping, run-cycle live-order gates, container/config wiring, and the
-  recovery drill. The earlier `fb223a4_20260628182340` scan remains retained
-  under `security-artifacts/` as broader historical baseline evidence.
+- The delta scan covers Toss credential fail-closed startup behavior in
+  `toss_auth.py`, `toss_client.py`, and `container.py`: missing Toss credentials
+  no longer crash Render bootstrap, provider health reports unhealthy, and live
+  broker paths still fail closed before authenticated provider calls. The
+  earlier `fb223a4_20260628182340` and `83add88_20260630113328` scans remain
+  retained under `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
@@ -152,9 +152,9 @@ The latest local verification recorded before this handoff included:
 - Browser QA for `http://localhost:1420/?page=dashboard`: dashboard/control
   navigation rendered with no relevant console warnings or errors
 - Scorecard/security evidence gates:
-  `FINAL=PASS security_scan_evidence ... worklist_rows=16 ... candidate_findings=0`
+  `FINAL=PASS security_scan_evidence ... worklist_rows=3 ... candidate_findings=0`
   and
-  `FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=16 candidate_findings=0 reportable_findings=0`
+  `FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0`
 
 Run verification again after any source edit, commit publication, or external
 evidence update.

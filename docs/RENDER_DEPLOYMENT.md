@@ -41,6 +41,13 @@ Use a local Render-equivalent one-shot before or after a manual Render deploy:
 ENV=production MOCK_PROVIDERS=false RUN_ONCE=true python -m app.main
 ```
 
+If required Toss credentials are absent, startup must not crash during
+`bootstrap()`. The one-shot run should exit cleanly after logging
+`known_fail_closed` with safe message `toss_credentials_missing`, and no Toss
+HTTP token request should be attempted. This proves the Render worker can stay
+observable while live trading remains blocked until credentials and hosted
+provider evidence are supplied.
+
 If the worker exits during startup with a PostgREST `400`, inspect only the
 redacted response body. Hosted projects that have not yet applied
 `supabase/migrations/0005_schema_alignment.sql` may be missing

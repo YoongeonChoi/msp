@@ -53,13 +53,16 @@ class TossAuth:
         return token.access_token
 
     async def _issue_token(self) -> TossOAuthToken:
+        credentials = self.credentials
+        if credentials is None:
+            raise ProviderAuthError("toss", "toss_credentials_missing")
         try:
             response = await self.client.post(
                 f"{self.base_url}/oauth2/token",
                 data={
                     "grant_type": "client_credentials",
-                    "client_id": self.credentials.client_id,
-                    "client_secret": self.credentials.client_secret,
+                    "client_id": credentials.client_id,
+                    "client_secret": credentials.client_secret,
                 },
                 headers={"content-type": "application/x-www-form-urlencoded"},
             )
@@ -79,9 +82,9 @@ class TossAuth:
             await self.client.aclose()
 
 
-def _credentials_from_settings(settings: Settings) -> TossCredentials:
+def _credentials_from_settings(settings: Settings) -> TossCredentials | None:
     if settings.toss_client_id is None or settings.toss_client_secret is None:
-        raise ProviderAuthError("toss", "toss_credentials_missing")
+        return None
     return TossCredentials(
         client_id=settings.toss_client_id.get_secret_value(),
         client_secret=settings.toss_client_secret.get_secret_value(),

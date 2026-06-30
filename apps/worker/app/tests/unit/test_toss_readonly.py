@@ -13,7 +13,7 @@ from app.adapters.broker.toss_client import TossClient
 from app.adapters.broker.toss_models import TossCandleQuery
 from app.application.ports.broker_port import BrokerOrderRequest
 from app.config import Settings
-from app.domain.common.errors import ProviderRateLimitError
+from app.domain.common.errors import ProviderAuthError, ProviderRateLimitError
 from app.domain.common.json import JsonObject
 from app.tools.test_toss_readonly import _mask_identifier
 
@@ -42,6 +42,49 @@ async def test_toss_auth_uses_client_credentials_form_token_flow() -> None:
     assert token == "token-value"
     assert len(requests) == 1
     await client.aclose()
+
+
+async def test_toss_auth_missing_credentials_fails_closed_without_http_call() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"unexpected": True}, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = Settings(
+        MOCK_PROVIDERS=False,
+        TOSS_CLIENT_ID=None,
+        TOSS_CLIENT_SECRET=None,
+    )
+    auth = TossAuth(settings, client=client)
+
+    with pytest.raises(ProviderAuthError, match="toss_credentials_missing"):
+        await auth.access_token()
+
+    assert requests == []
+    await client.aclose()
+
+
+async def test_toss_client_missing_credentials_reports_unhealthy() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"unexpected": True}, request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    settings = Settings(
+        MOCK_PROVIDERS=False,
+        TOSS_CLIENT_ID=None,
+        TOSS_CLIENT_SECRET=None,
+    )
+    auth = TossAuth(settings, client=http_client)
+    client = TossClient(settings, auth=auth, client=http_client)
+
+    assert await client.provider_health() is False
+    assert requests == []
+    await http_client.aclose()
 
 
 async def test_toss_client_parses_account_response() -> None:
