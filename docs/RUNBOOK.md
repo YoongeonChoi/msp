@@ -891,8 +891,8 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
-FINAL=PASS security_scan_evidence scan_id=1140debf-dc21-451b-b297-39dc50d20146 worklist_rows=5 completion_receipts=5 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=5 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=d4415550-5104-47e5-a896-32ca72005b89 worklist_rows=8 completion_receipts=8 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=8 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
@@ -942,6 +942,7 @@ python -m app.tools.collect_live_readiness_evidence_bundle \
   --reviewed-by release-admin \
   --provider-evidence path/to/provider_lifecycle_evidence.json \
   --provider-gap-evidence path/to/provider_gap_evidence.json \
+  --feature-evidence path/to/feature_evidence.json \
   --incident-output-file path/to/incident_output.txt \
   --incident-channel-evidence path/to/incident_channel_evidence.json \
   --security-scan-summary path/to/security_scan_summary.json \
@@ -960,6 +961,7 @@ py -m app.tools.collect_live_readiness_evidence_bundle `
   --reviewed-by release-admin `
   --provider-evidence path\to\provider_lifecycle_evidence.json `
   --provider-gap-evidence path\to\provider_gap_evidence.json `
+  --feature-evidence path\to\feature_evidence.json `
   --incident-output-file path\to\incident_output.txt `
   --incident-channel-evidence path\to\incident_channel_evidence.json `
   --security-scan-summary path\to\security_scan_summary.json `
@@ -973,7 +975,7 @@ py -m app.tools.collect_live_readiness_evidence_bundle `
 The collector must print:
 
 ```text
-FINAL=PASS live_readiness_evidence_collector external_checks=4 local_checks=7 bundle_verified=1
+FINAL=PASS live_readiness_evidence_collector external_checks=4 local_checks=7 feature_evidence=1 bundle_verified=1
 ```
 
 The collector `--reviewed-by` value is copied into the final bundle
@@ -995,13 +997,13 @@ provider lifecycle, incident ACK, and scope acceptance roles fails as
 4. Run the final bundle verifier from `apps/worker`:
 
 ```bash
-python -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence
+python -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence --verify-remote-feature-artifacts
 ```
 
 On Windows:
 
 ```bash
-py -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence
+py -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence --verify-remote-feature-artifacts
 ```
 
 The standalone security verifier and final bundle verifier both recompute the
@@ -1018,13 +1020,13 @@ bytes to match each declared SHA-256. With
 incident-channel proof and system-order-scope acceptance proof, rejects GitHub
 `blob` pages, caps response size, and fails without printing URI, body, or hash
 details when fetched bytes do not match the declared SHA-256. The final PASS line
-must retain the three remote verification flags so local-only bundle verification
+must retain the four remote verification flags so local-only bundle verification
 cannot be mistaken for post-publication release evidence.
 
 5. The command must print:
 
 ```text
-FINAL=PASS live_readiness_evidence_bundle external_checks=4 local_checks=7 security_scan=1 system_order_scope_accepted=1 provider_gap_evidence=1 remote_provider_artifacts=1 remote_incident_evidence=1 remote_system_order_scope_evidence=1
+FINAL=PASS live_readiness_evidence_bundle external_checks=4 local_checks=7 security_scan=1 system_order_scope_accepted=1 provider_gap_evidence=1 feature_evidence=1 remote_provider_artifacts=1 remote_incident_evidence=1 remote_system_order_scope_evidence=1 remote_feature_artifacts=1
 ```
 
 When run from a bundle file, the final verifier also reads `security_scan.report_path`

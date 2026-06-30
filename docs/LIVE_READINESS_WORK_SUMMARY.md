@@ -274,6 +274,20 @@ channel ACK drills, and published retained artifacts.
 
 ## Verification Snapshot
 
+Current feature-evidence bundle gate update:
+
+- `collect_live_readiness_evidence_bundle` now requires `--feature-evidence`
+  and embeds a provider-live feature evidence manifest in the release bundle.
+- `verify_live_readiness_evidence_bundle` now requires `feature_evidence=1`,
+  rejects mock/unready/non-`provider_live_v1` feature payloads, requires
+  quote/fundamentals/news/market-sector/snapshot retained artifacts per symbol,
+  and can verify those published artifact bytes with
+  `--verify-remote-feature-artifacts`.
+- Latest local verification from `apps/worker` after this update:
+  `py -m pytest -q` returned `553 passed`, the focused bundle/collector tests
+  returned `178 passed`, `ruff` passed on the changed files, and `mypy` reported
+  no issues on the changed source/test files.
+
 The latest local verification recorded before this handoff included:
 
 - `py -m pytest -q --tb=short` from `apps/worker`: `543 passed`
@@ -328,8 +342,9 @@ evidence update.
 - Security and release artifacts must be published and re-verified through
   remote byte-fetch gates after push.
 - The final live-readiness evidence bundle must pass with
-  `remote_provider_artifacts=1`, `remote_incident_evidence=1`, and
-  `remote_system_order_scope_evidence=1`.
+  `feature_evidence=1`, `remote_provider_artifacts=1`,
+  `remote_incident_evidence=1`, `remote_system_order_scope_evidence=1`, and
+  `remote_feature_artifacts=1`.
 
 Until those blockers are closed with retained external evidence, live operation
 must remain disabled.

@@ -55,6 +55,9 @@ def test_live_readiness_evidence_collector_writes_valid_bundle(tmp_path: Path) -
     assert provider_evidence["provider"] == "toss"
     provider_gap_evidence = written["provider_gap_evidence"]
     assert provider_gap_evidence["schema_version"] == 1
+    feature_evidence = written["feature_evidence"]
+    assert feature_evidence["feature_source"] == "provider_live_v1"
+    assert feature_evidence["live_trading_ready"] is True
     scorecard = written["local_checks"]["live_readiness_scorecard"]
     assert scorecard["final_output"] == (
         "FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 "
@@ -392,6 +395,60 @@ def test_live_readiness_evidence_collector_rejects_sensitive_security_summary(
     reason = str(exc_info.value)
     assert "sensitive_key_not_allowed:security_scan_summary.access_token" in reason
     assert "secret-value-that-must-not-print" not in reason
+
+
+def test_live_readiness_evidence_collector_rejects_sensitive_feature_evidence(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "bundle.json"
+    feature_evidence = _write_feature_evidence(tmp_path)
+    payload = json.loads(feature_evidence.read_text(encoding="utf-8"))
+    payload["api_key"] = "feature-secret-that-must-not-print"
+    feature_evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CollectorError) as exc_info:
+        collect_live_readiness_evidence_bundle(
+            _config(
+                tmp_path,
+                output_path=output_path,
+                feature_evidence=feature_evidence,
+            ),
+            command_runner=_pass_runner,
+            git_evidence_reader=_git_evidence,
+            clock=_clock(),
+        )
+
+    reason = str(exc_info.value)
+    assert "sensitive_key_not_allowed:feature_evidence.api_key" in reason
+    assert "feature-secret-that-must-not-print" not in reason
+    assert not output_path.exists()
+
+
+def test_live_readiness_evidence_collector_rejects_unready_feature_evidence(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "bundle.json"
+    feature_evidence = _write_feature_evidence(tmp_path)
+    payload = json.loads(feature_evidence.read_text(encoding="utf-8"))
+    payload["live_trading_ready"] = False
+    feature_evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CollectorError) as exc_info:
+        collect_live_readiness_evidence_bundle(
+            _config(
+                tmp_path,
+                output_path=output_path,
+                feature_evidence=feature_evidence,
+            ),
+            command_runner=_pass_runner,
+            git_evidence_reader=_git_evidence,
+            clock=_clock(),
+        )
+
+    reason = str(exc_info.value)
+    assert "feature_evidence.live_trading_ready_must_be_true" in reason
+    assert "False" not in reason
+    assert not output_path.exists()
 
 
 def test_live_readiness_evidence_collector_rejects_weak_security_report_artifact(
@@ -1481,9 +1538,10 @@ def test_live_readiness_evidence_collector_excludes_security_report_path_from_so
     expected_git = _collect_git_evidence(
         repo,
         excluded_paths=(
-                config.provider_evidence,
-                config.provider_gap_evidence,
-                config.incident_output_file,
+            config.provider_evidence,
+            config.provider_gap_evidence,
+            config.feature_evidence,
+            config.incident_output_file,
             config.incident_channel_evidence,
             config.security_scan_summary,
             config.system_order_scope_evidence,
@@ -1725,6 +1783,7 @@ def _config(
     security_summary: Path | None = None,
     provider_evidence: Path | None = None,
     provider_gap_evidence: Path | None = None,
+    feature_evidence: Path | None = None,
     incident_channel_evidence: Path | None = None,
     system_order_scope_evidence: Path | None = None,
 ) -> CollectorConfig:
@@ -1740,6 +1799,7 @@ def _config(
         reviewed_by="release-admin-1",
         provider_evidence=provider_evidence or _write_provider_lifecycle_evidence(tmp_path),
         provider_gap_evidence=provider_gap_evidence or _write_provider_gap_evidence(tmp_path),
+        feature_evidence=feature_evidence or _write_feature_evidence(tmp_path),
         incident_output_file=incident_output,
         incident_channel_evidence=(
             incident_channel_evidence or _write_incident_channel_evidence(tmp_path)
@@ -1949,6 +2009,83 @@ def _write_provider_gap_evidence(tmp_path: Path) -> Path:
                         "captured_at": "2026-06-28T01:02:40Z",
                     }
                     for provider, ids in sorted(provider_gap_ids.items())
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_feature_evidence(tmp_path: Path) -> Path:
+    path = tmp_path / "feature-evidence.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "captured_at": "2026-06-28T01:10:30Z",
+                "feature_source": "provider_live_v1",
+                "feature_evidence_version": "provider_live_v1",
+                "live_trading_ready": True,
+                "symbols": ["005930"],
+                "feature_snapshot_count": 1,
+                "provider_inputs": {
+                    "quote_provider": "toss_market_data",
+                    "fundamentals_provider": "opendart",
+                    "news_provider": "naver",
+                    "market_sector_provider": "krx_listing",
+                },
+                "feature_artifacts": [
+                    {
+                        "type": "feature_snapshot_export",
+                        "symbol": "005930",
+                        "uri": (
+                            "https://evidence.kr-autotrading.net/"
+                            "feature-evidence/005930/snapshot"
+                        ),
+                        "sha256": _sha256("6"),
+                        "captured_at": "2026-06-28T01:10:40Z",
+                    },
+                    {
+                        "type": "quote_evidence",
+                        "symbol": "005930",
+                        "uri": (
+                            "https://evidence.kr-autotrading.net/"
+                            "feature-evidence/005930/quote"
+                        ),
+                        "sha256": _sha256("7"),
+                        "captured_at": "2026-06-28T01:10:41Z",
+                    },
+                    {
+                        "type": "fundamentals_evidence",
+                        "symbol": "005930",
+                        "uri": (
+                            "https://evidence.kr-autotrading.net/"
+                            "feature-evidence/005930/fundamentals"
+                        ),
+                        "sha256": _sha256("8"),
+                        "captured_at": "2026-06-28T01:10:42Z",
+                    },
+                    {
+                        "type": "news_evidence",
+                        "symbol": "005930",
+                        "uri": (
+                            "https://evidence.kr-autotrading.net/"
+                            "feature-evidence/005930/news"
+                        ),
+                        "sha256": _sha256("9"),
+                        "captured_at": "2026-06-28T01:10:43Z",
+                    },
+                    {
+                        "type": "market_sector_evidence",
+                        "symbol": "005930",
+                        "uri": (
+                            "https://evidence.kr-autotrading.net/"
+                            "feature-evidence/005930/sector"
+                        ),
+                        "sha256": _sha256("0"),
+                        "captured_at": "2026-06-28T01:10:44Z",
+                    },
                 ],
             }
         ),

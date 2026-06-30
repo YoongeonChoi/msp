@@ -44,8 +44,9 @@ def test_live_readiness_evidence_bundle_passes_cli(
         "FINAL=PASS live_readiness_evidence_bundle "
         "external_checks=4 local_checks=7 security_scan=1 "
         "system_order_scope_accepted=1 provider_gap_evidence=1 "
+        "feature_evidence=1 "
         "remote_provider_artifacts=0 remote_incident_evidence=0 "
-        "remote_system_order_scope_evidence=0"
+        "remote_system_order_scope_evidence=0 remote_feature_artifacts=0"
     ) in output
 
 
@@ -72,6 +73,7 @@ def test_live_readiness_evidence_bundle_file_verifies_remote_provider_artifacts(
     assert summary.remote_provider_artifacts is True
     assert summary.remote_incident_evidence is False
     assert summary.remote_system_order_scope_evidence is False
+    assert summary.remote_feature_artifacts is False
     assert len(calls) == 5
     assert {timeout for _, timeout in calls} == {4}
 
@@ -118,6 +120,7 @@ def test_live_readiness_evidence_bundle_cli_verifies_remote_provider_artifacts(
     assert "remote_provider_artifacts=1" in output
     assert "remote_incident_evidence=0" in output
     assert "remote_system_order_scope_evidence=0" in output
+    assert "remote_feature_artifacts=0" in output
 
 
 def test_live_readiness_evidence_bundle_remote_provider_artifact_failure_is_scoped(
@@ -177,6 +180,7 @@ def test_live_readiness_evidence_bundle_file_verifies_remote_incident_and_scope_
     assert summary.remote_provider_artifacts is False
     assert summary.remote_incident_evidence is True
     assert summary.remote_system_order_scope_evidence is True
+    assert summary.remote_feature_artifacts is False
     assert len(calls) == 2
     assert {timeout for _, timeout in calls} == {4, 5}
 
@@ -226,6 +230,7 @@ def test_live_readiness_evidence_bundle_cli_verifies_remote_incident_and_scope_e
     assert "remote_provider_artifacts=0" in output
     assert "remote_incident_evidence=1" in output
     assert "remote_system_order_scope_evidence=1" in output
+    assert "remote_feature_artifacts=0" in output
 
 
 def test_live_readiness_evidence_bundle_cli_reports_all_remote_verification_flags(
@@ -238,6 +243,7 @@ def test_live_readiness_evidence_bundle_cli_reports_all_remote_verification_flag
     bodies.update(_attach_provider_remote_artifact_hashes(bundle))
     bodies.update(_attach_incident_remote_evidence_hash(bundle))
     bodies.update(_attach_system_scope_remote_evidence_hash(bundle))
+    bodies.update(_attach_feature_remote_artifact_hashes(bundle))
     evidence_path = _write_evidence(tmp_path, bundle)
     security_scan = cast(dict[str, object], bundle["security_scan"])
     monkeypatch.setattr(
@@ -270,6 +276,7 @@ def test_live_readiness_evidence_bundle_cli_reports_all_remote_verification_flag
             "--verify-remote-provider-artifacts",
             "--verify-remote-incident-evidence",
             "--verify-remote-system-order-scope-evidence",
+            "--verify-remote-feature-artifacts",
         ]
     )
 
@@ -279,8 +286,9 @@ def test_live_readiness_evidence_bundle_cli_reports_all_remote_verification_flag
         "FINAL=PASS live_readiness_evidence_bundle "
         "external_checks=4 local_checks=7 security_scan=1 "
         "system_order_scope_accepted=1 provider_gap_evidence=1 "
+        "feature_evidence=1 "
         "remote_provider_artifacts=1 remote_incident_evidence=1 "
-        "remote_system_order_scope_evidence=1"
+        "remote_system_order_scope_evidence=1 remote_feature_artifacts=1"
     ) in output
 
 
@@ -336,6 +344,112 @@ def test_live_readiness_evidence_bundle_remote_scope_failure_is_scoped(
     assert "system_order_scope_acceptance.evidence_uri_remote_sha256_mismatch" in reason
     assert "system-scope-bundle-evidence" not in reason
     assert "SCOPE-20260628-1" not in reason
+
+
+def test_live_readiness_evidence_bundle_file_verifies_remote_feature_artifacts(
+    tmp_path: Path,
+) -> None:
+    bundle = _valid_bundle()
+    bodies = _attach_feature_remote_artifact_hashes(bundle)
+    evidence_path = _write_evidence(tmp_path, bundle)
+    calls: list[tuple[str, int]] = []
+
+    def fetcher(uri: str, timeout_seconds: int) -> bytes:
+        calls.append((uri, timeout_seconds))
+        return bodies[uri]
+
+    summary = verify_live_readiness_evidence_bundle_file(
+        evidence_path,
+        verify_remote_feature_artifacts=True,
+        remote_feature_artifact_fetcher=fetcher,
+        remote_feature_artifact_timeout_seconds=4,
+    )
+
+    assert summary.feature_evidence is True
+    assert summary.remote_feature_artifacts is True
+    assert summary.remote_provider_artifacts is False
+    assert len(calls) == 5
+    assert {timeout for _, timeout in calls} == {4}
+
+
+def test_live_readiness_evidence_bundle_remote_feature_failure_is_scoped(
+    tmp_path: Path,
+) -> None:
+    bundle = _valid_bundle()
+    bodies = _attach_feature_remote_artifact_hashes(bundle)
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    artifacts = cast(list[dict[str, object]], feature_evidence["feature_artifacts"])
+    artifacts[0]["sha256"] = _real_sha256(b"different-feature-export")
+    evidence_path = _write_evidence(tmp_path, bundle)
+
+    def fetcher(uri: str, timeout_seconds: int) -> bytes:
+        return bodies[uri]
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle_file(
+            evidence_path,
+            verify_remote_feature_artifacts=True,
+            remote_feature_artifact_fetcher=fetcher,
+        )
+
+    reason = str(exc_info.value)
+    assert "feature_evidence.feature_artifacts[0].uri_remote_sha256_mismatch" in reason
+    assert "feature-bundle-artifact-0" not in reason
+    assert "005930" not in reason
+
+
+def test_live_readiness_evidence_bundle_rejects_missing_feature_evidence() -> None:
+    bundle = _valid_bundle()
+    del bundle["feature_evidence"]
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    assert "bundle.feature_evidence_must_be_object" in str(exc_info.value)
+
+
+def test_live_readiness_evidence_bundle_rejects_unready_feature_evidence() -> None:
+    bundle = _valid_bundle()
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    feature_evidence["live_trading_ready"] = False
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert "feature_evidence.live_trading_ready_must_be_true" in reason
+    assert "False" not in reason
+
+
+def test_live_readiness_evidence_bundle_rejects_mock_feature_source() -> None:
+    bundle = _valid_bundle()
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    feature_evidence["feature_source"] = "mock"
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert "feature_evidence.feature_source_must_be_provider_live_v1" in reason
+    assert "mock" not in reason
+
+
+def test_live_readiness_evidence_bundle_rejects_incomplete_feature_artifacts() -> None:
+    bundle = _valid_bundle()
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    artifacts = cast(list[dict[str, object]], feature_evidence["feature_artifacts"])
+    feature_evidence["feature_artifacts"] = [
+        artifact for artifact in artifacts if artifact["type"] != "market_sector_evidence"
+    ]
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert (
+        "feature_evidence.feature_artifacts_missing_types_for_005930="
+        "market_sector_evidence"
+    ) in reason
 
 
 def test_live_readiness_evidence_bundle_cli_rejects_stale_source_binding(
@@ -2341,6 +2455,7 @@ def _valid_bundle() -> dict[str, object]:
             },
             "provider_lifecycle_evidence": _valid_provider_lifecycle_evidence(),
             "provider_gap_evidence": _valid_provider_gap_evidence(),
+            "feature_evidence": _valid_feature_evidence(),
             "system_order_scope_acceptance": {
                 "accepted": True,
                 "scope": "system_created_live_orders_only",
@@ -2513,6 +2628,61 @@ def _valid_provider_gap_evidence() -> dict[str, object]:
     }
 
 
+def _valid_feature_evidence() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "captured_at": "2026-06-28T01:10:30Z",
+        "feature_source": "provider_live_v1",
+        "feature_evidence_version": "provider_live_v1",
+        "live_trading_ready": True,
+        "symbols": ["005930"],
+        "feature_snapshot_count": 1,
+        "provider_inputs": {
+            "quote_provider": "toss_market_data",
+            "fundamentals_provider": "opendart",
+            "news_provider": "naver",
+            "market_sector_provider": "krx_listing",
+        },
+        "feature_artifacts": [
+            {
+                "type": "feature_snapshot_export",
+                "symbol": "005930",
+                "uri": "https://evidence.kr-autotrading.net/feature-evidence/005930/snapshot",
+                "sha256": _sha256("6"),
+                "captured_at": "2026-06-28T01:10:40Z",
+            },
+            {
+                "type": "quote_evidence",
+                "symbol": "005930",
+                "uri": "https://evidence.kr-autotrading.net/feature-evidence/005930/quote",
+                "sha256": _sha256("7"),
+                "captured_at": "2026-06-28T01:10:41Z",
+            },
+            {
+                "type": "fundamentals_evidence",
+                "symbol": "005930",
+                "uri": "https://evidence.kr-autotrading.net/feature-evidence/005930/fundamentals",
+                "sha256": _sha256("8"),
+                "captured_at": "2026-06-28T01:10:42Z",
+            },
+            {
+                "type": "news_evidence",
+                "symbol": "005930",
+                "uri": "https://evidence.kr-autotrading.net/feature-evidence/005930/news",
+                "sha256": _sha256("9"),
+                "captured_at": "2026-06-28T01:10:43Z",
+            },
+            {
+                "type": "market_sector_evidence",
+                "symbol": "005930",
+                "uri": "https://evidence.kr-autotrading.net/feature-evidence/005930/sector",
+                "sha256": _sha256("0"),
+                "captured_at": "2026-06-28T01:10:44Z",
+            },
+        ],
+    }
+
+
 def _sha256(prefix: str) -> str:
     return (prefix * 64)[:64]
 
@@ -2566,3 +2736,17 @@ def _attach_system_scope_remote_evidence_hash(
     body = b"system-scope-bundle-evidence"
     acceptance["evidence_sha256"] = _real_sha256(body)
     return {uri: body}
+
+
+def _attach_feature_remote_artifact_hashes(
+    bundle: dict[str, object],
+) -> dict[str, bytes]:
+    bodies: dict[str, bytes] = {}
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    artifacts = cast(list[dict[str, object]], feature_evidence["feature_artifacts"])
+    for index, artifact in enumerate(artifacts):
+        uri = cast(str, artifact["uri"])
+        body = f"feature-bundle-artifact-{index}".encode()
+        artifact["sha256"] = _real_sha256(body)
+        bodies[uri] = body
+    return bodies

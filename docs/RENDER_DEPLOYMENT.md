@@ -113,8 +113,8 @@ python -m app.tools.verify_system_order_scope_evidence --evidence path/to/system
 python -m app.tools.verify_security_scan_evidence --evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_worker_release_freshness --repo-root .
-python -m app.tools.collect_live_readiness_evidence_bundle --environment production-readiness --reviewed-by release-admin --provider-evidence path/to/provider_lifecycle_evidence.json --provider-gap-evidence path/to/provider_gap_evidence.json --incident-output-file path/to/incident_output.txt --incident-channel-evidence path/to/incident_channel_evidence.json --security-scan-summary path/to/security_scan_summary.json --accept-system-order-scope --system-order-scope-evidence path/to/system_order_scope_evidence.json --system-order-scope-accepted-by scope-admin --verify-remote-provider-gap-artifacts --output path/to/live_readiness_evidence_bundle.json
-python -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence
+python -m app.tools.collect_live_readiness_evidence_bundle --environment production-readiness --reviewed-by release-admin --provider-evidence path/to/provider_lifecycle_evidence.json --provider-gap-evidence path/to/provider_gap_evidence.json --feature-evidence path/to/feature_evidence.json --incident-output-file path/to/incident_output.txt --incident-channel-evidence path/to/incident_channel_evidence.json --security-scan-summary path/to/security_scan_summary.json --accept-system-order-scope --system-order-scope-evidence path/to/system_order_scope_evidence.json --system-order-scope-accepted-by scope-admin --verify-remote-provider-gap-artifacts --output path/to/live_readiness_evidence_bundle.json
+python -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence --verify-remote-feature-artifacts
 ```
 
 `--reviewed-by` becomes the final bundle `reviewed_by` value and must identify
@@ -333,20 +333,22 @@ outputs, the real incident-channel evidence, the system-created-order scope
 acceptance, and the independent Codex Security replay summary into a redacted
 bundle. Prefer `collect_live_readiness_evidence_bundle`; it runs the local and
 hosted command gates, reads the retained provider lifecycle, provider gap source,
-incident-output, incident-channel, security, and system-order-scope evidence,
+provider-live feature, incident-output, incident-channel, security, and system-order-scope evidence,
 writes the bundle only after validation passes, and returns
 `FINAL=PASS live_readiness_evidence_collector`. The bundle verifier must also
 return `FINAL=PASS live_readiness_evidence_bundle`; when run from a bundle file,
 it reads `security_scan.report_path`, rejects absolute or directory-escaping
 report paths, and rechecks the local report file SHA-256 against
 `security_scan.report_sha256`. With `--verify-remote-provider-artifacts`,
-`--verify-remote-incident-evidence`, and
-`--verify-remote-system-order-scope-evidence`, it also fetches the retained
-provider lifecycle, incident-channel, and system-order-scope evidence bytes,
+`--verify-remote-incident-evidence`,
+`--verify-remote-system-order-scope-evidence`, and
+`--verify-remote-feature-artifacts`, it also fetches the retained
+provider lifecycle, incident-channel, system-order-scope, and provider-live feature evidence bytes,
 rejects GitHub `blob` pages, caps response size, and requires every downloaded
 body to match its declared SHA-256. The final PASS line must include
-`remote_provider_artifacts=1`, `remote_incident_evidence=1`, and
-`remote_system_order_scope_evidence=1`; `0` on any remote flag means the bundle
+`feature_evidence=1`, `remote_provider_artifacts=1`,
+`remote_incident_evidence=1`, `remote_system_order_scope_evidence=1`, and
+`remote_feature_artifacts=1`; `0` on any remote flag means the bundle
 was only locally validated and is not post-publication release evidence. It also rejects missing, duplicate, unknown,
 or weak hosted Supabase, worker release freshness, and local execution/recovery/alert final-output metrics, multi-line
 final output, any `FINAL=PASS` line whose check-name token is not exactly the
@@ -354,8 +356,8 @@ expected gate name, mutated live-enable migration output, and unknown root, chec
 so raw logs, screenshots, or ad hoc evidence payloads must stay in retained
 artifacts referenced only by HTTPS URI and SHA-256. Retained evidence references
 must be distinct across the entire bundle: incident-channel proof,
-system-order-scope proof, provider gap source proof, security report proof, and
-every provider lifecycle artifact must not reuse the same retained URI or
+system-order-scope proof, provider gap source proof, security report proof,
+every provider lifecycle artifact, and every provider-live feature artifact must not reuse the same retained URI or
 SHA-256. The collector output
 path must also be a new distinct local artifact and must not equal any input
 evidence file or the local security `report_path`; duplicate local artifact

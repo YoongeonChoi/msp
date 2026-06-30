@@ -42,6 +42,8 @@ PERCENT_ENCODED_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 INCIDENT_DRILL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 INCIDENT_CHANNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
 OPERATOR_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
+KOREAN_STOCK_SYMBOL_RE = re.compile(r"^\d{6}$")
+PROVIDER_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
 URI_UNRESERVED_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 )
@@ -85,6 +87,19 @@ SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS = INCIDENT_EVIDENCE_BLOCKED_TERMS + (
     "\\tmp\\",
 )
 SECURITY_SCAN_REPORT_BLOCKED_TERMS = SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS
+FEATURE_EVIDENCE_BLOCKED_TERMS = SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS + (
+    "static",
+    "unconfigured",
+)
+FEATURE_PROVIDER_BLOCKED_TERMS = (
+    "mock",
+    "fixture",
+    "sample",
+    "static",
+    "unconfigured",
+    "missing",
+    "test",
+)
 PRIVATE_RETAINED_DNS_SUFFIXES = (
     ".corp",
     ".home",
@@ -103,6 +118,7 @@ BUNDLE_KEYS = {
     "local_checks",
     "provider_lifecycle_evidence",
     "provider_gap_evidence",
+    "feature_evidence",
     "system_order_scope_acceptance",
     "security_scan",
 }
@@ -205,6 +221,31 @@ SYSTEM_ORDER_SCOPE_KEYS = {
     "evidence_uri",
     "evidence_sha256",
 }
+FEATURE_EVIDENCE_KEYS = {
+    "schema_version",
+    "captured_at",
+    "feature_source",
+    "feature_evidence_version",
+    "live_trading_ready",
+    "symbols",
+    "feature_snapshot_count",
+    "provider_inputs",
+    "feature_artifacts",
+}
+FEATURE_PROVIDER_INPUT_KEYS = {
+    "quote_provider",
+    "fundamentals_provider",
+    "news_provider",
+    "market_sector_provider",
+}
+FEATURE_ARTIFACT_KEYS = {"type", "symbol", "uri", "sha256", "captured_at"}
+FEATURE_ARTIFACT_TYPES = {
+    "feature_snapshot_export",
+    "quote_evidence",
+    "fundamentals_evidence",
+    "news_evidence",
+    "market_sector_evidence",
+}
 BUNDLE_ENVIRONMENT_TO_SCOPE_DEPLOYMENT_ENVIRONMENT = {
     "staging": "staging",
     "production-readiness": "production",
@@ -267,9 +308,11 @@ class LiveReadinessEvidenceBundleSummary:
     security_scan: bool
     system_order_scope_accepted: bool
     provider_gap_evidence: bool
+    feature_evidence: bool
     remote_provider_artifacts: bool = False
     remote_incident_evidence: bool = False
     remote_system_order_scope_evidence: bool = False
+    remote_feature_artifacts: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +358,9 @@ def verify_live_readiness_evidence_bundle_file(
     remote_system_order_scope_evidence_timeout_seconds: int = (
         REMOTE_EVIDENCE_TIMEOUT_SECONDS
     ),
+    verify_remote_feature_artifacts: bool = False,
+    remote_feature_artifact_fetcher: RemoteArtifactFetcher | None = None,
+    remote_feature_artifact_timeout_seconds: int = REMOTE_EVIDENCE_TIMEOUT_SECONDS,
 ) -> LiveReadinessEvidenceBundleSummary:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -389,15 +435,25 @@ def verify_live_readiness_evidence_bundle_file(
             timeout_seconds=remote_system_order_scope_evidence_timeout_seconds,
             path="system_order_scope_acceptance",
         )
+    feature_evidence = bundle.get("feature_evidence")
+    if verify_remote_feature_artifacts and isinstance(feature_evidence, Mapping):
+        verify_feature_evidence_remote_artifacts(
+            cast(Mapping[str, object], feature_evidence),
+            fetcher=remote_feature_artifact_fetcher,
+            timeout_seconds=remote_feature_artifact_timeout_seconds,
+            path="feature_evidence",
+        )
     return LiveReadinessEvidenceBundleSummary(
         external_checks=summary.external_checks,
         local_checks=summary.local_checks,
         security_scan=summary.security_scan,
         system_order_scope_accepted=summary.system_order_scope_accepted,
         provider_gap_evidence=summary.provider_gap_evidence,
+        feature_evidence=summary.feature_evidence,
         remote_provider_artifacts=verify_remote_provider_artifacts,
         remote_incident_evidence=verify_remote_incident_evidence,
         remote_system_order_scope_evidence=verify_remote_system_order_scope_evidence,
+        remote_feature_artifacts=verify_remote_feature_artifacts,
     )
 
 
@@ -560,6 +616,32 @@ def verify_system_order_scope_remote_evidence(
         raise BundleValidationError(_join_errors(errors))
 
 
+def verify_feature_evidence_remote_artifacts(
+    feature_evidence: Mapping[str, object],
+    *,
+    fetcher: RemoteArtifactFetcher | None = None,
+    timeout_seconds: int = REMOTE_EVIDENCE_TIMEOUT_SECONDS,
+    path: str = "feature_evidence",
+) -> None:
+    errors: list[str] = []
+    artifacts = feature_evidence.get("feature_artifacts")
+    if isinstance(artifacts, Sequence) and not isinstance(artifacts, (str, bytes)):
+        for index, item in enumerate(artifacts):
+            if not isinstance(item, Mapping):
+                continue
+            _validate_single_remote_evidence_reference(
+                cast(Mapping[str, object], item),
+                uri_key="uri",
+                sha256_key="sha256",
+                path=f"{path}.feature_artifacts[{index}]",
+                fetcher=fetcher or _default_remote_evidence_fetcher,
+                timeout_seconds=timeout_seconds,
+                errors=errors,
+            )
+    if errors:
+        raise BundleValidationError(_join_errors(errors))
+
+
 def verify_live_readiness_evidence_bundle(
     payload: Mapping[str, object],
 ) -> LiveReadinessEvidenceBundleSummary:
@@ -661,6 +743,21 @@ def verify_live_readiness_evidence_bundle(
             errors,
         )
 
+    feature_evidence = _require_mapping(
+        payload,
+        "feature_evidence",
+        "bundle",
+        errors,
+    )
+    feature_evidence_valid = False
+    if feature_evidence is not None:
+        feature_evidence_valid = _validate_feature_evidence(
+            feature_evidence,
+            generated_at,
+            reviewed_at,
+            errors,
+        )
+
     scope_acceptance = _require_mapping(
         payload,
         "system_order_scope_acceptance",
@@ -706,6 +803,7 @@ def verify_live_readiness_evidence_bundle(
         external_checks=external_checks,
         provider_lifecycle_evidence=provider_lifecycle_evidence,
         provider_gap_evidence=provider_gap_evidence,
+        feature_evidence=feature_evidence,
         scope_acceptance=scope_acceptance,
         security_scan=security_scan,
         errors=errors,
@@ -722,6 +820,7 @@ def verify_live_readiness_evidence_bundle(
         security_scan=security_scan_valid,
         system_order_scope_accepted=scope_accepted,
         provider_gap_evidence=provider_gap_evidence is not None,
+        feature_evidence=feature_evidence_valid,
     )
 
 
@@ -770,6 +869,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "system-order scope acceptance evidence."
         ),
     )
+    parser.add_argument(
+        "--verify-remote-feature-artifacts",
+        action="store_true",
+        help=(
+            "Fetch feature_evidence.feature_artifacts[].uri over HTTPS and require "
+            "downloaded bytes to match each declared SHA-256. Use this after "
+            "publishing retained provider-live feature artifacts."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -781,6 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_remote_system_order_scope_evidence=(
                 args.verify_remote_system_order_scope_evidence
             ),
+            verify_remote_feature_artifacts=args.verify_remote_feature_artifacts,
         )
     except BundleValidationError as exc:
         print(f"FINAL=FAIL live_readiness_evidence_bundle reason={_safe_reason(str(exc))}")
@@ -789,11 +898,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     security_scan = 1 if summary.security_scan else 0
     scope_accepted = 1 if summary.system_order_scope_accepted else 0
     provider_gap_evidence = 1 if summary.provider_gap_evidence else 0
+    feature_evidence = 1 if summary.feature_evidence else 0
     remote_provider_artifacts = 1 if summary.remote_provider_artifacts else 0
     remote_incident_evidence = 1 if summary.remote_incident_evidence else 0
     remote_system_order_scope_evidence = (
         1 if summary.remote_system_order_scope_evidence else 0
     )
+    remote_feature_artifacts = 1 if summary.remote_feature_artifacts else 0
     print(
         "FINAL=PASS live_readiness_evidence_bundle "
         f"external_checks={summary.external_checks} "
@@ -801,9 +912,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"security_scan={security_scan} "
         f"system_order_scope_accepted={scope_accepted} "
         f"provider_gap_evidence={provider_gap_evidence} "
+        f"feature_evidence={feature_evidence} "
         f"remote_provider_artifacts={remote_provider_artifacts} "
         f"remote_incident_evidence={remote_incident_evidence} "
-        f"remote_system_order_scope_evidence={remote_system_order_scope_evidence}"
+        f"remote_system_order_scope_evidence={remote_system_order_scope_evidence} "
+        f"remote_feature_artifacts={remote_feature_artifacts}"
     )
     return 0
 
@@ -936,6 +1049,7 @@ def _validate_retained_evidence_reference_uniqueness(
     external_checks: Mapping[str, object] | None,
     provider_lifecycle_evidence: Mapping[str, object] | None,
     provider_gap_evidence: Mapping[str, object] | None,
+    feature_evidence: Mapping[str, object] | None,
     scope_acceptance: Mapping[str, object] | None,
     security_scan: Mapping[str, object] | None,
     errors: list[str],
@@ -1005,6 +1119,21 @@ def _validate_retained_evidence_reference_uniqueness(
                 add_uri(
                     item.get("artifact_uri"),
                     f"provider_gap_evidence.source_artifacts[{index}].artifact_uri",
+                )
+
+    if feature_evidence is not None:
+        artifacts = feature_evidence.get("feature_artifacts")
+        if isinstance(artifacts, Sequence) and not isinstance(artifacts, (str, bytes)):
+            for index, item in enumerate(artifacts):
+                if not isinstance(item, Mapping):
+                    continue
+                add_sha256(
+                    item.get("sha256"),
+                    f"feature_evidence.feature_artifacts[{index}].sha256",
+                )
+                add_uri(
+                    item.get("uri"),
+                    f"feature_evidence.feature_artifacts[{index}].uri",
                 )
 
     if scope_acceptance is not None:
@@ -1689,6 +1818,206 @@ def _validate_provider_gap_evidence(
         verify_provider_gap_evidence(api_gaps_markdown, evidence)
     except ProviderGapEvidenceValidationError as exc:
         errors.append(f"provider_gap_evidence.invalid:{exc}")
+
+
+def _validate_feature_evidence(
+    evidence: Mapping[str, object],
+    generated_at: datetime | None,
+    reviewed_at: datetime | None,
+    errors: list[str],
+) -> bool:
+    path = "feature_evidence"
+    _reject_unknown_keys(evidence, FEATURE_EVIDENCE_KEYS, path, errors)
+    schema_version = _require_int(evidence, "schema_version", path, errors)
+    if schema_version is not None and schema_version != 1:
+        errors.append(f"{path}.schema_version_must_be_1")
+
+    captured_at = _require_timestamp(evidence, "captured_at", path, errors)
+    _require_not_future(captured_at, f"{path}.captured_at", errors)
+    _require_inside_window(captured_at, generated_at, reviewed_at, f"{path}.captured_at", errors)
+
+    feature_source = _require_str(evidence, "feature_source", path, errors)
+    if feature_source is not None and feature_source != "provider_live_v1":
+        errors.append(f"{path}.feature_source_must_be_provider_live_v1")
+    evidence_version = _require_str(evidence, "feature_evidence_version", path, errors)
+    if evidence_version is not None and evidence_version != "provider_live_v1":
+        errors.append(f"{path}.feature_evidence_version_must_be_provider_live_v1")
+
+    live_trading_ready = _require_bool(evidence, "live_trading_ready", path, errors)
+    if live_trading_ready is not True:
+        errors.append(f"{path}.live_trading_ready_must_be_true")
+
+    symbols = _validate_feature_symbols(evidence.get("symbols"), path, errors)
+    snapshot_count = _require_int(evidence, "feature_snapshot_count", path, errors)
+    if snapshot_count is not None and snapshot_count <= 0:
+        errors.append(f"{path}.feature_snapshot_count_must_be_positive")
+    if snapshot_count is not None and symbols and snapshot_count != len(symbols):
+        errors.append(f"{path}.feature_snapshot_count_must_match_symbols")
+
+    provider_inputs = _require_mapping(evidence, "provider_inputs", path, errors)
+    if provider_inputs is not None:
+        _validate_feature_provider_inputs(provider_inputs, errors)
+
+    artifact_types_by_symbol = _validate_feature_artifacts(
+        evidence.get("feature_artifacts"),
+        symbols,
+        captured_at,
+        generated_at,
+        reviewed_at,
+        errors,
+    )
+    for symbol in symbols:
+        observed_types = artifact_types_by_symbol.get(symbol, set())
+        missing_types = FEATURE_ARTIFACT_TYPES - observed_types
+        if missing_types:
+            errors.append(
+                f"{path}.feature_artifacts_missing_types_for_{symbol}="
+                f"{','.join(sorted(missing_types))}"
+            )
+
+    return (
+        schema_version == 1
+        and feature_source == "provider_live_v1"
+        and evidence_version == "provider_live_v1"
+        and live_trading_ready is True
+        and bool(symbols)
+        and snapshot_count == len(symbols)
+        and all(
+            artifact_types_by_symbol.get(symbol, set()) >= FEATURE_ARTIFACT_TYPES
+            for symbol in symbols
+        )
+    )
+
+
+def _validate_feature_symbols(
+    raw_symbols: object,
+    path: str,
+    errors: list[str],
+) -> tuple[str, ...]:
+    if not isinstance(raw_symbols, Sequence) or isinstance(raw_symbols, (str, bytes)):
+        errors.append(f"{path}.symbols_must_be_array")
+        return ()
+    if len(raw_symbols) == 0:
+        errors.append(f"{path}.symbols_must_not_be_empty")
+        return ()
+
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for index, raw_symbol in enumerate(raw_symbols):
+        item_path = f"{path}.symbols[{index}]"
+        if not isinstance(raw_symbol, str) or raw_symbol.strip() == "":
+            errors.append(f"{item_path}_must_be_non_empty_string")
+            continue
+        symbol = raw_symbol.strip()
+        if KOREAN_STOCK_SYMBOL_RE.fullmatch(symbol) is None:
+            errors.append(f"{item_path}_must_be_6_digit_krx_symbol")
+            continue
+        if symbol in seen:
+            errors.append(f"{item_path}_must_be_unique")
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return tuple(symbols)
+
+
+def _validate_feature_provider_inputs(
+    provider_inputs: Mapping[str, object],
+    errors: list[str],
+) -> None:
+    path = "feature_evidence.provider_inputs"
+    _reject_unknown_keys(provider_inputs, FEATURE_PROVIDER_INPUT_KEYS, path, errors)
+    for key in sorted(FEATURE_PROVIDER_INPUT_KEYS):
+        provider = _require_str(provider_inputs, key, path, errors)
+        if provider is None:
+            continue
+        if PROVIDER_IDENTIFIER_RE.fullmatch(provider) is None:
+            errors.append(f"{path}.{key}_must_be_logical_provider_identifier")
+        if _contains_blocked_feature_provider_term(provider):
+            errors.append(f"{path}.{key}_must_not_be_mock_fixture_or_missing")
+
+
+def _validate_feature_artifacts(
+    raw_artifacts: object,
+    symbols: Sequence[str],
+    feature_captured_at: datetime | None,
+    generated_at: datetime | None,
+    reviewed_at: datetime | None,
+    errors: list[str],
+) -> dict[str, set[str]]:
+    path = "feature_evidence.feature_artifacts"
+    artifacts_by_symbol: dict[str, set[str]] = {symbol: set() for symbol in symbols}
+    if not isinstance(raw_artifacts, Sequence) or isinstance(raw_artifacts, (str, bytes)):
+        errors.append(f"{path}_must_be_array")
+        return artifacts_by_symbol
+    if len(raw_artifacts) == 0:
+        errors.append(f"{path}_must_not_be_empty")
+        return artifacts_by_symbol
+
+    for index, raw_artifact in enumerate(raw_artifacts):
+        item_path = f"{path}[{index}]"
+        if not isinstance(raw_artifact, Mapping):
+            errors.append(f"{item_path}_must_be_object")
+            continue
+        artifact = cast(Mapping[str, object], raw_artifact)
+        _reject_unknown_keys(artifact, FEATURE_ARTIFACT_KEYS, item_path, errors)
+
+        artifact_type = _require_str(artifact, "type", item_path, errors)
+        if artifact_type is not None and artifact_type not in FEATURE_ARTIFACT_TYPES:
+            errors.append(f"{item_path}.type_invalid")
+
+        symbol = _require_str(artifact, "symbol", item_path, errors)
+        if symbol is not None:
+            if KOREAN_STOCK_SYMBOL_RE.fullmatch(symbol) is None:
+                errors.append(f"{item_path}.symbol_must_be_6_digit_krx_symbol")
+            elif symbol not in symbols:
+                errors.append(f"{item_path}.symbol_must_be_in_symbols")
+
+        uri = _require_str(artifact, "uri", item_path, errors)
+        if uri is not None:
+            if _contains_blocked_feature_evidence_term(uri):
+                errors.append(f"{item_path}.uri_must_not_be_mock_fixture_or_local")
+            _validate_retained_https_uri(uri, item_path, "uri", errors)
+
+        sha256 = _require_str(artifact, "sha256", item_path, errors)
+        if sha256 is not None and SHA256_RE.fullmatch(sha256) is None:
+            errors.append(f"{item_path}.sha256_must_be_64_hex")
+
+        captured_at = _require_timestamp(artifact, "captured_at", item_path, errors)
+        _require_not_future(captured_at, f"{item_path}.captured_at", errors)
+        _require_inside_window(
+            captured_at,
+            generated_at,
+            reviewed_at,
+            f"{item_path}.captured_at",
+            errors,
+        )
+        if (
+            captured_at is not None
+            and feature_captured_at is not None
+            and captured_at < feature_captured_at
+        ):
+            errors.append(f"{item_path}.captured_at_must_not_precede_feature_capture")
+
+        if (
+            artifact_type in FEATURE_ARTIFACT_TYPES
+            and isinstance(symbol, str)
+            and symbol in artifacts_by_symbol
+        ):
+            observed = artifacts_by_symbol[symbol]
+            if artifact_type in observed:
+                errors.append(f"{item_path}.type_must_be_unique_per_symbol")
+            observed.add(artifact_type)
+    return artifacts_by_symbol
+
+
+def _contains_blocked_feature_provider_term(value: str) -> bool:
+    normalized = value.casefold()
+    return any(term in normalized for term in FEATURE_PROVIDER_BLOCKED_TERMS)
+
+
+def _contains_blocked_feature_evidence_term(value: str) -> bool:
+    normalized = value.casefold()
+    return any(term in normalized for term in FEATURE_EVIDENCE_BLOCKED_TERMS)
 
 
 def _validate_incident_response_metrics(

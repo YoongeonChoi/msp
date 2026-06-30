@@ -108,6 +108,7 @@ class CollectorConfig:
     reviewed_by: str
     provider_evidence: Path
     provider_gap_evidence: Path
+    feature_evidence: Path
     incident_output_file: Path
     incident_channel_evidence: Path
     security_scan_summary: Path
@@ -136,6 +137,7 @@ def collect_live_readiness_evidence_bundle(
     _validate_collector_artifact_paths(
         config.provider_evidence,
         config.provider_gap_evidence,
+        config.feature_evidence,
         config.incident_output_file,
         config.incident_channel_evidence,
         config.security_scan_summary,
@@ -145,6 +147,7 @@ def collect_live_readiness_evidence_bundle(
     _validate_collector_output_path(config.output)
     provider_lifecycle_evidence = _load_provider_lifecycle_evidence(config.provider_evidence)
     provider_gap_evidence = _load_provider_gap_evidence(config.provider_gap_evidence)
+    feature_evidence = _load_feature_evidence(config.feature_evidence)
     if any(
         _operator_identities_match(config.reviewed_by, operator_identity)
         for operator_identity in _provider_lifecycle_reviewer_identities(
@@ -174,6 +177,7 @@ def collect_live_readiness_evidence_bundle(
         _validate_collector_artifact_paths(
             config.provider_evidence,
             config.provider_gap_evidence,
+            config.feature_evidence,
             config.incident_output_file,
             config.incident_channel_evidence,
             config.security_scan_summary,
@@ -184,6 +188,7 @@ def collect_live_readiness_evidence_bundle(
     excluded_paths = [
         config.provider_evidence,
         config.provider_gap_evidence,
+        config.feature_evidence,
         config.incident_output_file,
         config.incident_channel_evidence,
         config.security_scan_summary,
@@ -394,6 +399,7 @@ def collect_live_readiness_evidence_bundle(
         collection_started_at,
         provider_lifecycle_evidence,
         provider_gap_evidence,
+        feature_evidence,
         security_scan,
         incident_channel_evidence,
         system_order_scope_acceptance,
@@ -408,6 +414,7 @@ def collect_live_readiness_evidence_bundle(
         "local_checks": local_checks,
         "provider_lifecycle_evidence": provider_lifecycle_evidence,
         "provider_gap_evidence": provider_gap_evidence,
+        "feature_evidence": feature_evidence,
         "system_order_scope_acceptance": system_order_scope_acceptance,
         "security_scan": security_scan,
     }
@@ -436,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--reviewed-by", required=True)
     parser.add_argument("--provider-evidence", required=True, type=Path)
     parser.add_argument("--provider-gap-evidence", required=True, type=Path)
+    parser.add_argument("--feature-evidence", required=True, type=Path)
     parser.add_argument("--incident-output-file", required=True, type=Path)
     parser.add_argument("--incident-channel-evidence", required=True, type=Path)
     parser.add_argument("--security-scan-summary", required=True, type=Path)
@@ -462,6 +470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         reviewed_by=args.reviewed_by,
         provider_evidence=args.provider_evidence.resolve(),
         provider_gap_evidence=args.provider_gap_evidence.resolve(),
+        feature_evidence=args.feature_evidence.resolve(),
         incident_output_file=args.incident_output_file.resolve(),
         incident_channel_evidence=args.incident_channel_evidence.resolve(),
         security_scan_summary=args.security_scan_summary.resolve(),
@@ -480,6 +489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "FINAL=PASS live_readiness_evidence_collector "
         f"external_checks={summary.external_checks} "
         f"local_checks={summary.local_checks} "
+        f"feature_evidence={1 if summary.feature_evidence else 0} "
         "bundle_verified=1"
     )
     return 0
@@ -567,6 +577,19 @@ def _load_provider_gap_evidence(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise CollectorError("provider_gap_evidence_must_be_object")
     _scan_for_sensitive_keys(payload, "provider_gap_evidence")
+    return cast(dict[str, object], payload)
+
+
+def _load_feature_evidence(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CollectorError("feature_evidence_unreadable") from exc
+    except json.JSONDecodeError as exc:
+        raise CollectorError("feature_evidence_json_invalid") from exc
+    if not isinstance(payload, dict):
+        raise CollectorError("feature_evidence_must_be_object")
+    _scan_for_sensitive_keys(payload, "feature_evidence")
     return cast(dict[str, object], payload)
 
 
