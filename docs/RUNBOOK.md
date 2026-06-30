@@ -891,8 +891,8 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
-FINAL=PASS security_scan_evidence scan_id=paper_health_self_noise_20260630151326 worklist_rows=2 completion_receipts=2 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=2 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=1140debf-dc21-451b-b297-39dc50d20146 worklist_rows=5 completion_receipts=5 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=5 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
