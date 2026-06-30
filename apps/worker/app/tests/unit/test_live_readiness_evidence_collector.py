@@ -37,7 +37,7 @@ def test_live_readiness_evidence_collector_writes_valid_bundle(tmp_path: Path) -
     )
 
     assert summary.external_checks == 4
-    assert summary.local_checks == 6
+    assert summary.local_checks == 7
     assert summary.security_scan is True
     assert summary.system_order_scope_accepted is True
     assert output_path.exists()
@@ -2006,6 +2006,11 @@ def _pass_runner(spec: CommandSpec) -> CommandResult:
         "provider_lifecycle_evidence": (
             "FINAL=PASS provider_lifecycle_evidence provider=toss environment=sandbox "
             "status_observations=2 audit_logs_reviewed=2 evidence_artifacts=5"
+        ),
+        "worker_release_freshness": (
+            "FINAL=PASS worker_release_freshness "
+            "expected_sha_short=2bac8362b504 observed_sha_short=2bac8362b504 "
+            "heartbeat_age_sec=12 max_age_sec=300"
         ),
         "live_enable_migration": "FINAL=PASS live_enable_consumed_once rpc_hardening",
         "live_execution_safety_drill": (

@@ -92,6 +92,7 @@ python -m app.tools.verify_incident_response_evidence --incident-output-file pat
 python -m app.tools.verify_system_order_scope_evidence --evidence path/to/system_order_scope_evidence.json --verify-remote-evidence
 python -m app.tools.verify_security_scan_evidence --evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
+python -m app.tools.verify_worker_release_freshness --repo-root .
 python -m app.tools.collect_live_readiness_evidence_bundle --environment production-readiness --reviewed-by release-admin --provider-evidence path/to/provider_lifecycle_evidence.json --provider-gap-evidence path/to/provider_gap_evidence.json --incident-output-file path/to/incident_output.txt --incident-channel-evidence path/to/incident_channel_evidence.json --security-scan-summary path/to/security_scan_summary.json --accept-system-order-scope --system-order-scope-evidence path/to/system_order_scope_evidence.json --system-order-scope-accepted-by scope-admin --output path/to/live_readiness_evidence_bundle.json
 python -m app.tools.verify_live_readiness_evidence_bundle --evidence path/to/live_readiness_evidence_bundle.json --verify-remote-provider-artifacts --verify-remote-incident-evidence --verify-remote-system-order-scope-evidence
 ```
@@ -111,6 +112,11 @@ security report file, and rejects stale `security_scan.source_head` or
 `security_scan.source_diff_sha256` values. If the Git source binding cannot be
 collected, decoded, or read, the verifier fails closed with
 `security_scan.source_binding_unavailable`; this is not live-readiness evidence.
+`verify_worker_release_freshness` separately proves the manually deployed Render
+worker is running the current commit by comparing hosted
+`worker_heartbeats.details.release_sha` with local Git `HEAD` and by rejecting a
+missing, mismatched, stale, or future heartbeat. A missing local Render CLI or a
+successful push alone is not deploy freshness evidence.
 
 The command must return `FINAL=PASS live_external_alert_drill` after delivering
 four alert payloads for manual-check, stale-heartbeat, live-account-count failure,
@@ -322,7 +328,7 @@ body to match its declared SHA-256. The final PASS line must include
 `remote_provider_artifacts=1`, `remote_incident_evidence=1`, and
 `remote_system_order_scope_evidence=1`; `0` on any remote flag means the bundle
 was only locally validated and is not post-publication release evidence. It also rejects missing, duplicate, unknown,
-or weak hosted Supabase and local execution/recovery/alert final-output metrics, multi-line
+or weak hosted Supabase, worker release freshness, and local execution/recovery/alert final-output metrics, multi-line
 final output, any `FINAL=PASS` line whose check-name token is not exactly the
 expected gate name, mutated live-enable migration output, and unknown root, check, and nested evidence fields
 so raw logs, screenshots, or ad hoc evidence payloads must stay in retained

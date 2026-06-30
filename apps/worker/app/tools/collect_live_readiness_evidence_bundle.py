@@ -288,6 +288,21 @@ def collect_live_readiness_evidence_bundle(
     }
 
     local_checks = {
+        "worker_release_freshness": _run_check(
+            CommandSpec(
+                name="worker_release_freshness",
+                command=(
+                    sys.executable,
+                    "-m",
+                    "app.tools.verify_worker_release_freshness",
+                    "--repo-root",
+                    str(config.repo_root),
+                ),
+                cwd=apps_worker,
+            ),
+            runner,
+            now,
+        ),
         "live_enable_migration": _run_check(
             CommandSpec(
                 name="live_enable_migration",

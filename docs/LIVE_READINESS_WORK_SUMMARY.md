@@ -60,6 +60,24 @@ approval. The authoritative readiness score remains
   requires a manual Render redeploy before hosted heartbeats can show the new
   `release_sha`.
 
+## 2026-06-30 Worker Release Freshness Gate
+
+- Added `app.tools.verify_worker_release_freshness`, a read-only hosted
+  Supabase verifier that checks the latest `worker_heartbeats` row and compares
+  `details.release_sha` with the current Git `HEAD`.
+- The verifier prints one redacted `FINAL` line with only short commit prefixes,
+  `heartbeat_age_sec`, and `max_age_sec`; missing Supabase env returns
+  `FINAL=SKIP`, while missing, mismatched, stale, or future heartbeats return
+  `FINAL=FAIL`.
+- `collect_live_readiness_evidence_bundle` now runs this gate before the other
+  local checks, and `verify_live_readiness_evidence_bundle` rejects bundle
+  output where the observed short SHA differs from the expected short SHA, the
+  heartbeat is older than the configured max age, or unknown metrics are added.
+- A hosted check before this commit returned a release mismatch: the local
+  expected short SHA was `2bac8362b504`, while hosted Render still reported
+  `976ced927831`. That is useful negative evidence: the worker was running, but
+  it was not proven to be running the latest pushed code.
+
 ## Current Status
 
 The repository is materially stronger than the original MVP, but it is still
@@ -143,7 +161,8 @@ channel ACK drills, and published retained artifacts.
 - `collect_live_readiness_evidence_bundle` and
   `verify_live_readiness_evidence_bundle` now require local gates, hosted
   Supabase proof, provider lifecycle proof, incident ACK proof, system-order
-  scope proof, provider-gap evidence, and independent security replay evidence.
+  scope proof, worker release freshness proof, provider-gap evidence, and
+  independent security replay evidence.
 - Provider lifecycle, incident response, system-order-scope, provider-gap, and
   security scan evidence each have standalone verifiers with redaction,
   retained-artifact URI, SHA-256, timestamp, identity, and remote-byte-proof
@@ -157,39 +176,43 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `provider_detail_20260630133946`.
+  `release_freshness_20260630140851`.
 - The retained report is
-  `security-artifacts/provider_detail_20260630133946/report.md`.
+  `security-artifacts/release_freshness_20260630140851/report.md`.
 - The scan summary records 3 worklist rows, 3 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers provider health detail parsing and paper health report
-  output: only allowlisted provider detail keys are summarized, strings are
-  single-line normalized and bounded, unknown keys are ignored, and formatted
-  provider details pass through `_safe_text` before operator output. The
-  live-order boundary is unchanged:
+- The delta scan covers the worker release freshness verifier and final bundle
+  integration: hosted Supabase service-role access stays read-only and is not
+  printed, the CLI emits only one bounded `FINAL` line with short SHA prefixes
+  and age metrics, and the final bundle rejects missing, stale, mismatched, or
+  metric-spoofed release freshness output. The live-order boundary is unchanged:
   `RiskService`, `ExecutionService`, `BrokerPort`, and desktop broker/order API
   paths were not modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
   `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
-  `release_metadata_20260630132334`, remain retained under `security-artifacts/`
-  as broader historical baseline evidence.
+  `release_metadata_20260630132334` and `provider_detail_20260630133946`,
+  remain retained under `security-artifacts/` as broader historical baseline
+  evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `518 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `527 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `py -m pytest app/tests/unit/test_paper_health_report.py -q --tb=short`
-  from `apps/worker`: `9 passed`
+- `py -m pytest app/tests/unit/test_worker_release_freshness.py app/tests/unit/test_live_readiness_evidence_bundle.py app/tests/unit/test_live_readiness_evidence_collector.py -q --tb=short`
+  from `apps/worker`: `177 passed`
 - `py -m app.tools.paper_health_report` from `apps/worker`: expected
   `FINAL=FAIL` against hosted data, with degraded provider lines including
   `error_type=ProviderAuthError reason=toss_access_denied`
+- `py -m app.tools.verify_worker_release_freshness --repo-root ...` from
+  `apps/worker`: expected `FINAL=FAIL` before manual Render redeploy, with
+  `reason=release_sha_mismatch`
 - Scorecard/security evidence gates:
-  retained scan report prepared for `provider_detail_20260630133946`; regenerate the
+  retained scan report prepared for `release_freshness_20260630140851`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

@@ -36,6 +36,7 @@ SENSITIVE_KEY_RE = re.compile(
 )
 SCAN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,120}$")
 GIT_HEAD_RE = re.compile(r"^[A-Fa-f0-9]{40}$")
+SHORT_GIT_SHA_RE = re.compile(r"^[A-Fa-f0-9]{12}$")
 SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 PERCENT_ENCODED_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 INCIDENT_DRILL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
@@ -168,6 +169,12 @@ LIVE_READINESS_SCORECARD_FINAL_OUTPUT_METRIC_KEYS = {
     "candidate_findings",
     "reportable_findings",
 }
+WORKER_RELEASE_FRESHNESS_FINAL_OUTPUT_METRIC_KEYS = {
+    "expected_sha_short",
+    "observed_sha_short",
+    "heartbeat_age_sec",
+    "max_age_sec",
+}
 PROVIDER_GAP_FINAL_OUTPUT_METRIC_KEYS = {
     "total_gaps",
     "blocking_unknown_gaps",
@@ -239,6 +246,7 @@ EXTERNAL_REQUIRED_SURFACES = {
     "live_incident_response_drill": "real_incident_channel",
 }
 LOCAL_CHECK_PREFIXES = {
+    "worker_release_freshness": "FINAL=PASS worker_release_freshness",
     "live_enable_migration": "FINAL=PASS live_enable_consumed_once rpc_hardening",
     "live_execution_safety_drill": "FINAL=PASS live_execution_safety_drill",
     "live_recovery_drill": "FINAL=PASS live_recovery_drill",
@@ -911,6 +919,12 @@ def _validate_checks(
                 f"{path}.{name}",
                 errors,
             )
+        if name == "worker_release_freshness" and final_output is not None:
+            _validate_worker_release_freshness_final_output_metrics(
+                final_output,
+                f"{path}.{name}",
+                errors,
+            )
 
 
 def _final_output_has_required_prefix(final_output: str, required_prefix: str) -> bool:
@@ -1312,6 +1326,46 @@ def _validate_live_readiness_scorecard_final_output_metrics(
         value = _require_int_metric(final_output, metric_name, path, errors)
         if value is not None and value <= 0:
             errors.append(f"{path}.{metric_name}_must_be_positive")
+
+
+def _validate_worker_release_freshness_final_output_metrics(
+    final_output: str,
+    path: str,
+    errors: list[str],
+) -> None:
+    _validate_final_output_metric_keys(
+        final_output,
+        path,
+        WORKER_RELEASE_FRESHNESS_FINAL_OUTPUT_METRIC_KEYS,
+        errors,
+    )
+    expected_sha_short = _extract_str_metric(final_output, "expected_sha_short")
+    if expected_sha_short is None:
+        errors.append(f"{path}.expected_sha_short_required")
+    elif SHORT_GIT_SHA_RE.fullmatch(expected_sha_short) is None:
+        errors.append(f"{path}.expected_sha_short_must_be_12_hex")
+    observed_sha_short = _extract_str_metric(final_output, "observed_sha_short")
+    if observed_sha_short is None:
+        errors.append(f"{path}.observed_sha_short_required")
+    elif SHORT_GIT_SHA_RE.fullmatch(observed_sha_short) is None:
+        errors.append(f"{path}.observed_sha_short_must_be_12_hex")
+    elif expected_sha_short is not None and observed_sha_short != expected_sha_short:
+        errors.append(f"{path}.observed_sha_short_must_match_expected")
+    heartbeat_age_sec = _require_int_metric(
+        final_output,
+        "heartbeat_age_sec",
+        path,
+        errors,
+    )
+    max_age_sec = _require_int_metric(final_output, "max_age_sec", path, errors)
+    if max_age_sec is not None and max_age_sec <= 0:
+        errors.append(f"{path}.max_age_sec_must_be_positive")
+    if (
+        heartbeat_age_sec is not None
+        and max_age_sec is not None
+        and heartbeat_age_sec > max_age_sec
+    ):
+        errors.append(f"{path}.heartbeat_age_sec_above_max_age_sec")
 
 
 def _validate_final_output_metric_keys(

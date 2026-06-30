@@ -837,6 +837,7 @@ Also validate the retained security scan evidence:
 ```bash
 python -m app.tools.verify_security_scan_evidence --evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
+python -m app.tools.verify_worker_release_freshness --repo-root .
 ```
 
 After the security report is committed and pushed to the declared raw
@@ -851,6 +852,7 @@ On Windows:
 ```bash
 py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_summary.json --repo-root .
 py -m app.tools.verify_live_readiness_scorecard --scorecard docs\LIVE_READINESS_SCORECARD.md --security-evidence path\to\security_scan_summary.json --repo-root .
+py -m app.tools.verify_worker_release_freshness --repo-root .
 ```
 
 After publication on Windows:
@@ -862,11 +864,13 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=provider_detail_20260630133946 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS security_scan_evidence scan_id=release_freshness_20260630140851 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
 FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
+FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
-`FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier
+`FINAL=FAIL security_scan_evidence` or `FINAL=FAIL worker_release_freshness`
+blocks live-mode consideration. Run the security verifier
 with `--repo-root` so it recomputes the current `source_head`/`source_diff_sha256`
 while excluding the summary and local report file; stale source bindings must fail
 before bundle collection, and source-binding collection failures must fail closed
@@ -892,6 +896,11 @@ security metadata by requiring the
 `security_diff_scan` profile, threat-model and finding-discovery receipts, exact
 worklist completion closure, and validation/attack-path receipts matching the
 candidate finding count.
+The release freshness verifier reads the latest hosted
+`worker_heartbeats.details.release_sha`, compares it with the current Git
+`HEAD`, and requires the heartbeat age to stay within `--max-age-seconds`
+(default `300`). A mismatched, missing, stale, or future heartbeat means the
+manual Render deployment has not been proven for the current commit.
 
 Then collect the bundle:
 
@@ -930,7 +939,7 @@ py -m app.tools.collect_live_readiness_evidence_bundle `
 The collector must print:
 
 ```text
-FINAL=PASS live_readiness_evidence_collector external_checks=4 local_checks=6 bundle_verified=1
+FINAL=PASS live_readiness_evidence_collector external_checks=4 local_checks=7 bundle_verified=1
 ```
 
 The collector `--reviewed-by` value is copied into the final bundle
@@ -981,7 +990,7 @@ cannot be mistaken for post-publication release evidence.
 5. The command must print:
 
 ```text
-FINAL=PASS live_readiness_evidence_bundle external_checks=4 local_checks=6 security_scan=1 system_order_scope_accepted=1 provider_gap_evidence=1 remote_provider_artifacts=1 remote_incident_evidence=1 remote_system_order_scope_evidence=1
+FINAL=PASS live_readiness_evidence_bundle external_checks=4 local_checks=7 security_scan=1 system_order_scope_accepted=1 provider_gap_evidence=1 remote_provider_artifacts=1 remote_incident_evidence=1 remote_system_order_scope_evidence=1
 ```
 
 When run from a bundle file, the final verifier also reads `security_scan.report_path`
@@ -999,6 +1008,7 @@ metadata alone.
    outside the 24-hour evidence window, multi-line final output, any
    `FINAL=PASS` line whose check-name token is not exactly the expected gate name,
    missing or weak hosted Supabase final metrics, mutated live-enable migration output,
+   missing, stale, or mismatched worker release freshness proof,
    missing or weak local execution safety, recovery,
    and alert drill metrics, local mock incident evidence, missing or mock/fixture
    incident-channel proof, incident evidence captured before the operator ACK,

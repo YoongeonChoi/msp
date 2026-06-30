@@ -42,7 +42,7 @@ def test_live_readiness_evidence_bundle_passes_cli(
     assert exit_code == 0
     assert (
         "FINAL=PASS live_readiness_evidence_bundle "
-        "external_checks=4 local_checks=6 security_scan=1 "
+        "external_checks=4 local_checks=7 security_scan=1 "
         "system_order_scope_accepted=1 provider_gap_evidence=1 "
         "remote_provider_artifacts=0 remote_incident_evidence=0 "
         "remote_system_order_scope_evidence=0"
@@ -277,7 +277,7 @@ def test_live_readiness_evidence_bundle_cli_reports_all_remote_verification_flag
     assert exit_code == 0
     assert (
         "FINAL=PASS live_readiness_evidence_bundle "
-        "external_checks=4 local_checks=6 security_scan=1 "
+        "external_checks=4 local_checks=7 security_scan=1 "
         "system_order_scope_accepted=1 provider_gap_evidence=1 "
         "remote_provider_artifacts=1 remote_incident_evidence=1 "
         "remote_system_order_scope_evidence=1"
@@ -2169,6 +2169,34 @@ def test_live_readiness_evidence_bundle_rejects_weak_scorecard_output() -> None:
     assert "secret.invalid" not in reason
 
 
+def test_live_readiness_evidence_bundle_rejects_stale_worker_release_output() -> None:
+    bundle = _valid_bundle()
+    freshness = _local_check(bundle, "worker_release_freshness")
+    freshness["final_output"] = (
+        "FINAL=PASS worker_release_freshness "
+        "expected_sha_short=2bac8362b504 observed_sha_short=976ced927831 "
+        "heartbeat_age_sec=301 max_age_sec=300 raw_url=https://secret.invalid"
+    )
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert (
+        "local_checks.worker_release_freshness.observed_sha_short_must_match_expected"
+        in reason
+    )
+    assert (
+        "local_checks.worker_release_freshness.heartbeat_age_sec_above_max_age_sec"
+        in reason
+    )
+    assert (
+        "local_checks.worker_release_freshness.final_output_unknown_metrics=raw_url"
+        in reason
+    )
+    assert "secret.invalid" not in reason
+
+
 def _external_check(bundle: dict[str, object], name: str) -> dict[str, object]:
     external_checks = cast(dict[str, object], bundle["external_checks"])
     return cast(dict[str, object], external_checks[name])
@@ -2256,6 +2284,15 @@ def _valid_bundle() -> dict[str, object]:
                 },
             },
             "local_checks": {
+                "worker_release_freshness": {
+                    "captured_at": "2026-06-28T01:04:30Z",
+                    "final_output": (
+                        "FINAL=PASS worker_release_freshness "
+                        "expected_sha_short=2bac8362b504 "
+                        "observed_sha_short=2bac8362b504 "
+                        "heartbeat_age_sec=12 max_age_sec=300"
+                    ),
+                },
                 "live_enable_migration": {
                     "captured_at": "2026-06-28T01:05:00Z",
                     "final_output": "FINAL=PASS live_enable_consumed_once rpc_hardening",
