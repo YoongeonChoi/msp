@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchEngineEvents } from "../lib/supabaseData";
 import { formatKst } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, JsonSummary, LoadingState, Panel, Pill, SectionTitle } from "../components/ui";
 
 export function LogsPage() {
+  const adminAccess = useAdminAccess();
   const events = useQuery({ queryKey: ["engine_events"], queryFn: () => fetchEngineEvents(100), refetchInterval: 60_000 });
 
   if (events.isLoading) {
@@ -18,7 +21,11 @@ export function LogsPage() {
     <Panel>
       <SectionTitle title="Engine Events" />
       {rows.length === 0 ? (
-        <EmptyState title="로그 없음" detail="worker event가 저장되면 표시됩니다." />
+        adminAccess.isLimited ? (
+          <AuthRequiredBlock surface="engine_events" />
+        ) : (
+          <EmptyState title="로그 없음" detail="worker event가 저장되면 표시됩니다." />
+        )
       ) : (
         <div className="space-y-2">
           {rows.map((event) => (

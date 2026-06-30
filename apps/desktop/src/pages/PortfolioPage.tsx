@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchPositions } from "../lib/supabaseData";
 import { formatAge, formatKrw, formatRatio } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, Panel, Pill, SectionTitle } from "../components/ui";
 
 export function PortfolioPage() {
+  const adminAccess = useAdminAccess();
   const positions = useQuery({ queryKey: ["positions"], queryFn: fetchPositions, refetchInterval: 60_000 });
 
   if (positions.isLoading) {
@@ -18,7 +21,11 @@ export function PortfolioPage() {
     <Panel>
       <SectionTitle title="포트폴리오" />
       {rows.length === 0 ? (
-        <EmptyState title="보유 포지션 없음" detail="계좌 sync가 완료되면 포지션이 표시됩니다." />
+        adminAccess.isLimited ? (
+          <AuthRequiredBlock surface="positions" />
+        ) : (
+          <EmptyState title="보유 포지션 없음" detail="계좌 sync가 완료되면 포지션이 표시됩니다." />
+        )
       ) : (
         <>
           <div className="hidden overflow-x-auto md:block">

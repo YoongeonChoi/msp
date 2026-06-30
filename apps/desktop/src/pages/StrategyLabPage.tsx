@@ -26,6 +26,7 @@ import {
   recordValue,
   summarizeJson
 } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
 import type {
   AiUpgradeCandidateRow,
   BacktestRunRow,
@@ -33,6 +34,7 @@ import type {
   OutcomeRow,
   StrategyVersionRow
 } from "../lib/rows";
+import { AuthRequiredState } from "../components/AuthRequiredState";
 import {
   EmptyState,
   ErrorState,
@@ -49,6 +51,7 @@ const reviewableCandidateStatuses = new Set(["proposed", "backtesting"]);
 
 export function StrategyLabPage() {
   const queryClient = useQueryClient();
+  const adminAccess = useAdminAccess();
   const strategies = useQuery({
     queryKey: ["strategy_versions", "strategy_lab"],
     queryFn: () => fetchStrategyVersions(30),
@@ -104,6 +107,10 @@ export function StrategyLabPage() {
     mutationFn: reviewAiUpgradeCandidate,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ai_upgrade_candidates"] })
   });
+
+  if (adminAccess.isLimited) {
+    return <AuthRequiredState surface="Strategy Lab 데이터와 후보 검토" />;
+  }
 
   return (
     <div className="space-y-4">

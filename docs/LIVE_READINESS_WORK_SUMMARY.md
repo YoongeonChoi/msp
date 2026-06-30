@@ -195,10 +195,10 @@ channel ACK drills, and published retained artifacts.
   path without storing broker secrets or directly calling broker APIs.
 - Live activation stays disabled unless a fresh approval is present and the
   user confirmation phrase is valid.
-- Dashboard data loading uses worker-compatible schema paths, keeps critical
-  events visible in render fixtures, and now surfaces missing Supabase Auth
-  admin sessions as `권한 필요` instead of making worker/provider rows look
-  silently absent.
+- Dashboard and feature-page data loading use worker-compatible schema paths,
+  keep critical events visible in render fixtures, and now surface missing
+  Supabase Auth admin sessions as `권한 필요` instead of making
+  worker/provider rows or feature tables look silently absent.
 - Desktop unit and browser tests cover approval helper logic, control page
   query/mutation states, dashboard rendering, schema compatibility, and a
   mocked Supabase live-gate flow across desktop and mobile viewports.

@@ -2,7 +2,6 @@ import { Activity, AlertTriangle, Info } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchApiHealth,
-  fetchAuthRole,
   fetchBotSettings,
   fetchEngineEvents,
   fetchLatestHeartbeat,
@@ -10,6 +9,8 @@ import {
   fetchTodayOrders
 } from "../lib/supabaseData";
 import { formatAge, formatKst, isOlderThan } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, JsonSummary, Metric, Panel, Pill, SectionTitle } from "../components/ui";
 
 const monitoredProviders = [
@@ -21,7 +22,7 @@ const monitoredProviders = [
 ];
 
 export function DashboardPage() {
-  const auth = useQuery({ queryKey: ["auth_role"], queryFn: fetchAuthRole, retry: false, refetchInterval: 60_000 });
+  const adminAccess = useAdminAccess();
   const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
   const heartbeat = useQuery({ queryKey: ["worker_heartbeats", "latest"], queryFn: fetchLatestHeartbeat, refetchInterval: 30_000 });
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
@@ -34,7 +35,7 @@ export function DashboardPage() {
   }
 
   const latestHeartbeat = heartbeat.data;
-  const dataAccessLimited = auth.data ? auth.data.role !== "admin" : false;
+  const dataAccessLimited = adminAccess.isLimited;
   const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const decisionCounts = countBy(decisions.data ?? [], (item) => item.action);
   const orderCounts = countBy(orders.data ?? [], (item) => item.status);
@@ -43,11 +44,11 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-4">
-      {auth.data?.warning ? (
+      {adminAccess.warning ? (
         <Panel className="border-amber-200 bg-amber-50">
           <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
             <AlertTriangle size={16} aria-hidden="true" />
-            {auth.data.warning} Settings에서 admin 계정으로 로그인하면 worker/provider 상태가 표시됩니다.
+            {adminAccess.warning} Settings에서 admin 계정으로 로그인하면 worker/provider 상태가 표시됩니다.
           </div>
         </Panel>
       ) : null}
@@ -73,9 +74,9 @@ export function DashboardPage() {
         />
         <Metric
           title="실주문 경로"
-          value={settings.data?.liveOrderAllowed ? "위험" : "차단"}
-          detail={settings.data?.mode ?? "paper"}
-          tone={settings.data?.liveOrderAllowed ? "danger" : "safe"}
+          value={settings.data ? (settings.data.liveOrderAllowed ? "위험" : "차단") : dataAccessLimited ? "권한 필요" : "설정 없음"}
+          detail={settings.data?.mode ?? (dataAccessLimited ? "admin 필요" : "paper")}
+          tone={settings.data ? (settings.data.liveOrderAllowed ? "danger" : "safe") : "warning"}
         />
       </div>
 
@@ -126,16 +127,30 @@ export function DashboardPage() {
       <div className="grid gap-4 lg:grid-cols-3">
         <Panel>
           <SectionTitle title="오늘 decision" />
-          <CountRows counts={decisionCounts} emptyLabel="오늘 decision이 없습니다." />
+          <CountRows
+            counts={decisionCounts}
+            emptyLabel="오늘 decision이 없습니다."
+            dataAccessLimited={dataAccessLimited}
+            surface="decision_snapshots"
+          />
         </Panel>
         <Panel>
           <SectionTitle title="오늘 주문 상태" />
-          <CountRows counts={orderCounts} emptyLabel="오늘 주문이 없습니다." />
+          <CountRows
+            counts={orderCounts}
+            emptyLabel="오늘 주문이 없습니다."
+            dataAccessLimited={dataAccessLimited}
+            surface="orders"
+          />
         </Panel>
         <Panel>
           <SectionTitle title="최근 경고 이벤트" />
           {warningEvents.length === 0 ? (
-            <EmptyState title="위험 이벤트 없음" detail="warning/error/critical engine_event가 없습니다." />
+            dataAccessLimited ? (
+              <AuthRequiredBlock surface="engine_events" />
+            ) : (
+              <EmptyState title="위험 이벤트 없음" detail="warning/error/critical engine_event가 없습니다." />
+            )
           ) : (
             <div className="space-y-2">
               {warningEvents.map((event) => (
@@ -177,13 +192,21 @@ function formatWorkerStatus(createdAt: string | null | undefined, dataAccessLimi
 
 function CountRows({
   counts,
-  emptyLabel
+  emptyLabel,
+  dataAccessLimited,
+  surface
 }: {
   readonly counts: ReadonlyMap<string, number>;
   readonly emptyLabel: string;
+  readonly dataAccessLimited: boolean;
+  readonly surface: string;
 }) {
   if (counts.size === 0) {
-    return <EmptyState title={emptyLabel} detail="Worker가 아직 수집 전이거나 Supabase 연결 확인이 필요합니다." />;
+    return dataAccessLimited ? (
+      <AuthRequiredBlock surface={surface} />
+    ) : (
+      <EmptyState title={emptyLabel} detail="Worker가 아직 수집 전이거나 Supabase 연결 확인이 필요합니다." />
+    );
   }
   return (
     <div className="space-y-2">

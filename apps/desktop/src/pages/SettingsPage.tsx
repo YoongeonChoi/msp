@@ -38,7 +38,14 @@ export function SettingsPage() {
         <SectionTitle title="Supabase 연결" />
         <KeyValue label="연결 설정" value={<Pill tone={isSupabaseReady() ? "safe" : "danger"}>{isSupabaseReady() ? "설정됨" : "미설정"}</Pill>} />
         <KeyValue label="클라이언트 권한" value="publishable key" />
-        <KeyValue label="bot_settings 접근" value={<Pill tone={settings.error ? "danger" : "safe"}>{settings.error ? "실패" : "가능"}</Pill>} />
+        <KeyValue
+          label="bot_settings 접근"
+          value={
+            <Pill tone={settings.error ? "danger" : settings.data ? "safe" : "warning"}>
+              {settings.error ? "실패" : settings.data ? "가능" : "권한 필요"}
+            </Pill>
+          }
+        />
         <KeyValue label="마지막 설정 변경" value={formatKst(settings.data?.updatedAt)} />
         <KeyValue label="앱 버전" value={appVersion} />
       </Panel>

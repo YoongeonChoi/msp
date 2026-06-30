@@ -1,10 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchFundamentals } from "../lib/supabaseData";
 import { formatKst, formatNumber, formatRatio, nestedNumber } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
 import type { FundamentalRow } from "../lib/rows";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, Panel, SectionTitle } from "../components/ui";
 
 export function FundamentalsPage() {
+  const adminAccess = useAdminAccess();
   const fundamentals = useQuery({ queryKey: ["fundamentals_quarterly"], queryFn: fetchFundamentals, refetchInterval: 300_000 });
 
   if (fundamentals.isLoading) {
@@ -19,7 +22,11 @@ export function FundamentalsPage() {
     <Panel>
       <SectionTitle title="펀더멘털" />
       {rows.length === 0 ? (
-        <EmptyState title="펀더멘털 없음" detail="OpenDART 수집 결과가 저장되면 표시됩니다." />
+        adminAccess.isLimited ? (
+          <AuthRequiredBlock surface="fundamentals_quarterly" />
+        ) : (
+          <EmptyState title="펀더멘털 없음" detail="OpenDART 수집 결과가 저장되면 표시됩니다." />
+        )
       ) : (
         <>
           <div className="hidden overflow-x-auto xl:block">

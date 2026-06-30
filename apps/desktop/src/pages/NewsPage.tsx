@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchNewsEvents } from "../lib/supabaseData";
 import { formatKst } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, Panel, Pill, SectionTitle } from "../components/ui";
 
 export function NewsPage() {
+  const adminAccess = useAdminAccess();
   const news = useQuery({ queryKey: ["news_events"], queryFn: fetchNewsEvents, refetchInterval: 120_000 });
 
   if (news.isLoading) {
@@ -18,7 +21,11 @@ export function NewsPage() {
     <Panel>
       <SectionTitle title="뉴스 이벤트" />
       {rows.length === 0 ? (
-        <EmptyState title="뉴스 없음" detail="Naver/OpenAI 수집 결과가 저장되면 표시됩니다." />
+        adminAccess.isLimited ? (
+          <AuthRequiredBlock surface="news_events" />
+        ) : (
+          <EmptyState title="뉴스 없음" detail="Naver/OpenAI 수집 결과가 저장되면 표시됩니다." />
+        )
       ) : (
         <>
           <div className="hidden overflow-x-auto lg:block">

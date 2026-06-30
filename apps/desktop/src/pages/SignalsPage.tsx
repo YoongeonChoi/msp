@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchRecentDecisions } from "../lib/supabaseData";
 import { formatKst, formatNumber, nestedNumber, recordValue } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
 import type { DecisionSnapshot } from "../lib/rows";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, JsonSummary, LoadingState, Panel, Pill, SectionTitle } from "../components/ui";
 
 const componentKeys = [
@@ -13,6 +15,7 @@ const componentKeys = [
 ];
 
 export function SignalsPage() {
+  const adminAccess = useAdminAccess();
   const decisions = useQuery({ queryKey: ["decision_snapshots", "recent"], queryFn: () => fetchRecentDecisions(80), refetchInterval: 60_000 });
 
   if (decisions.isLoading) {
@@ -27,7 +30,11 @@ export function SignalsPage() {
     <Panel>
       <SectionTitle title="최근 시그널" />
       {rows.length === 0 ? (
-        <EmptyState title="시그널 없음" detail="Worker cycle이 한 번 실행되면 표시됩니다." />
+        adminAccess.isLimited ? (
+          <AuthRequiredBlock surface="decision_snapshots" />
+        ) : (
+          <EmptyState title="시그널 없음" detail="Worker cycle이 한 번 실행되면 표시됩니다." />
+        )
       ) : (
         <>
           <div className="hidden overflow-x-auto lg:block">

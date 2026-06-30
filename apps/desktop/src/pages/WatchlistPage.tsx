@@ -5,6 +5,8 @@ import { fetchWatchlist, upsertWatchlistItem } from "../lib/supabaseData";
 import type { WatchlistInput } from "../lib/supabaseData";
 import type { WatchlistItem } from "../lib/rows";
 import { formatKrw, formatRatio } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
+import { AuthRequiredState } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, pageButtonClass, Panel, Pill, SectionTitle } from "../components/ui";
 
 interface WatchlistForm {
@@ -35,6 +37,7 @@ const emptyForm: WatchlistForm = {
 
 export function WatchlistPage() {
   const queryClient = useQueryClient();
+  const adminAccess = useAdminAccess();
   const watchlist = useQuery({ queryKey: ["watchlist"], queryFn: fetchWatchlist });
   const [form, setForm] = useState<WatchlistForm>(emptyForm);
   const mutation = useMutation({
@@ -50,6 +53,9 @@ export function WatchlistPage() {
   }
   if (watchlist.error) {
     return <ErrorState message="watchlist를 읽지 못했습니다." />;
+  }
+  if (adminAccess.isLimited) {
+    return <AuthRequiredState surface="watchlist 추가/수정" />;
   }
 
   return (

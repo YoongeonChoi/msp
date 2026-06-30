@@ -2,12 +2,15 @@ import { AlertTriangle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchRecentOrders } from "../lib/supabaseData";
 import { formatKrw, formatKst } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
 import type { OrderRow } from "../lib/rows";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, JsonSummary, LoadingState, Panel, Pill, SectionTitle } from "../components/ui";
 
 const anomalyStatuses = ["sent", "filled", "partial_filled"];
 
 export function OrdersPage() {
+  const adminAccess = useAdminAccess();
   const orders = useQuery({ queryKey: ["orders", "recent"], queryFn: () => fetchRecentOrders(100), refetchInterval: 60_000 });
 
   if (orders.isLoading) {
@@ -32,7 +35,11 @@ export function OrdersPage() {
       <Panel>
         <SectionTitle title="최근 주문" />
         {rows.length === 0 ? (
-          <EmptyState title="주문 없음" detail="paper/proposed/blocked orders가 아직 없습니다." />
+          adminAccess.isLimited ? (
+            <AuthRequiredBlock surface="orders" />
+          ) : (
+            <EmptyState title="주문 없음" detail="paper/proposed/blocked orders가 아직 없습니다." />
+          )
         ) : (
           <>
             <div className="hidden overflow-x-auto xl:block">

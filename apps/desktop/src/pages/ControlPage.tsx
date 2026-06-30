@@ -18,6 +18,7 @@ import {
 } from "../lib/liveApproval";
 import type { LiveRequestForm } from "../lib/liveApproval";
 import type { ManualCommandRow } from "../lib/rows";
+import { AuthRequiredState } from "../components/AuthRequiredState";
 import { ErrorState, KeyValue, LoadingState, pageButtonClass, Panel, Pill, SectionTitle } from "../components/ui";
 
 interface RiskForm {
@@ -143,6 +144,9 @@ export function ControlPage({
   }
   if (settings.error || settingsLoadTimedOut) {
     return <ErrorState message="bot_settings를 읽지 못했습니다." />;
+  }
+  if (!settings.data) {
+    return <AuthRequiredState surface="bot_settings 제어" />;
   }
 
   const current = settings.data;

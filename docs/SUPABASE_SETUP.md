@@ -19,11 +19,12 @@ The desktop cockpit uses only `VITE_SUPABASE_URL` and
 admin user whose `auth.users.id` exists in `public.user_roles` with
 `role='admin'`.
 
-If the dashboard shows `권한 필요`, `모드: 권한 필요`, missing provider health,
-or a stale-looking worker card while the worker health tool shows fresh hosted
-rows, open `Settings` and sign in with the admin Auth account. Without that
-session, RLS returns empty table results rather than a hard query error, so
-`bot_settings`, `worker_heartbeats`, and `api_health` can all look absent.
+If the cockpit shows `권한 필요`, `모드: 권한 필요`, missing provider health,
+empty-looking feature pages, or a stale-looking worker card while the worker
+health tool shows fresh hosted rows, open `Settings` and sign in with the admin
+Auth account. Without that session, RLS returns empty table results rather than
+a hard query error, so `bot_settings`, `worker_heartbeats`, `api_health`, and
+the feature tables can all look absent.
 
 Worker-side verification remains service-role only:
 

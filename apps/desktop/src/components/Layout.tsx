@@ -2,7 +2,6 @@ import { AlertTriangle, CircleStop, Database } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchApiHealth,
-  fetchAuthRole,
   fetchBotSettings,
   fetchLatestHeartbeat,
   fetchTodayDecisions,
@@ -10,6 +9,7 @@ import {
   updateBotSettings
 } from "../lib/supabaseData";
 import { formatAge, isOlderThan } from "../lib/formatters";
+import { useAdminAccess } from "../lib/useAdminAccess";
 import { brandIcon, getPageLabel, navItems, parsePageKey } from "../lib/navigation";
 import type { PageKey } from "../lib/navigation";
 import { pageButtonClass, Pill } from "./ui";
@@ -115,7 +115,7 @@ function MobileNav({ page, setPage }: { readonly page: PageKey; readonly setPage
 function StatusBar() {
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
-  const auth = useQuery({ queryKey: ["auth_role"], queryFn: fetchAuthRole, retry: false, refetchInterval: 60_000 });
+  const adminAccess = useAdminAccess();
   const heartbeat = useQuery({ queryKey: ["worker_heartbeats", "latest"], queryFn: fetchLatestHeartbeat, refetchInterval: 30_000 });
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
   const todayDecisions = useQuery({ queryKey: ["decision_snapshots", "today"], queryFn: fetchTodayDecisions, refetchInterval: 60_000 });
@@ -128,7 +128,7 @@ function StatusBar() {
 
   const currentSettings = settings.data;
   const latestHeartbeat = heartbeat.data;
-  const dataAccessLimited = auth.data ? auth.data.role !== "admin" : false;
+  const dataAccessLimited = adminAccess.isLimited;
   const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const healthyCount = apiHealth.data?.filter((item) => item.healthy).length ?? 0;
   const unhealthyCount = apiHealth.data ? apiHealth.data.length - healthyCount : 0;
@@ -151,7 +151,7 @@ function StatusBar() {
           Heartbeat: {dataAccessLimited ? "권한 필요" : formatAge(latestHeartbeat?.createdAt)}
         </Pill>
         <Pill tone={unhealthyCount > 0 ? "warning" : "safe"}>
-          API: 정상 {healthyCount} / 이상 {unhealthyCount}
+          {dataAccessLimited ? "API: 권한 필요" : `API: 정상 ${healthyCount} / 이상 ${unhealthyCount}`}
         </Pill>
         <Pill tone="neutral">오늘 decision: {todayDecisions.data?.length ?? 0}</Pill>
         <Pill tone="neutral">오늘 paper/proposed/blocked: {paperOrders}</Pill>
@@ -178,9 +178,9 @@ function StatusBar() {
           Supabase 설정 또는 RLS 권한 때문에 bot_settings를 읽지 못했습니다.
         </div>
       ) : null}
-      {auth.data?.warning ? (
+      {adminAccess.warning ? (
         <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
-          {auth.data.warning} Settings에서 admin 계정으로 로그인하세요.
+          {adminAccess.warning} Settings에서 admin 계정으로 로그인하세요.
         </div>
       ) : null}
     </header>
