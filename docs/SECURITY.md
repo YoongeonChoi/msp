@@ -52,8 +52,9 @@ Secret scans must print only file paths, not matched secret values. CI must fail
 - `.env`, `.env.local`, and any non-example env file must not be tracked by Git.
 - Render owns Worker secrets.
 - Desktop may use only `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
-- `supabase/verify_hosted_live_readiness.py` may read `SUPABASE_SECRET_KEY` from a
-  worker/operator shell, but it must not print secret values. It is not a desktop tool.
+- Hosted Supabase verifier scripts may read `SUPABASE_SECRET_KEY` from a
+  worker/operator shell or an explicitly supplied ignored env file, but they
+  must not print secret values or env file paths. They are not desktop tools.
 - Hosted Supabase verifier scripts must reject anything other than an official
   `https://<project_ref>.supabase.co` project origin, plus URL credentials, path,
   query, and fragment values, before making network calls.

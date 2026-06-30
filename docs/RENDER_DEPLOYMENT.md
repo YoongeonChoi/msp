@@ -85,8 +85,8 @@ Before any live-mode consideration, run:
 ```bash
 python -m app.tools.run_live_alert_drill_once
 python -m app.tools.run_live_incident_response_drill_once --require-ack --ack-timeout-sec 300
-python supabase/verify_hosted_live_readiness.py
-python supabase/verify_hosted_live_enable_flow.py
+python supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+python supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
 python -m app.tools.verify_provider_lifecycle_evidence --evidence path/to/provider_lifecycle_evidence.json --verify-remote-artifacts
 python -m app.tools.verify_incident_response_evidence --incident-output-file path/to/incident_output.txt --incident-channel-evidence path/to/incident_channel_evidence.json --verify-remote-channel-evidence
 python -m app.tools.verify_system_order_scope_evidence --evidence path/to/system_order_scope_evidence.json --verify-remote-evidence

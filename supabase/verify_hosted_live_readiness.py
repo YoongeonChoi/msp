@@ -12,9 +12,11 @@ import ssl
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import httpx
+from _hosted_env import HostedEnvFileError, merge_env_files
 
 EXPECTED_DENIED_STATUSES = {401, 403, 404}
 
@@ -45,7 +47,12 @@ def main(
     environ: Mapping[str, str] | None = None,
 ) -> int:
     args = _parse_args(argv)
-    env = environ or os.environ
+    try:
+        env = merge_env_files(args.env_file, environ or os.environ)
+    except HostedEnvFileError as exc:
+        print("FINAL=FAIL hosted_supabase_live_readiness")
+        print(str(exc))
+        return 1
     config, missing = _config_from_env(args, env)
     if missing:
         print("FINAL=SKIP hosted_supabase_env_missing missing=" + ",".join(missing))
@@ -182,6 +189,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--requester-jwt", default=None, help="Requester admin user access token")
     parser.add_argument("--reviewer-jwt", default=None, help="Reviewer admin user access token")
     parser.add_argument("--timeout-sec", type=float, default=10.0)
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional local .env file to merge before process env. "
+            "Process env and explicit CLI args take precedence."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -324,9 +341,10 @@ def _get_user_id(
     if response.status_code != 200:
         raise RuntimeError(f"{label}_auth_user_failed status={response.status_code}")
     data = response.json()
-    if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"]:
+    user_id = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(user_id, str) or not user_id:
         raise RuntimeError(f"{label}_auth_user_missing_id")
-    return data["id"]
+    return user_id
 
 
 def _expect_authenticated_admin_role_read(
@@ -382,6 +400,7 @@ def _check_realtime_handshake(config: HostedSupabaseConfig) -> bool:
 
     raw_socket = socket.create_connection((host, port), timeout=config.timeout_sec)
     try:
+        conn: socket.socket
         if parsed.scheme == "https":
             context = ssl.create_default_context()
             conn = context.wrap_socket(raw_socket, server_hostname=host)

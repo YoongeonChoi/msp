@@ -13,6 +13,9 @@ VERIFIER = ROOT / "supabase" / "verify_hosted_live_readiness.py"
 
 
 def _module() -> ModuleType:
+    helper_dir = str(VERIFIER.parent)
+    if helper_dir not in sys.path:
+        sys.path.insert(0, helper_dir)
     spec = importlib.util.spec_from_file_location("verify_hosted_live_readiness", VERIFIER)
     assert spec is not None
     assert spec.loader is not None
@@ -36,6 +39,76 @@ def test_hosted_verifier_skips_when_required_env_is_missing(
     assert "SUPABASE_SECRET_KEY" in output
     assert "SUPABASE_LIVE_REQUESTER_JWT" in output
     assert "SUPABASE_LIVE_REVIEWER_JWT" in output
+
+
+def test_hosted_verifier_loads_explicit_env_file_without_printing_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    verifier = _module()
+    env_file = tmp_path / ".env.hosted"
+    env_file.write_text(
+        "\n".join(
+            [
+                "SUPABASE_URL=https://project.supabase.co",
+                "SUPABASE_PUBLISHABLE_KEY=publishable-test-key",
+                "SUPABASE_SECRET_KEY=secret-test-key",
+                "SUPABASE_LIVE_REQUESTER_JWT=requester-jwt",
+                "SUPABASE_LIVE_REVIEWER_JWT=reviewer-jwt",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_checks(
+        config: object,
+        *,
+        client: httpx.Client,
+    ) -> object:
+        assert isinstance(config, verifier.HostedSupabaseConfig)
+        assert config.supabase_url == "https://project.supabase.co"
+        assert config.publishable_key == "publishable-test-key"
+        assert config.secret_key == "secret-test-key"
+        assert config.requester_jwt == "requester-jwt"
+        assert config.reviewer_jwt == "reviewer-jwt"
+        return verifier.HostedVerificationResult(
+            postgrest_root_ok=True,
+            denied_rpc_count=2,
+            service_rpc_count=2,
+            denied_table_count=1,
+            service_table_count=1,
+            authenticated_table_count=2,
+            realtime_ok=True,
+        )
+
+    monkeypatch.setattr(verifier, "run_checks", fake_run_checks)
+
+    result = verifier.main(["--env-file", str(env_file)], environ={})
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "FINAL=PASS hosted_supabase_live_readiness" in output
+    assert "publishable-test-key" not in output
+    assert "secret-test-key" not in output
+    assert "requester-jwt" not in output
+    assert "reviewer-jwt" not in output
+
+
+def test_hosted_verifier_env_file_failure_does_not_print_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    verifier = _module()
+    missing_env_file = tmp_path / "missing.env"
+
+    result = verifier.main(["--env-file", str(missing_env_file)], environ={})
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "FINAL=FAIL hosted_supabase_live_readiness" in output
+    assert "env_file_unreadable" in output
+    assert str(missing_env_file) not in output
 
 
 def test_hosted_verifier_checks_rpc_grants_without_printing_secrets() -> None:

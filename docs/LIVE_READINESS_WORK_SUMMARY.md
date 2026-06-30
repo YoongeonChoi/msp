@@ -78,6 +78,24 @@ approval. The authoritative readiness score remains
   `976ced927831`. That is useful negative evidence: the worker was running, but
   it was not proven to be running the latest pushed code.
 
+## 2026-06-30 Hosted Supabase Env-File Verifier Follow-Up
+
+- Added `supabase/_hosted_env.py`, a small helper for explicit operator
+  `--env-file` loading in hosted Supabase verifier scripts.
+- `supabase/verify_hosted_live_readiness.py` and
+  `supabase/verify_hosted_live_enable_flow.py` now accept repeated `--env-file`
+  arguments so ignored local worker/desktop env files can be merged without
+  copying secrets into the shell.
+- Precedence stays conservative: later env files override earlier env files,
+  process environment overrides env-file values, and explicit CLI flags still
+  override both.
+- Unreadable env files emit only `env_file_unreadable` and do not print local
+  paths. Existing failure output redaction still covers Supabase keys, bearer
+  tokens, and JWT-like values.
+- Local hosted verifier dry runs with `--env-file apps/worker/.env --env-file
+  apps/desktop/.env.local` now narrow the remaining missing environment values
+  to `SUPABASE_LIVE_REQUESTER_JWT` and `SUPABASE_LIVE_REVIEWER_JWT`.
+
 ## Current Status
 
 The repository is materially stronger than the original MVP, but it is still
@@ -176,35 +194,40 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `release_freshness_20260630140851`.
+  `hosted_env_files_20260630142933`.
 - The retained report is
-  `security-artifacts/release_freshness_20260630140851/report.md`.
+  `security-artifacts/hosted_env_files_20260630142933/report.md`.
 - The scan summary records 3 worklist rows, 3 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers the worker release freshness verifier and final bundle
-  integration: hosted Supabase service-role access stays read-only and is not
-  printed, the CLI emits only one bounded `FINAL` line with short SHA prefixes
-  and age metrics, and the final bundle rejects missing, stale, mismatched, or
-  metric-spoofed release freshness output. The live-order boundary is unchanged:
-  `RiskService`, `ExecutionService`, `BrokerPort`, and desktop broker/order API
-  paths were not modified.
+- The delta scan covers explicit hosted verifier env-file loading:
+  `--env-file` is opt-in, process env and CLI args keep precedence, unreadable
+  env files do not print local paths, and verifier failure output keeps secret
+  and JWT redaction. The live-order boundary is unchanged: `RiskService`,
+  `ExecutionService`, `BrokerPort`, and desktop broker/order API paths were not
+  modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
   `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
-  `release_metadata_20260630132334` and `provider_detail_20260630133946`,
-  remain retained under `security-artifacts/` as broader historical baseline
-  evidence.
+  `release_metadata_20260630132334`, `provider_detail_20260630133946`, and
+  `release_freshness_20260630140851`, remain retained under
+  `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `527 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `531 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `py -m pytest app/tests/unit/test_worker_release_freshness.py app/tests/unit/test_live_readiness_evidence_bundle.py app/tests/unit/test_live_readiness_evidence_collector.py -q --tb=short`
-  from `apps/worker`: `177 passed`
+- `py -m pytest app/tests/contract/test_verify_hosted_live_readiness.py app/tests/contract/test_verify_hosted_live_enable_flow.py -q --tb=short`
+  from `apps/worker`: `34 passed`
+- `py supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local`:
+  expected `FINAL=SKIP hosted_supabase_env_missing` with only
+  `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
+- `py supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local`:
+  expected `FINAL=SKIP hosted_live_enable_env_missing` with only
+  `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
 - `py -m app.tools.paper_health_report` from `apps/worker`: expected
   `FINAL=FAIL` against hosted data, with degraded provider lines including
   `error_type=ProviderAuthError reason=toss_access_denied`
@@ -212,7 +235,7 @@ The latest local verification recorded before this handoff included:
   `apps/worker`: expected `FINAL=FAIL` before manual Render redeploy, with
   `reason=release_sha_mismatch`
 - Scorecard/security evidence gates:
-  retained scan report prepared for `release_freshness_20260630140851`; regenerate the
+  retained scan report prepared for `hosted_env_files_20260630142933`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

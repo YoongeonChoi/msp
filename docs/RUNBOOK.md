@@ -189,10 +189,19 @@ in desktop env, Git, docs, logs, seed data, or `render.yaml`.
 python supabase/verify_hosted_live_readiness.py
 ```
 
+If the operator keeps local ignored env files instead of exporting every value,
+merge them explicitly. CLI args and process env still take precedence, and the
+verifier must not print env file paths, secrets, or JWT values on failure:
+
+```bash
+python supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+```
+
 On Windows:
 
 ```bash
 py supabase\verify_hosted_live_readiness.py
+py supabase\verify_hosted_live_readiness.py --env-file apps\worker\.env --env-file apps\desktop\.env.local
 ```
 
 3. The command must print:
@@ -209,12 +218,14 @@ FINAL=PASS hosted_supabase_live_readiness postgrest=1 anon_rpc_denied=2 service_
 SUPABASE_LIVE_REQUESTER_JWT=...
 SUPABASE_LIVE_REVIEWER_JWT=...
 python supabase/verify_hosted_live_enable_flow.py
+python supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
 ```
 
 On Windows:
 
 ```bash
 py supabase\verify_hosted_live_enable_flow.py
+py supabase\verify_hosted_live_enable_flow.py --env-file apps\worker\.env --env-file apps\desktop\.env.local
 ```
 
 The command must print:
@@ -864,7 +875,7 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=release_freshness_20260630140851 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS security_scan_evidence scan_id=hosted_env_files_20260630142933 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
 FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```

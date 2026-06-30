@@ -9,9 +9,11 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+from _hosted_env import HostedEnvFileError, merge_env_files
 
 EXPECTED_DENIED_STATUSES = {400, 401, 403}
 
@@ -43,7 +45,12 @@ def main(
     environ: Mapping[str, str] | None = None,
 ) -> int:
     args = _parse_args(argv)
-    env = environ or os.environ
+    try:
+        env = merge_env_files(args.env_file, environ or os.environ)
+    except HostedEnvFileError as exc:
+        print("FINAL=FAIL hosted_live_enable_flow")
+        print(str(exc))
+        return 1
     config, missing = _config_from_env(args, env)
     if missing:
         print("FINAL=SKIP hosted_live_enable_env_missing missing=" + ",".join(missing))
@@ -183,6 +190,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--requester-jwt", default=None, help="Requester admin user access token")
     parser.add_argument("--reviewer-jwt", default=None, help="Reviewer admin user access token")
     parser.add_argument("--timeout-sec", type=float, default=10.0)
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Optional local .env file to merge before process env. "
+            "Process env and explicit CLI args take precedence."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -250,9 +267,10 @@ def _get_user_id(
     )
     _expect_status(response, 200, f"{label}_auth_user_failed")
     data = response.json()
-    if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"]:
+    user_id = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(user_id, str) or not user_id:
         raise RuntimeError(f"{label}_auth_user_missing_id")
-    return data["id"]
+    return user_id
 
 
 def _expect_admin_role(
@@ -347,7 +365,10 @@ def _create_live_enable_request(
         or row.get("status") != "pending"
     ):
         raise RuntimeError("live_enable_request_insert_invalid_row")
-    return row["id"]
+    command_id = row["id"]
+    if not isinstance(command_id, str):
+        raise RuntimeError("live_enable_request_insert_invalid_row")
+    return command_id
 
 
 def _expect_self_review_denied(

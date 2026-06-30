@@ -27,6 +27,14 @@ python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py
 ```
 
+로컬 operator 환경에서 값이 ignored env 파일에 나뉘어 있을 때는 명시적으로
+병합할 수 있습니다. CLI 인자와 process env가 env file 값보다 우선합니다.
+
+```bash
+python supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+python supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+```
+
 `0011_data_api_grants.sql`는 Supabase Data API 노출을 명시적으로 고정합니다.
 `anon`/`public` table access를 차단하고, authenticated desktop user에게는 RLS
 정책이 허용하는 최소 table 권한만 grant하며, worker `service_role`에는 전체
@@ -51,6 +59,9 @@ handshake를 확인하고 secret 값을 출력하지 않습니다.
 `https://<project_ref>.supabase.co` project origin이어야 하며,
 local/test/private IP/self-hosted/custom mock host는 live-readiness evidence로 인정하지 않습니다.
 env가 없으면 `FINAL=SKIP hosted_supabase_env_missing`을 반환합니다.
+`--env-file`로 ignored env 파일을 넘기면 verifier가 해당 값을 process env
+아래 우선순위로 병합하며, unreadable env file path나 secret/JWT 값은 출력하지
+않습니다.
 
 `verify_hosted_live_enable_flow.py`는 실제 hosted/staging Supabase project에 대해
 `SUPABASE_LIVE_REQUESTER_JWT`와 `SUPABASE_LIVE_REVIEWER_JWT`가 서로 다른 admin 사용자
@@ -62,3 +73,4 @@ env가 없으면 `FINAL=SKIP hosted_supabase_env_missing`을 반환합니다.
 되돌리며 secret/JWT 값을 출력하지 않습니다. `SUPABASE_URL`은 같은 `.supabase.co` project
 origin 제약을 통과해야 합니다. env가 없으면
 `FINAL=SKIP hosted_live_enable_env_missing`을 반환합니다.
+`--env-file` 동작은 hosted readiness verifier와 동일합니다.
