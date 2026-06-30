@@ -81,13 +81,17 @@ hook URL in the operator shell only as `RENDER_DEPLOY_HOOK_URL`. The URL is a
 secret because it contains the deploy token. Triggering is still a manual action:
 the helper refuses to call the hook unless `--yes` is present, appends the
 current commit as `ref=<sha>`, accepts only `https://api.render.com/deploy/...`
-hook URLs, and never prints the hook URL, token, response body, or full commit
+hook URLs, polls hosted `worker_heartbeats` until the expected release is
+observed, and never prints the hook URL, token, response body, or full commit
 hash.
 
 ```bash
-python -m app.tools.trigger_render_deploy_hook --repo-root . --yes
-python -m app.tools.verify_worker_release_freshness --repo-root .
+python -m app.tools.redeploy_render_worker --repo-root . --yes
 ```
+
+If the Render dashboard is used instead of the deploy hook, run
+`python -m app.tools.verify_worker_release_freshness --repo-root .` after the
+manual dashboard deploy reaches live.
 
 ```sql
 select
@@ -132,11 +136,13 @@ security report file, and rejects stale `security_scan.source_head` or
 `security_scan.source_diff_sha256` values. If the Git source binding cannot be
 collected, decoded, or read, the verifier fails closed with
 `security_scan.source_binding_unavailable`; this is not live-readiness evidence.
-`verify_worker_release_freshness` separately proves the manually deployed Render
-worker is running the current commit by comparing hosted
-`worker_heartbeats.details.release_sha` with local Git `HEAD` and by rejecting a
-missing, mismatched, stale, or future heartbeat. A missing local Render CLI or a
-successful push alone is not deploy freshness evidence.
+`redeploy_render_worker` prints both `FINAL=PASS render_deploy_hook` and
+`FINAL=PASS render_worker_redeploy` only after the hosted heartbeat observes the
+current commit. `verify_worker_release_freshness` separately proves dashboard
+deploys by comparing hosted `worker_heartbeats.details.release_sha` with local
+Git `HEAD` and by rejecting a missing, mismatched, stale, or future heartbeat. A
+missing local Render CLI, a successful push, or a hook HTTP 200 alone is not
+deploy freshness evidence.
 
 The command must return `FINAL=PASS live_external_alert_drill` after delivering
 four alert payloads for manual-check, stale-heartbeat, live-account-count failure,

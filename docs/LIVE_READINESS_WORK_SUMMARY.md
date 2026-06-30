@@ -27,6 +27,22 @@ approval. The authoritative readiness score remains
   still requires a manual Render deploy hook or dashboard deploy plus
   `verify_worker_release_freshness` PASS before hosted freshness can be claimed.
 
+## 2026-07-01 Render Redeploy Freshness Gate
+
+- Added `app.tools.redeploy_render_worker`, an operator command that requires
+  `--yes`, reads `RENDER_DEPLOY_HOOK_URL` only from the operator shell or
+  `--hook-url`, triggers the Render deploy hook with `ref=<current HEAD>`, and
+  polls hosted `worker_heartbeats` until `release_sha` matches the expected
+  commit.
+- The command refuses to trigger if hosted Supabase verification env is missing,
+  so a hook HTTP 200 cannot be mistaken for a completed deploy. Output is limited
+  to short SHA values, status code, heartbeat age, attempt count, and bounded
+  `FINAL` reasons; it never prints the hook URL, token, response body, or full
+  commit hash.
+- Focused verification:
+  `py -m pytest app/tests/unit/test_render_worker_redeploy.py app/tests/unit/test_render_deploy_hook.py app/tests/unit/test_worker_release_freshness.py -q`
+  returned `21 passed`; `ruff` and `mypy` passed for the new tool and tests.
+
 ## 2026-06-30 Render Worker Follow-Up
 
 - A local Render-equivalent smoke run with `ENV=production`,
@@ -316,6 +332,9 @@ The latest local verification recorded before this handoff included:
   `reason=release_sha_mismatch`
 - `py -m app.tools.trigger_render_deploy_hook --expected-sha ...` from
   `apps/worker`: expected `FINAL=SKIP render_deploy_hook` with
+  `reason=render_deploy_hook_env_missing` when no operator hook URL is present
+- `py -m app.tools.redeploy_render_worker --repo-root ... --yes` from
+  `apps/worker`: expected `FINAL=SKIP render_worker_redeploy` with
   `reason=render_deploy_hook_env_missing` when no operator hook URL is present
 - Scorecard/security evidence gates:
   retained scan report prepared for

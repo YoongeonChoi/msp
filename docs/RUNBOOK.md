@@ -855,15 +855,19 @@ If the operator uses a Render deploy hook instead of the Render dashboard, keep
 `RENDER_DEPLOY_HOOK_URL` only in the operator shell. It is a secret-bearing URL,
 so do not paste it into Git, logs, docs, retained evidence, or desktop env. The
 trigger remains manual: the helper requires `--yes`, sends only a POST to
-`https://api.render.com/deploy/...`, pins `ref` to the current Git commit, and
-prints only the short expected SHA plus HTTP status.
+`https://api.render.com/deploy/...`, pins `ref` to the current Git commit, polls
+hosted `worker_heartbeats`, and prints only short release SHA values, HTTP
+status, heartbeat age, and attempt counts.
 
 ```bash
-python -m app.tools.trigger_render_deploy_hook --repo-root . --yes
+python -m app.tools.redeploy_render_worker --repo-root . --yes
 python -m app.tools.verify_security_scan_evidence --evidence path/to/security_scan_summary.json --repo-root .
 python -m app.tools.verify_live_readiness_scorecard --scorecard docs/LIVE_READINESS_SCORECARD.md --security-evidence path/to/security_scan_summary.json --repo-root .
-python -m app.tools.verify_worker_release_freshness --repo-root .
 ```
+
+If the Render dashboard is used instead of the deploy hook, run
+`python -m app.tools.verify_worker_release_freshness --repo-root .` after the
+manual dashboard deploy reaches live.
 
 After the security report is committed and pushed to the declared raw
 byte-addressed `report_uri`, run the remote publication gate as well:
@@ -875,10 +879,9 @@ python -m app.tools.verify_security_scan_evidence --evidence path/to/security_sc
 On Windows:
 
 ```bash
-py -m app.tools.trigger_render_deploy_hook --repo-root . --yes
+py -m app.tools.redeploy_render_worker --repo-root . --yes
 py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_summary.json --repo-root .
 py -m app.tools.verify_live_readiness_scorecard --scorecard docs\LIVE_READINESS_SCORECARD.md --security-evidence path\to\security_scan_summary.json --repo-root .
-py -m app.tools.verify_worker_release_freshness --repo-root .
 ```
 
 After publication on Windows:
@@ -891,16 +894,17 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
+FINAL=PASS render_worker_redeploy deploy_status_code=200 expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300 attempts=<n>
 FINAL=PASS security_scan_evidence scan_id=d4415550-5104-47e5-a896-32ca72005b89 worklist_rows=8 completion_receipts=8 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
 FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=8 candidate_findings=0 reportable_findings=0
-FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
 
-`FINAL=FAIL render_deploy_hook`, `FINAL=FAIL security_scan_evidence`, or
-`FINAL=FAIL worker_release_freshness` blocks live-mode consideration. A
-`FINAL=SKIP render_deploy_hook reason=render_deploy_hook_env_missing` result
+`FINAL=FAIL render_worker_redeploy`, `FINAL=FAIL security_scan_evidence`, or
+dashboard-path `FINAL=FAIL worker_release_freshness` blocks live-mode
+consideration. A
+`FINAL=SKIP render_worker_redeploy reason=render_deploy_hook_env_missing` result
 means the operator did not provide deploy-hook credentials and must deploy from
-the Render dashboard instead. A `FINAL=SKIP render_deploy_hook` result with
+the Render dashboard instead. A `FINAL=SKIP render_worker_redeploy` result with
 `reason=confirmation_required` means no network call was made because `--yes`
 was omitted. Run the security verifier
 with `--repo-root` so it recomputes the current `source_head`/`source_diff_sha256`
