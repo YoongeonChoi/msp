@@ -862,8 +862,8 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=release_metadata_20260630132334 worklist_rows=7 completion_receipts=7 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=7 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=provider_detail_20260630133946 worklist_rows=3 completion_receipts=3 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=3 candidate_findings=0 reportable_findings=0
 ```
 
 `FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier
@@ -1210,6 +1210,10 @@ the provider can explain the failure. `details` must not contain credentials,
 bearer tokens, account identifiers, raw provider payloads, or secret-looking
 keys. Empty `details={}` on hosted Supabase means the deployed worker has not
 yet emitted the patched diagnostic path or the provider returned no safe reason.
+`paper_health_report` prints only the safe provider detail summary, for example
+`toss: healthy=False status=unknown error_type=ProviderAuthError reason=toss_access_denied`,
+normalizes provider detail strings to a single line, and still redacts
+secret-like text before writing to stdout.
 
 8. Verify watchlist upsert:
 

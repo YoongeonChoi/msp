@@ -30,7 +30,7 @@ The command prints a safe report and writes one `engine_events` summary row with
 
 - `bot_settings`: `enabled`, `mode`, `live_order_allowed`
 - latest worker heartbeat age in seconds
-- latest provider health by provider
+- latest provider health by provider, including safe failure details when present
 - decisions in the last 24h grouped by `action`
 - orders in the last 24h grouped by `status`
 - live-like order count for `sent`, `filled`, `partial_filled`
@@ -41,6 +41,15 @@ The command prints a safe report and writes one `engine_events` summary row with
 - recent `error` and `critical` `engine_events`
 - DB size from the latest `retention_runs.db_size_bytes`, if queryable
 - final `PASS`, `WARN`, or `FAIL`
+
+Provider health detail output is intentionally narrow. When an `api_health`
+row has safe diagnostic fields, the report may print values such as
+`error_type=ProviderAuthError reason=toss_access_denied` on the provider line.
+Only `error_type`, `reason`, `status`, and `code` are summarized, string values
+are single-line normalized and bounded, and the final line still passes through
+secret redaction before it is printed. Raw provider payloads, credentials,
+tokens, account identifiers, and unknown detail keys must remain out of the
+report.
 
 ## Exit Codes
 

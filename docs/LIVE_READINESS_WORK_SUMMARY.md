@@ -38,28 +38,27 @@ approval. The authoritative readiness score remains
 ## 2026-06-30 Hosted Paper Health Diagnostics Follow-Up
 
 - Hosted Supabase paper health was checked with the server-side worker env. The
-  worker heartbeat was fresh at the time of the check (`latest_heartbeat_age_sec=23`),
-  and the safety flags remained disabled (`mode=paper`, `live_order_allowed=false`).
+  worker heartbeat was fresh at the time of the check, carried
+  `release_sha=976ced92783109527decb1675d17d9b1526f2d52`, and the safety flags
+  remained disabled (`mode=paper`, `live_order_allowed=false`).
 - The report still returned `FINAL=FAIL` because hosted data contained repeated
-  operational `worker` critical events with `error_type='HTTPStatusError'`, and
-  `toss` plus `toss_market_data` provider health was degraded.
+  operational `worker` critical events with `error_type='HTTPStatusError'` in
+  the 24-hour window, and `toss` plus `toss_market_data` provider health was
+  degraded.
 - The latest hosted `api_health` rows for the Toss providers still had
-  `details={}` because the deployed worker had not yet emitted this patched
-  diagnostic path. `HealthService` now persists safe provider failure details
-  (`error_type`, `reason`) for unhealthy providers and redacts secret-like
-  keys/values before writing `api_health.details`.
-- `TossClient.provider_health()` and `TossMarketData.provider_health()` now keep
-  read-only safe failure details from `ProviderError.safe_message`, while broker
-  order creation paths remain unchanged and still fail closed through the
-  existing execution/risk gates.
-- `paper_health_report` now excludes its own
-  `component='paper_ops'`, `message='paper_health_report'` diagnostic events
-  from the repeated-critical-event count, preventing self-sustaining FAIL
-  reports. Operational critical events from `worker` and provider components
-  still count and still block.
-- Render still requires a manual redeploy because `render.yaml` keeps
-  `autoDeployTrigger: "off"`. After redeploy, retain hosted `api_health.details`
-  rows and paper health output before treating this blocker as closed.
+  safe details showing `error_type=ProviderAuthError` and
+  `reason=toss_access_denied`. `paper_health_report` now prints those
+  allowlisted provider detail fields on degraded provider lines while still
+  passing the output through secret redaction.
+- The report continues to exclude its own `component='paper_ops'`,
+  `message='paper_health_report'` diagnostic events from the
+  repeated-critical-event count, preventing self-sustaining FAIL reports.
+  Operational critical events from `worker` and provider components still count
+  and still block.
+- Render was observed running the previously pushed release metadata commit.
+  Because `render.yaml` keeps `autoDeployTrigger: "off"`, this new commit still
+  requires a manual Render redeploy before hosted heartbeats can show the new
+  `release_sha`.
 
 ## Current Status
 
@@ -158,22 +157,24 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `release_metadata_20260630132334`.
+  `provider_detail_20260630133946`.
 - The retained report is
-  `security-artifacts/release_metadata_20260630132334/report.md`.
-- The scan summary records 7 worklist rows, 7 completion receipts,
+  `security-artifacts/provider_detail_20260630133946/report.md`.
+- The scan summary records 3 worklist rows, 3 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers release metadata sanitization, Render build metadata
-  generation, worker heartbeat persistence, paper health report output, and the
-  unchanged live-order boundary: release markers are constrained to safe commit
-  SHA/source fields, report output redacts secret-like strings, and
-  `RunTradingCycle` still reaches live proposals only through the existing
-  `RiskService`/`ExecutionService` path.
+- The delta scan covers provider health detail parsing and paper health report
+  output: only allowlisted provider detail keys are summarized, strings are
+  single-line normalized and bounded, unknown keys are ignored, and formatted
+  provider details pass through `_safe_text` before operator output. The
+  live-order boundary is unchanged:
+  `RiskService`, `ExecutionService`, `BrokerPort`, and desktop broker/order API
+  paths were not modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
-  `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125`, remain retained
-  under `security-artifacts/` as broader historical baseline evidence.
+  `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
+  `release_metadata_20260630132334`, remain retained under `security-artifacts/`
+  as broader historical baseline evidence.
 
 ## Verification Snapshot
 
@@ -182,12 +183,13 @@ The latest local verification recorded before this handoff included:
 - `py -m pytest -q --tb=short` from `apps/worker`: `518 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `py -m pytest app/tests/unit/test_release_metadata.py app/tests/unit/test_paper_health_report.py app/tests/integration/test_trading_cycle.py -q --tb=short`
-  from `apps/worker`: `36 passed`
-- `MOCK_PROVIDERS=true RUN_ONCE=true APP_RELEASE_SHA=abcdef1234567890 py -m app.main`
-  from `apps/worker`: passed with no live orders placed
+- `py -m pytest app/tests/unit/test_paper_health_report.py -q --tb=short`
+  from `apps/worker`: `9 passed`
+- `py -m app.tools.paper_health_report` from `apps/worker`: expected
+  `FINAL=FAIL` against hosted data, with degraded provider lines including
+  `error_type=ProviderAuthError reason=toss_access_denied`
 - Scorecard/security evidence gates:
-  retained scan report prepared for `release_metadata_20260630132334`; regenerate the
+  retained scan report prepared for `provider_detail_20260630133946`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

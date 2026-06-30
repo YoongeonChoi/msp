@@ -32,6 +32,7 @@ class ProviderHealthSummary:
     healthy: bool
     status: str
     checked_at: datetime | None
+    detail_summary: str | None
 
 
 @dataclass(frozen=True, slots=True)

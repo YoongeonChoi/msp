@@ -6,7 +6,11 @@ import anyio
 import httpx
 
 from app.adapters.persistence.paper_health_repository import SupabasePaperHealthRepository
-from app.application.services.paper_health_models import PaperHealthReport, PaperHealthResult
+from app.application.services.paper_health_models import (
+    PaperHealthReport,
+    PaperHealthResult,
+    ProviderHealthSummary,
+)
 from app.application.services.paper_health_report_service import PaperHealthReportService
 from app.config import load_settings
 
@@ -51,10 +55,7 @@ def format_paper_health_report(report: PaperHealthReport) -> str:
         "[providers]",
     ]
     if report.providers:
-        lines.extend(
-            f"{provider.provider}: healthy={provider.healthy} status={provider.status}"
-            for provider in report.providers
-        )
+        lines.extend(_format_provider(provider) for provider in report.providers)
     else:
         lines.append("no provider health rows")
     lines.extend(
@@ -111,6 +112,13 @@ def _format_counts(counts: Mapping[str, int]) -> str:
     if not counts:
         return "none"
     return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+
+
+def _format_provider(provider: ProviderHealthSummary) -> str:
+    line = f"{provider.provider}: healthy={provider.healthy} status={provider.status}"
+    if provider.detail_summary:
+        line += " " + _safe_text(provider.detail_summary)
+    return line
 
 
 def _optional_count(value: int | None) -> str:

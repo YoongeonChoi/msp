@@ -7,6 +7,7 @@ from app.application.services.paper_health_models import EngineEventSummary, Pro
 from app.domain.common.json import JsonObject, JsonValue
 
 KST = timezone(timedelta(hours=9))
+PROVIDER_DETAIL_KEYS = ("error_type", "reason", "status", "code")
 
 
 def latest_providers(rows: Sequence[JsonObject]) -> tuple[ProviderHealthSummary, ...]:
@@ -20,6 +21,7 @@ def latest_providers(rows: Sequence[JsonObject]) -> tuple[ProviderHealthSummary,
             healthy=bool_value(row.get("healthy")),
             status=string_value(row.get("status")) or "unknown",
             checked_at=datetime_value(row.get("checked_at")),
+            detail_summary=provider_detail_summary(row),
         )
     return tuple(by_provider.values())
 
@@ -134,3 +136,28 @@ def string_value(value: JsonValue | None) -> str | None:
 
 def bool_value(value: JsonValue | None) -> bool:
     return value is True
+
+
+def provider_detail_summary(row: JsonObject) -> str | None:
+    details = row.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    items: list[str] = []
+    for key in PROVIDER_DETAIL_KEYS:
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            safe_value = provider_detail_value(value)
+            if safe_value is not None:
+                items.append(f"{key}={safe_value}")
+        elif isinstance(value, (bool, int, float)) and not isinstance(value, bool):
+            items.append(f"{key}={value}")
+    if not items:
+        return None
+    return " ".join(items)
+
+
+def provider_detail_value(value: str) -> str | None:
+    compact = " ".join(value.split())
+    if not compact:
+        return None
+    return compact[:160]

@@ -50,14 +50,31 @@ async def test_report_fails_if_duplicate_idempotency_key_exists() -> None:
 
 
 async def test_report_warns_if_provider_degraded() -> None:
-    rows = _normal_rows(api_health=[_api_health("toss", healthy=False)])
+    rows = _normal_rows(
+        api_health=[
+            _api_health(
+                "toss",
+                healthy=False,
+                details={
+                    "error_type": "ProviderAuthError",
+                    "reason": "toss_access_denied\nretry_blocked",
+                    "code": 403,
+                },
+            )
+        ]
+    )
     repository = FakePaperHealthRepository(rows=rows)
 
     report = await PaperHealthReportService(repository).collect(NOW)
+    rendered = format_paper_health_report(report)
 
     assert report.result == PaperHealthResult.WARN
     assert _finding_codes(report) == {"provider_degraded"}
     assert repository.engine_events[-1]["level"] == "warning"
+    assert (
+        "error_type=ProviderAuthError reason=toss_access_denied retry_blocked code=403"
+        in rendered
+    )
 
 
 async def test_report_fails_if_heartbeat_stale() -> None:
@@ -72,6 +89,13 @@ async def test_report_fails_if_heartbeat_stale() -> None:
 
 async def test_report_output_does_not_print_secrets() -> None:
     rows = _normal_rows(
+        api_health=[
+            _api_health(
+                "toss",
+                healthy=False,
+                details={"reason": "authorization token OPENAI_TEST_SECRET"},
+            )
+        ],
         recent_engine_events=[
             {
                 "level": "error",
@@ -209,13 +233,20 @@ def _normal_rows(
     )
 
 
-def _api_health(provider: str, healthy: bool = True) -> JsonObject:
-    return {
+def _api_health(
+    provider: str,
+    healthy: bool = True,
+    details: JsonObject | None = None,
+) -> JsonObject:
+    row: JsonObject = {
         "provider": provider,
         "healthy": healthy,
         "status": "ok" if healthy else "error",
         "checked_at": NOW.isoformat(),
     }
+    if details is not None:
+        row["details"] = details
+    return row
 
 
 def _engine_event(level: str, component: str, message: str) -> JsonObject:
