@@ -4,6 +4,7 @@ import asyncio
 
 from app.application.use_cases.run_trading_cycle import RunTradingCycle
 from app.config import Settings
+from app.domain.common.errors import KnownFailClosedError
 from app.infrastructure.graceful_shutdown import ShutdownFlag
 
 
@@ -23,6 +24,13 @@ class TradingLoop:
             await self.run_trading_cycle.execute()
             return
         while not self.shutdown.requested:
-            await self.run_trading_cycle.execute()
+            try:
+                await self.run_trading_cycle.execute()
+            except KnownFailClosedError as exc:
+                await self.run_trading_cycle.repository.record_engine_event(
+                    "warning",
+                    exc.component,
+                    exc.safe_message,
+                    {"fail_closed": True, "loop_continues": True},
+                )
             await asyncio.sleep(self.settings.loop_interval_sec)
-

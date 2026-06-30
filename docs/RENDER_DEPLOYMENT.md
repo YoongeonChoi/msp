@@ -50,6 +50,13 @@ HTTP token request should be attempted. This proves the Render worker can stay
 observable while live trading remains blocked until credentials and hosted
 provider evidence are supplied.
 
+In continuous Render mode, a `KnownFailClosedError` during one cycle must not
+terminate the background worker. The loop records a warning engine event with
+`fail_closed=true` and `loop_continues=true`, sleeps for the configured interval,
+and starts the next cycle. `RUN_ONCE=true` smoke runs intentionally preserve the
+exception path so operator validation still fails fast for missing credentials,
+schema drift, or other fail-closed setup errors.
+
 If the worker exits during startup with a PostgREST `400`, inspect only the
 redacted response body. Hosted projects that have not yet applied
 `supabase/migrations/0005_schema_alignment.sql` may be missing

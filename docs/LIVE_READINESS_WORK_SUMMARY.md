@@ -7,6 +7,26 @@ checkpoint. It is a handoff summary for commit review, not a live-trading
 approval. The authoritative readiness score remains
 `docs/LIVE_READINESS_SCORECARD.md`.
 
+## 2026-07-01 Continuous Worker Fail-Closed Loop
+
+- `TradingLoop` now handles `KnownFailClosedError` inside continuous mode instead
+  of letting a single expected provider/setup fail-closed condition terminate the
+  Render background worker process.
+- The loop records a warning `engine_events` row with `fail_closed=true` and
+  `loop_continues=true`, then proceeds to the next interval. This keeps
+  heartbeat/health observability alive while preserving fail-closed trading
+  behavior.
+- `RUN_ONCE=true` remains strict for operator smoke checks: known fail-closed
+  errors still propagate to `main`, which records the existing
+  `known_fail_closed` warning and exits cleanly for deploy validation.
+- Focused verification:
+  `py -m pytest app/tests/unit/test_trading_loop.py app/tests/integration/test_trading_cycle.py -q`
+  returned `25 passed`; `ruff` and `mypy` passed for the changed files.
+- Hosted Render was still observed on the older `release_sha=976ced927831...`
+  before this change was deployed. Because auto deploy remains off, this code
+  still requires a manual Render deploy hook or dashboard deploy plus
+  `verify_worker_release_freshness` PASS before hosted freshness can be claimed.
+
 ## 2026-06-30 Render Worker Follow-Up
 
 - A local Render-equivalent smoke run with `ENV=production`,
