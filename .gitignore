@@ -13,6 +13,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 *.pyc
+apps/worker/app/release_metadata.json
 *.tsbuildinfo
 *.egg-info/
 qa-*.png

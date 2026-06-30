@@ -23,6 +23,7 @@ from app.domain.strategy.entities import FeatureVector, StrategyContext
 from app.domain.trading.entities import AccountState, DecisionSnapshot, Quote, Signal
 from app.domain.trading.policies import settings_validation_reasons
 from app.infrastructure.idempotency import build_idempotency_key
+from app.infrastructure.release_metadata import worker_heartbeat_details
 
 
 class RunTradingCycle:
@@ -56,7 +57,10 @@ class RunTradingCycle:
     async def execute(self) -> None:
         cycle_id = uuid4()
         now = now_utc()
-        await self.repository.record_heartbeat("ok", {"cycle_id": str(cycle_id)})
+        await self.repository.record_heartbeat(
+            "ok",
+            worker_heartbeat_details(str(cycle_id)),
+        )
         if self.order_reconciliation_service is not None:
             await self.order_reconciliation_service.reconcile_live_orders()
         settings = await self.repository.load_bot_settings()

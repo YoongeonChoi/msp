@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
+
 from app.adapters.ai.openai_mock import OpenAIMock
 from app.adapters.broker.toss_mock import TossMock
 from app.adapters.fundamentals.opendart_mock import OpenDartMock
@@ -190,6 +192,24 @@ async def test_bot_disabled_still_creates_signal_snapshot_without_orders() -> No
     assert len(repository.fundamentals_quarterly) == 1
     assert repository.orders == []
     assert broker.place_order_calls == 0
+
+
+async def test_cycle_heartbeat_includes_release_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_RELEASE_SHA", "abcdef1234567890")
+    repository = InMemoryRepository(
+        BotSettings(enabled=False, mode="paper", live_order_allowed=False)
+    )
+    cycle = _cycle(repository)
+
+    await cycle.execute()
+
+    details = repository.heartbeats[0]["details"]
+    assert isinstance(details, dict)
+    assert details["release_sha"] == "abcdef1234567890"
+    assert details["release_sha_short"] == "abcdef123456"
+    assert details["release_source"] == "APP_RELEASE_SHA"
 
 
 async def test_paper_enabled_creates_paper_order_only() -> None:

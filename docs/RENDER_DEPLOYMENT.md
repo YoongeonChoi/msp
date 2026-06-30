@@ -16,7 +16,7 @@ Before deploy:
 2. Set `live_order_allowed=false`.
 3. Wait for heartbeat showing paused/disabled.
 4. Deploy manually.
-5. Verify heartbeat.
+5. Verify heartbeat, including `details.release_sha` for the deployed commit.
 6. Run smoke checks.
 7. Re-enable paper first.
 8. Keep `LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED=false` until an operator has recorded retained
@@ -61,7 +61,24 @@ applied and verified before live-readiness evidence can be accepted.
 
 Because `autoDeployTrigger` remains `off`, a successful Git push does not update
 Render by itself. Deploy the pushed commit manually, then verify a fresh
-heartbeat and repeat the one-shot smoke against the deployed environment.
+heartbeat whose `details.release_sha` or `details.release_sha_short` matches the
+expected commit, and repeat the one-shot smoke against the deployed environment.
+The Render build command writes `app/release_metadata.json` during build so the
+worker can persist this release marker in `worker_heartbeats.details`; an
+operator may also set `APP_RELEASE_SHA` to the expected commit to override the
+build file explicitly. Invalid or secret-like values are ignored rather than
+persisted.
+
+```sql
+select
+  status,
+  details->>'release_sha' as release_sha,
+  details->>'release_source' as release_source,
+  created_at
+from public.worker_heartbeats
+order by created_at desc
+limit 1;
+```
 
 Before any live-mode consideration, run:
 

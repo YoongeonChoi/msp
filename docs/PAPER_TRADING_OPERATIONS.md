@@ -126,6 +126,19 @@ order by created_at desc
 limit 1;
 ```
 
+After a manual Render deploy, confirm the report's `[worker]` section shows a
+`release_sha` or `release_source` for the expected commit. The underlying row is:
+
+```sql
+select
+  details->>'release_sha' as release_sha,
+  details->>'release_source' as release_source,
+  created_at
+from public.worker_heartbeats
+order by created_at desc
+limit 1;
+```
+
 ## Safety Notes
 
 - Do not run this command from Desktop.

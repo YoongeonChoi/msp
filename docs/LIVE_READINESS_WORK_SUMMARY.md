@@ -26,6 +26,10 @@ approval. The authoritative readiness score remains
   health, decision snapshot, and feature observations without broker order
   placement. `render.yaml` still keeps `autoDeployTrigger: "off"`, so pushing
   this fix does not deploy it until an operator manually deploys Render.
+- Worker heartbeats now carry safe release metadata (`release_sha`,
+  `release_sha_short`, and `release_source`) from `APP_RELEASE_SHA` or the
+  build-generated `app/release_metadata.json`, so hosted Supabase can prove
+  which pushed commit Render is actually running after a manual deploy.
 - Hosted Supabase should still be migrated through
   `supabase/migrations/0005_schema_alignment.sql`; the runtime compatibility
   changes keep the worker alive on the base schema but do not replace migration
@@ -154,32 +158,36 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `abc46bf_20260630220125`.
+  `release_metadata_20260630132334`.
 - The retained report is
-  `security-artifacts/abc46bf_20260630220125/report.md`.
-- The scan summary records 1 worklist row, 1 completion receipt,
+  `security-artifacts/release_metadata_20260630132334/report.md`.
+- The scan summary records 7 worklist rows, 7 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers the live feature evidence gate in `feature_service.py`:
-  `provider_live_v1` remains fail-closed until positive PER/PBR valuation inputs
-  and verified market/sector evidence exist, and the existing trading cycle skips
-  live proposal creation for not-ready provider snapshots before any broker call.
+- The delta scan covers release metadata sanitization, Render build metadata
+  generation, worker heartbeat persistence, paper health report output, and the
+  unchanged live-order boundary: release markers are constrained to safe commit
+  SHA/source fields, report output redacts secret-like strings, and
+  `RunTradingCycle` still reaches live proposals only through the existing
+  `RiskService`/`ExecutionService` path.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
-  `3649a5f_20260630214017` scans remain retained under `security-artifacts/` as
-  broader historical baseline evidence.
+  `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125`, remain retained
+  under `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `512 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `518 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `py -m pytest app/tests/unit/test_feature_service.py app/tests/integration/test_trading_cycle.py -q --tb=short`
-  from `apps/worker`: `24 passed`
+- `py -m pytest app/tests/unit/test_release_metadata.py app/tests/unit/test_paper_health_report.py app/tests/integration/test_trading_cycle.py -q --tb=short`
+  from `apps/worker`: `36 passed`
+- `MOCK_PROVIDERS=true RUN_ONCE=true APP_RELEASE_SHA=abcdef1234567890 py -m app.main`
+  from `apps/worker`: passed with no live orders placed
 - Scorecard/security evidence gates:
-  retained scan report prepared for `abc46bf_20260630220125`; regenerate the
+  retained scan report prepared for `release_metadata_20260630132334`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

@@ -63,6 +63,11 @@ def _build_report(
 ) -> PaperHealthReport:
     latest_heartbeat = rows.latest_heartbeats[0] if rows.latest_heartbeats else None
     heartbeat_age = age_seconds(latest_heartbeat, "created_at", now)
+    heartbeat_release_sha = _heartbeat_detail_string(latest_heartbeat, "release_sha")
+    heartbeat_release_source = _heartbeat_detail_string(
+        latest_heartbeat,
+        "release_source",
+    )
     providers = latest_providers(rows.api_health)
     decisions_by_action = count_by(rows.decisions_last_24h, "action")
     orders_by_status = count_by(rows.orders_last_24h, "status")
@@ -89,6 +94,8 @@ def _build_report(
     return PaperHealthReport(
         settings=settings,
         heartbeat_age_seconds=heartbeat_age,
+        heartbeat_release_sha=heartbeat_release_sha,
+        heartbeat_release_source=heartbeat_release_source,
         providers=providers,
         decisions_by_action=decisions_by_action,
         orders_by_status=orders_by_status,
@@ -192,6 +199,21 @@ def _critical(code: str, message: str) -> PaperHealthFinding:
 
 def _warning(code: str, message: str) -> PaperHealthFinding:
     return PaperHealthFinding(PaperHealthSeverity.WARNING, code, message)
+
+
+def _heartbeat_detail_string(
+    latest_heartbeat: Mapping[str, object] | None,
+    key: str,
+) -> str | None:
+    if latest_heartbeat is None:
+        return None
+    details = latest_heartbeat.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    value = details.get(key)
+    if not isinstance(value, str):
+        return None
+    return value[:80]
 
 
 def _operational_critical_event_count(events: Sequence[EngineEventSummary]) -> int:

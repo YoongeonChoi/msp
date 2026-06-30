@@ -24,6 +24,8 @@ Unit:
 - paper health report output does not print secrets
 - paper health report ignores its own `paper_ops/paper_health_report` critical
   events for repeated-critical counts while still failing on worker criticals
+- paper health report prints safe latest heartbeat release metadata, and worker
+  cycles persist the release marker in `worker_heartbeats.details`
 - provider health failure details persist only safe bounded fields and redact
   secret-looking keys or values
 - live feature snapshots require positive PER/PBR valuation inputs and
@@ -64,6 +66,7 @@ E2E smoke:
 
 - worker starts with mocks
 - heartbeat persists
+- Render build writes safe release metadata before dependency install
 - bot disabled creates no decisions/orders
 - paper enabled creates paper/blocked orders only
 - no `sent`, `filled`, or `partial_filled` order appears in paper mode

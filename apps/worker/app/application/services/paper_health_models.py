@@ -46,6 +46,8 @@ class EngineEventSummary:
 class PaperHealthReport:
     settings: BotSettings
     heartbeat_age_seconds: int | None
+    heartbeat_release_sha: str | None
+    heartbeat_release_source: str | None
     providers: tuple[ProviderHealthSummary, ...]
     decisions_by_action: Mapping[str, int]
     orders_by_status: Mapping[str, int]
@@ -65,6 +67,8 @@ class PaperHealthReport:
         return {
             "result": self.result.value,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
+            "heartbeat_release_sha": self.heartbeat_release_sha,
+            "heartbeat_release_source": self.heartbeat_release_source,
             "live_like_order_count": self.live_like_order_count,
             "duplicate_idempotency_key_count": len(self.duplicate_idempotency_keys),
             "orders_missing_idempotency_key": self.orders_missing_idempotency_key,

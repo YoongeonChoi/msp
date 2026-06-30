@@ -91,6 +91,26 @@ async def test_report_output_does_not_print_secrets() -> None:
     assert "[redacted]" in rendered
 
 
+async def test_report_outputs_safe_release_metadata() -> None:
+    rows = _normal_rows(
+        heartbeat_details={
+            "release_sha": "abcdef1234567890",
+            "release_source": "APP_RELEASE_SHA",
+        }
+    )
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+    rendered = format_paper_health_report(report)
+
+    assert report.heartbeat_release_sha == "abcdef1234567890"
+    assert "release_sha=abcdef1234567890" in rendered
+    assert "release_source=APP_RELEASE_SHA" in rendered
+    details = repository.engine_events[-1]["details"]
+    assert isinstance(details, dict)
+    assert details["heartbeat_release_sha"] == "abcdef1234567890"
+
+
 async def test_report_ignores_own_critical_events_for_repeated_critical_count() -> None:
     rows = _normal_rows(
         recent_engine_events=[
@@ -147,13 +167,20 @@ class FakePaperHealthRepository:
 def _normal_rows(
     *,
     heartbeat_age: timedelta = timedelta(seconds=60),
+    heartbeat_details: JsonObject | None = None,
     api_health: list[JsonObject] | None = None,
     live_like_orders: list[JsonObject] | None = None,
     order_key_rows: list[JsonObject] | None = None,
     recent_engine_events: list[JsonObject] | None = None,
 ) -> PaperHealthRows:
     return PaperHealthRows(
-        latest_heartbeats=[{"status": "ok", "created_at": (NOW - heartbeat_age).isoformat()}],
+        latest_heartbeats=[
+            {
+                "status": "ok",
+                "created_at": (NOW - heartbeat_age).isoformat(),
+                "details": heartbeat_details or {},
+            }
+        ],
         api_health=api_health or [_api_health("toss"), _api_health("supabase")],
         decisions_last_24h=[
             {

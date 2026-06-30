@@ -64,6 +64,19 @@ Check latest worker heartbeats:
 select * from public.worker_heartbeats order by created_at desc limit 10;
 ```
 
+Check deployed worker release marker:
+
+```sql
+select
+  status,
+  details->>'release_sha' as release_sha,
+  details->>'release_source' as release_source,
+  created_at
+from public.worker_heartbeats
+order by created_at desc
+limit 1;
+```
+
 Check latest API health by provider:
 
 ```sql

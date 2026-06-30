@@ -45,6 +45,8 @@ def format_paper_health_report(report: PaperHealthReport) -> str:
         "",
         "[worker]",
         "latest_heartbeat_age_sec=" + _optional_int(report.heartbeat_age_seconds),
+        "release_sha=" + _optional_text(report.heartbeat_release_sha),
+        "release_source=" + _optional_text(report.heartbeat_release_source),
         "",
         "[providers]",
     ]
@@ -121,6 +123,12 @@ def _optional_int(value: int | None) -> str:
     if value is None:
         return "n/a"
     return str(value)
+
+
+def _optional_text(value: str | None) -> str:
+    if value is None:
+        return "n/a"
+    return _safe_text(value)
 
 
 def _safe_text(value: str) -> str:
