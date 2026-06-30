@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     loop_interval_sec: int = Field(default=30, alias="LOOP_INTERVAL_SEC")
     heartbeat_interval_sec: int = Field(default=30, alias="HEARTBEAT_INTERVAL_SEC")
     max_concurrent_api_calls: int = Field(default=5, alias="MAX_CONCURRENT_API_CALLS")
+    use_supabase_repository_for_mock: bool = Field(
+        default=False, alias="USE_SUPABASE_REPOSITORY"
+    )
     supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
     supabase_secret_key: SecretStr | None = Field(default=None, alias="SUPABASE_SECRET_KEY")
     toss_client_id: SecretStr | None = Field(default=None, alias="TOSS_CLIENT_ID")
@@ -40,7 +43,11 @@ class Settings(BaseSettings):
     outcome_tracking_price_limit: int = Field(default=5000, alias="OUTCOME_TRACKING_PRICE_LIMIT")
 
     def use_supabase_repository(self) -> bool:
-        return bool(self.supabase_url and self.supabase_secret_key and not self.mock_providers)
+        return bool(
+            self.supabase_url
+            and self.supabase_secret_key
+            and (not self.mock_providers or self.use_supabase_repository_for_mock)
+        )
 
 
 def load_settings() -> Settings:

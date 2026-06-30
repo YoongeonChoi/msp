@@ -68,12 +68,24 @@ async def test_toss_client_parses_account_response() -> None:
 
 async def test_toss_client_parses_position_response() -> None:
     client, requests = _client_with_responses({"/api/v1/holdings": _holdings_payload()})
+    now = datetime(2026, 3, 25, 1, 0, tzinfo=UTC)
 
     holdings = await client.get_holdings(account_seq=1)
+    positions = await client.get_positions(now)
 
     assert holdings.items[0].symbol == "005930"
     assert holdings.items[0].quantity == 100
-    assert requests[-1].headers["x-tossinvest-account"] == "1"
+    assert positions[0].symbol == "005930"
+    assert positions[0].quantity == 100
+    assert positions[0].avg_price_krw == 65_000
+    assert positions[0].current_price_krw == 72_000
+    account_headers = [
+        request.headers["x-tossinvest-account"]
+        for request in requests
+        if request.url.path == "/api/v1/holdings"
+        and "x-tossinvest-account" in request.headers
+    ]
+    assert account_headers == ["1", "1"]
 
 
 async def test_toss_client_parses_buying_power_calendar_and_account_state() -> None:

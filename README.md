@@ -27,6 +27,17 @@ npm install
 npm run desktop:dev
 ```
 
+To exercise the desktop cockpit with safe mock providers, set
+`USE_SUPABASE_REPOSITORY=true` together with `SUPABASE_URL` and
+`SUPABASE_SECRET_KEY`, then run:
+
+```bash
+cd apps/worker
+py -m app.tools.seed_strategy_v1
+py -m app.tools.seed_watchlist_demo
+MOCK_PROVIDERS=true USE_SUPABASE_REPOSITORY=true RUN_ONCE=true py -m app.main
+```
+
 ## Safety Defaults
 
 - `bot_settings.enabled=false`

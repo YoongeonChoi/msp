@@ -13,6 +13,7 @@ from app.application.services.execution_service import ExecutionService
 from app.application.services.feature_service import FeatureService
 from app.application.services.health_service import HealthService
 from app.application.services.order_reconciliation_service import OrderReconciliationService
+from app.application.services.portfolio_service import PortfolioService
 from app.application.services.risk_service import RiskService
 from app.application.services.signal_service import WeightedFactorStrategyV1
 from app.domain.common.errors import ProviderError
@@ -35,6 +36,7 @@ class RunTradingCycle:
         risk_service: RiskService,
         feature_service: FeatureService,
         order_reconciliation_service: OrderReconciliationService | None = None,
+        portfolio_service: PortfolioService | None = None,
         alert_notifier: AlertNotifierPort | None = None,
         live_system_order_count_scope_accepted: bool = False,
     ) -> None:
@@ -46,6 +48,7 @@ class RunTradingCycle:
         self.risk_service = risk_service
         self.feature_service = feature_service
         self.order_reconciliation_service = order_reconciliation_service
+        self.portfolio_service = portfolio_service
         self.alert_notifier = alert_notifier
         self.live_system_order_count_scope_accepted = live_system_order_count_scope_accepted
         self.strategy = WeightedFactorStrategyV1()
@@ -57,32 +60,19 @@ class RunTradingCycle:
         if self.order_reconciliation_service is not None:
             await self.order_reconciliation_service.reconcile_live_orders()
         settings = await self.repository.load_bot_settings()
-        if not settings.enabled:
-            await self.health_service.check()
-            return
+        provider_health = await self.health_service.check()
+        if self.portfolio_service is not None:
+            await self.portfolio_service.sync_positions(now)
         settings_errors = settings_validation_reasons(settings)
         if settings_errors:
             await self.repository.record_engine_event(
                 "warning", "settings", "invalid_settings", {"reasons": settings_errors}
             )
             return
-        if settings.mode == "live" and await self._has_pending_live_reconciliation():
-            return
-        provider_health = await self.health_service.check()
-        if provider_health.get("supabase") is not True or provider_health.get("toss") is not True:
-            provider_details: dict[str, object] = {
-                provider: healthy for provider, healthy in provider_health.items()
-            }
-            await self.repository.record_engine_event(
-                "warning", "provider_health", "critical provider unhealthy", provider_details
-            )
-            return
+        live_reconciliation_pending = (
+            settings.mode == "live" and await self._has_pending_live_reconciliation()
+        )
         market_open = await self.market_data.is_market_open()
-        if market_open is not True:
-            await self.repository.record_engine_event(
-                "info", "market_calendar", "market_closed_or_unknown", {"market_open": market_open}
-            )
-            return
         symbols = await self.repository.load_enabled_watchlist()
         quotes = await self.market_data.get_quotes(symbols)
         strategy_version = await self.repository.load_active_strategy_version()
@@ -100,6 +90,7 @@ class RunTradingCycle:
                 )
                 continue
             features = await self._features_for_mode(settings.mode, symbol, quote)
+            live_feature_order_proposal_ready = True
             if (
                 settings.mode == "live"
                 and features.raw.get("live_trading_ready") is not True
@@ -112,6 +103,8 @@ class RunTradingCycle:
                         "reasons": _feature_unready_reasons(features),
                     },
                 )
+                if features.raw.get("feature_source") == "provider_live_v1":
+                    live_feature_order_proposal_ready = False
             signal = self.strategy.score(
                 features,
                 StrategyContext(
@@ -163,6 +156,9 @@ class RunTradingCycle:
                 risk_snapshot=risk_result.to_dict(),
             )
             await self.repository.persist_decision_snapshot(snapshot)
+            await self.repository.persist_feature_observations(snapshot)
+            if not settings.enabled:
+                continue
             if paper_idempotency_key is None:
                 continue
             match settings.mode:
@@ -171,6 +167,11 @@ class RunTradingCycle:
                         snapshot, risk_result, paper_idempotency_key
                     )
                 case "live":
+                    if (
+                        live_reconciliation_pending
+                        or not live_feature_order_proposal_ready
+                    ):
+                        continue
                     await self.execution_service.propose_live_order(snapshot, risk_input)
                 case unreachable:
                     assert_never(unreachable)
@@ -245,7 +246,7 @@ class RunTradingCycle:
             symbols.add(order.symbol)
         await self._record_critical_event(
             "live_reconciliation",
-            "live_pending_reconciliation_blocks_new_decisions",
+            "live_pending_reconciliation_blocks_new_live_orders",
             {
                 "pending_order_count": len(pending_orders),
                 "statuses": status_counts,
@@ -262,7 +263,7 @@ class RunTradingCycle:
     ) -> FeatureVector:
         match mode:
             case "paper":
-                return self.feature_service.build_mock_features(symbol, quote)
+                return await self.feature_service.build_live_features(symbol, quote)
             case "live":
                 return await self.feature_service.build_live_features(symbol, quote)
             case _:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -43,6 +44,7 @@ from app.domain.common.errors import (
     ProviderUnavailableError,
     ProviderUnknownError,
 )
+from app.domain.portfolio.entities import Position
 from app.domain.trading.entities import AccountState
 
 ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
@@ -138,6 +140,30 @@ class TossClient:
             synced_at=now,
             daily_order_count_verified=False,
         )
+
+    async def get_positions(self, now: datetime) -> list[Position]:
+        holdings = await self.get_holdings()
+        positions: list[Position] = []
+        for item in holdings.items:
+            if (
+                item.market_country != "KR"
+                or item.currency != "KRW"
+                or _kr_symbol(item.symbol) is None
+            ):
+                continue
+            positions.append(
+                Position(
+                    symbol=item.symbol,
+                    quantity=_decimal_integral_to_int(
+                        item.quantity,
+                        "toss_position_quantity_invalid",
+                    ),
+                    avg_price_krw=_decimal_krw_to_int(item.average_purchase_price),
+                    current_price_krw=_decimal_krw_to_int(item.last_price),
+                    sector="unknown",
+                )
+            )
+        return positions
 
     async def get_prices(self, symbols: Sequence[str]) -> list[TossPriceResponse]:
         if not symbols:
@@ -389,6 +415,12 @@ def _safe_error_code(response: httpx.Response) -> str:
     return f"toss_{error_envelope.error.code}"
 
 
+def _kr_symbol(value: str) -> str | None:
+    if re.fullmatch(r"[0-9]{6}", value):
+        return value
+    return None
+
+
 def _map_toss_order_status(status: str) -> BrokerOrderReconciliationStatus:
     match status:
         case "PENDING" | "PENDING_CANCEL" | "PENDING_REPLACE":
@@ -408,6 +440,12 @@ def _map_toss_order_status(status: str) -> BrokerOrderReconciliationStatus:
 def _decimal_krw_to_int(value: Decimal) -> int:
     if value < 0 or value != value.to_integral_value():
         raise ProviderSchemaError("toss", "toss_krw_amount_not_nonnegative_integer")
+    return int(value)
+
+
+def _decimal_integral_to_int(value: Decimal, schema_code: str) -> int:
+    if value < 0 or value != value.to_integral_value():
+        raise ProviderSchemaError("toss", schema_code)
     return int(value)
 
 

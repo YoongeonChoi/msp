@@ -74,8 +74,9 @@ Live trading:
   status observation records `live_order_manual_check_provider_status_observed` and leaves the order in
   manual recovery until operator review.
 - If any of those live orders remains pending after reconciliation, the cycle records
-  `live_pending_reconciliation_blocks_new_decisions` and stops before new live decisions
-  or broker calls.
+  `live_pending_reconciliation_blocks_new_live_orders` and stops before new live order
+  proposals or broker calls. Decision snapshots may still be written so provider health,
+  features, and signals remain observable while execution is gated.
 - Manual live cancellation is available only through the worker CLI for one local open live order at a time.
   The worker confirms the original provider order is `CANCELED` before marking local `canceled`; timeout,
   unknown provider results, or non-`CANCELED` confirmation require manual review. Modify remains disabled

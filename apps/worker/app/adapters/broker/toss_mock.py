@@ -9,6 +9,7 @@ from app.application.ports.broker_port import (
     BrokerOrderStatusResult,
 )
 from app.domain.common.errors import ProviderUnavailableError
+from app.domain.portfolio.entities import Position
 from app.domain.trading.entities import AccountState
 
 
@@ -27,3 +28,6 @@ class TossMock:
 
     async def get_account_state(self, now: datetime) -> AccountState:
         raise ProviderUnavailableError("toss", "mock_broker_refuses_live_account_state")
+
+    async def get_positions(self, now: datetime) -> list[Position]:
+        raise ProviderUnavailableError("toss", "mock_broker_refuses_live_positions")

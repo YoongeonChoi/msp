@@ -41,6 +41,16 @@ const apiHealth: ApiHealth[] = [
     message: null,
     errorCode: null,
     checkedAt: nowIso
+  },
+  {
+    id: "api-2",
+    provider: "toss_market_data",
+    healthy: true,
+    status: "ok",
+    latencyMs: 18,
+    message: null,
+    errorCode: null,
+    checkedAt: nowIso
   }
 ];
 
@@ -78,6 +88,8 @@ const markup = renderToStaticMarkup(
 );
 
 assert.match(markup, /최근 경고 이벤트/);
+assert.match(markup, /MARKET DATA/);
+assert.match(markup, /정상/);
 assert.match(markup, /critical/);
 assert.match(markup, /live_order_manual_check_still_unknown/);
 assert.match(markup, /unknown_requires_manual_check/);

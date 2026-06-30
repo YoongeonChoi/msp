@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
+from app.domain.portfolio.entities import Position
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
@@ -17,6 +18,10 @@ class RepositoryPort(Protocol):
     async def load_active_strategy_version(self) -> StrategyVersion | None: ...
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None: ...
+
+    async def persist_feature_observations(self, snapshot: DecisionSnapshot) -> None: ...
+
+    async def replace_positions(self, positions: list[Position], synced_at: datetime) -> None: ...
 
     async def persist_order(self, order: Order, risk_result: RiskResult | None = None) -> None: ...
 

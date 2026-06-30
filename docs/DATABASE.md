@@ -34,6 +34,9 @@ Rules:
 - `watchlist` supports upsert by `(symbol, market)`.
 - `strategy_versions.version` is unique for deployment/research references.
 - `decision_snapshots.decided_at` is the decision-time index column; existing rows may be backfilled from `created_at`.
+- Worker writes `decision_snapshots.created_at` as the durable decision time so
+  hosted projects still on the base schema can accept snapshots. Read paths may
+  use `decided_at` when present and must fall back to `created_at`.
 
 DB size query:
 

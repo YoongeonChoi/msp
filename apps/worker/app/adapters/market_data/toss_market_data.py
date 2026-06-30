@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -11,6 +11,9 @@ from app.adapters.broker.toss_models import (
 from app.domain.common.errors import ProviderError, ProviderSchemaError
 from app.domain.common.time import KST, now_kst
 from app.domain.trading.entities import Quote
+
+LIVE_EXECUTION_START_HOUR = 8
+LIVE_EXECUTION_END_HOUR = 18
 
 
 class TossMarketDataClient(Protocol):
@@ -63,6 +66,8 @@ class TossMarketData:
             return None
         if calendar.today.date != current.date():
             return None
+        if not _within_live_execution_window(current):
+            return False
         integrated = calendar.today.integrated
         if integrated is None or integrated.regular_market is None:
             return False
@@ -82,3 +87,21 @@ def _decimal_krw_to_int(value: Decimal) -> int:
     if value <= 0 or value != value.to_integral_value():
         raise ProviderSchemaError("toss", "toss_price_not_positive_integer_krw")
     return int(value)
+
+
+def _within_live_execution_window(value: datetime) -> bool:
+    if value.weekday() >= 5:
+        return False
+    window_start = value.replace(
+        hour=LIVE_EXECUTION_START_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    window_end = value.replace(
+        hour=LIVE_EXECUTION_END_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    return window_start <= value < window_end

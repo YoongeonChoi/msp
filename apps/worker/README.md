@@ -19,3 +19,15 @@ MOCK_PROVIDERS=true RUN_ONCE=true py -m app.main
 py -m pytest
 ```
 
+## Desktop-visible mock cycle
+
+`MOCK_PROVIDERS=true` normally uses in-memory persistence, so the desktop
+cockpit will not see heartbeat or provider health rows. For a safe local
+Supabase-backed smoke test, configure `SUPABASE_URL` and `SUPABASE_SECRET_KEY`,
+then run:
+
+```bash
+py -m app.tools.seed_strategy_v1
+py -m app.tools.seed_watchlist_demo
+MOCK_PROVIDERS=true USE_SUPABASE_REPOSITORY=true RUN_ONCE=true py -m app.main
+```

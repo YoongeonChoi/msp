@@ -11,7 +11,13 @@ import {
 import { formatAge, formatKst, isOlderThan } from "../lib/formatters";
 import { EmptyState, ErrorState, JsonSummary, Metric, Panel, Pill, SectionTitle } from "../components/ui";
 
-const monitoredProviders = ["naver", "opendart", "krx", "openai", "toss"];
+const monitoredProviders = [
+  { label: "NAVER", keys: ["naver"] },
+  { label: "OPENDART", keys: ["opendart"] },
+  { label: "MARKET DATA", keys: ["krx", "toss_market_data"] },
+  { label: "OPENAI", keys: ["openai"] },
+  { label: "TOSS", keys: ["toss"] }
+];
 
 export function DashboardPage() {
   const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
@@ -48,7 +54,7 @@ export function DashboardPage() {
           tone={heartbeatStale ? "warning" : "safe"}
         />
         <Metric
-          title="Paper 주문"
+          title="오늘 주문"
           value={String((orders.data ?? []).filter((order) => ["paper", "proposed", "blocked"].includes(order.status)).length)}
           detail="오늘"
           tone="neutral"
@@ -75,11 +81,11 @@ export function DashboardPage() {
           <SectionTitle title="Provider Health" detail={<Activity size={18} aria-hidden="true" />} />
           <div className="grid gap-2 sm:grid-cols-2">
             {monitoredProviders.map((provider) => {
-              const item = apiHealth.data?.find((health) => health.provider.toLowerCase() === provider);
+              const item = apiHealth.data?.find((health) => provider.keys.includes(health.provider.toLowerCase()));
               return (
-                <div key={provider} className="rounded-md border border-line p-3">
+                <div key={provider.label} className="rounded-md border border-line p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium uppercase text-ink">{provider}</span>
+                    <span className="font-medium uppercase text-ink">{provider.label}</span>
                     <Pill tone={item?.healthy ? "safe" : "warning"}>
                       {item ? (item.healthy ? "정상" : item.status) : "미확인"}
                     </Pill>
@@ -146,7 +152,7 @@ function CountRows({
   readonly emptyLabel: string;
 }) {
   if (counts.size === 0) {
-    return <EmptyState title={emptyLabel} detail="Worker가 비활성화되어 있거나 아직 수집 전입니다." />;
+    return <EmptyState title={emptyLabel} detail="Worker가 아직 수집 전이거나 Supabase 연결 확인이 필요합니다." />;
   }
   return (
     <div className="space-y-2">

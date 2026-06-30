@@ -80,10 +80,26 @@ async def test_toss_market_data_rejects_missing_price_timestamp() -> None:
         await service.get_quotes(["005930"])
 
 
-async def test_toss_market_data_uses_regular_market_before_auction(
+async def test_toss_market_data_requires_regular_market_session_and_execution_window(
     monkeypatch: MonkeyPatch,
 ) -> None:
     service = TossMarketData(FakeToss(calendar=_calendar_payload(integrated=True)))
+    monkeypatch.setattr(
+        toss_market_data,
+        "now_kst",
+        lambda: datetime(2026, 3, 25, 8, 0, tzinfo=KST),
+    )
+
+    assert await service.is_market_open() is False
+
+    monkeypatch.setattr(
+        toss_market_data,
+        "now_kst",
+        lambda: datetime(2026, 3, 25, 9, 0, tzinfo=KST),
+    )
+
+    assert await service.is_market_open() is True
+
     monkeypatch.setattr(
         toss_market_data,
         "now_kst",

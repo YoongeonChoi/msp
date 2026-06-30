@@ -70,6 +70,60 @@ async def test_supabase_repository_count_uses_live_non_blocked_daily_query() -> 
     assert "created_at=lt.2026-06-28T15%3A00%3A00%2B00%3A00" in request_url
 
 
+async def test_supabase_repository_strategy_version_falls_back_to_active_row() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        request_url = str(request.url)
+        if "version_name=eq.strategy_v1_weighted_factor" in request_url:
+            return httpx.Response(200, json=[], request=request)
+        assert "status=in.(paper,active)" in request_url
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": str(uuid4()),
+                    "version_name": "weighted_factor_v1_seed",
+                    "status": "active",
+                    "strategy_type": "WeightedFactorStrategyV1",
+                    "weights": {
+                        "technical": 0.35,
+                        "fundamental": 0.25,
+                        "market_sector": 0.15,
+                        "news_event": 0.15,
+                        "portfolio": 0.10,
+                    },
+                    "params": {"buy_threshold": 0.68, "sell_threshold": 0.25},
+                }
+            ],
+            request=request,
+        )
+
+    repository = SupabaseRepository(
+        Settings(
+            SUPABASE_URL="https://example.supabase.co",
+            SUPABASE_SECRET_KEY=SecretStr("dummy-test-token"),
+        )
+    )
+    await repository.client.aclose()
+    repository.client = httpx.AsyncClient(
+        timeout=10.0,
+        headers=repository.headers,
+        transport=httpx.MockTransport(handler),
+    )
+
+    strategy_version = await repository.load_active_strategy_version()
+
+    await repository.aclose()
+    assert strategy_version is not None
+    assert strategy_version.version == "weighted_factor_v1_seed"
+    assert [str(request.url).split("/rest/v1/")[1].split("?")[0] for request in requests] == [
+        "strategy_versions",
+        "strategy_versions",
+    ]
+
+
 async def test_supabase_repository_encodes_idempotency_key_filter() -> None:
     requests: list[httpx.Request] = []
 

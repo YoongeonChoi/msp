@@ -24,6 +24,7 @@ from app.application.services.execution_service import ExecutionService
 from app.application.services.feature_service import FeatureService
 from app.application.services.health_service import HealthService
 from app.application.services.order_reconciliation_service import OrderReconciliationService
+from app.application.services.portfolio_service import PortfolioReadPort, PortfolioService
 from app.application.services.risk_service import RiskService
 from app.application.services.trading_loop import TradingLoop
 from app.application.use_cases.run_trading_cycle import RunTradingCycle
@@ -56,9 +57,11 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
     fundamentals: FundamentalsPort
     news: NewsPort
     ai: AIPort
+    portfolio_reader: PortfolioReadPort
     market_data_provider_name = "krx"
     if settings.mock_providers:
         broker = TossMock()
+        portfolio_reader = broker
         market_data = KrxMock()
         fundamentals = OpenDartMock()
         news = NaverNewsMock()
@@ -66,6 +69,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
     else:
         toss = TossClient(settings)
         broker = toss
+        portfolio_reader = toss
         market_data = TossMarketData(toss)
         market_data_provider_name = "toss_market_data"
         fundamentals = OpenDartClient(
@@ -127,6 +131,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
         ),
         news_provider_name="naver_mock" if settings.mock_providers else "naver",
     )
+    portfolio_service = PortfolioService(repository, portfolio_reader)
     run_cycle = RunTradingCycle(
         repository=repository,
         broker=broker,
@@ -136,6 +141,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
         risk_service=risk_service,
         feature_service=feature_service,
         order_reconciliation_service=order_reconciliation_service,
+        portfolio_service=portfolio_service,
         alert_notifier=alert_notifier,
         live_system_order_count_scope_accepted=settings.live_system_order_count_scope_accepted,
     )

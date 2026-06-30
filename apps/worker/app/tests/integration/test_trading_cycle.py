@@ -85,11 +85,15 @@ class DailyCountFailingRepository(InMemoryRepository):
 
 
 class QuoteOverrideMarketData(KrxMock):
-    def __init__(self, quotes: dict[str, Quote]) -> None:
+    def __init__(self, quotes: dict[str, Quote], market_open: bool | None = True) -> None:
         self.quotes = quotes
+        self.market_open = market_open
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         return self.quotes
+
+    async def is_market_open(self) -> bool | None:
+        return self.market_open
 
 
 class PositiveFundamentals:
@@ -170,7 +174,7 @@ class MockLiveFeatureService(FeatureService):
         )
 
 
-async def test_bot_disabled_creates_no_decisions_or_orders() -> None:
+async def test_bot_disabled_still_creates_signal_snapshot_without_orders() -> None:
     repository = InMemoryRepository(BotSettings(enabled=False))
     broker = CountingBroker()
     cycle = _cycle(repository, broker=broker)
@@ -179,7 +183,11 @@ async def test_bot_disabled_creates_no_decisions_or_orders() -> None:
 
     assert len(repository.heartbeats) == 1
     assert len(repository.api_health) == 5
-    assert repository.decisions == []
+    assert len(repository.decisions) == 1
+    assert repository.decisions[0].signal.action == "buy"
+    assert "bot_disabled" in repository.decisions[0].risk_snapshot["reasons"]
+    assert len(repository.news_events) == 1
+    assert len(repository.fundamentals_quarterly) == 1
     assert repository.orders == []
     assert broker.place_order_calls == 0
 
@@ -221,6 +229,34 @@ async def test_live_mode_is_blocked_when_live_permission_false() -> None:
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
     assert "live_order_allowed_false" in repository.orders[0].reason
+    assert broker.place_order_calls == 0
+
+
+async def test_live_mode_market_closed_keeps_signal_but_blocks_order_before_broker() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    quote = Quote(
+        symbol="005930",
+        price_krw=75_000,
+        as_of=now_utc(),
+        source="toss",
+    )
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        market_data=QuoteOverrideMarketData({"005930": quote}, market_open=False),
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert len(repository.decisions) == 1
+    assert len(repository.orders) == 1
+    assert repository.orders[0].status == "blocked"
+    assert repository.orders[0].reason is not None
+    assert "market_closed_or_unknown" in repository.orders[0].reason
     assert broker.place_order_calls == 0
 
 
@@ -308,7 +344,7 @@ async def test_paper_cycle_uses_strategy_params_from_repository() -> None:
     assert repository.orders == []
 
 
-async def test_provider_error_blocks_paper_order() -> None:
+async def test_broker_provider_health_failure_does_not_stop_paper_signal_or_order() -> None:
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="paper", live_order_allowed=False)
     )
@@ -316,9 +352,13 @@ async def test_provider_error_blocks_paper_order() -> None:
 
     await cycle.execute()
 
-    assert repository.decisions == []
-    assert repository.orders == []
-    assert repository.engine_events[-1]["message"] == "critical provider unhealthy"
+    assert len(repository.decisions) == 1
+    assert len(repository.orders) == 1
+    assert repository.orders[0].status == "paper"
+    assert any(
+        item["provider"] == "toss" and item["healthy"] is False
+        for item in repository.api_health
+    )
 
 
 def test_kst_day_window_uses_korean_trading_day_boundary() -> None:
@@ -466,7 +506,7 @@ async def test_live_allowed_cycle_blocks_when_system_daily_order_count_sync_fail
     )
 
 
-async def test_live_cycle_blocks_new_decisions_with_pending_live_reconciliation() -> None:
+async def test_live_cycle_blocks_new_orders_with_pending_live_reconciliation() -> None:
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="live", live_order_allowed=True)
     )
@@ -479,10 +519,10 @@ async def test_live_cycle_blocks_new_decisions_with_pending_live_reconciliation(
     await cycle.execute()
 
     assert len(repository.orders) == 1
-    assert repository.decisions == []
+    assert len(repository.decisions) == 1
     assert broker.place_order_calls == 0
     assert any(
-        event["message"] == "live_pending_reconciliation_blocks_new_decisions"
+        event["message"] == "live_pending_reconciliation_blocks_new_live_orders"
         and event["level"] == "critical"
         and _event_details_value(event, "pending_order_count") == 1
         for event in repository.engine_events

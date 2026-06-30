@@ -62,7 +62,7 @@ class FeatureService:
         fundamentals = await self._load_fundamentals(symbol, raw, unready_reasons)
         news_events = await self._load_news(symbol, raw, unready_reasons)
 
-        technical_score = 0.65 if quote.price_krw > 0 else 0.0
+        technical_score = 0.70 if quote.price_krw > 0 else 0.0
         fundamental_score = _fundamental_score(fundamentals)
         news_event_score = _news_score(news_events)
         portfolio_score = 0.8 if quote.price_krw > 0 else 0.0
@@ -134,6 +134,7 @@ class FeatureService:
             return []
         raw["news_event_count"] = len(events)
         raw["news_sources"] = sorted({event.source for event in events})
+        raw["news_events"] = [_news_event_snapshot(event) for event in events]
         if events:
             raw["latest_news_published_at"] = max(
                 event.published_at for event in events
@@ -208,6 +209,23 @@ def _news_event_score(event: NewsEvent) -> float:
         + (0.30 * sentiment_score)
         - risk_penalty
     )
+
+
+def _news_event_snapshot(event: NewsEvent) -> dict[str, object]:
+    classification = event.classification
+    return {
+        "symbol": event.symbol,
+        "title": event.title,
+        "source": event.source,
+        "published_at": event.published_at.isoformat(),
+        "relevance_score": classification.relevance_score,
+        "sentiment": classification.sentiment,
+        "event_type": classification.event_type,
+        "risk_level": classification.risk_level,
+        "summary_short": classification.summary_short,
+        "trading_relevance": classification.trading_relevance,
+        "confidence": classification.confidence,
+    }
 
 
 def _average(values: list[float], *, default: float) -> float:

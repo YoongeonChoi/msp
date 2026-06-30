@@ -7,6 +7,30 @@ checkpoint. It is a handoff summary for commit review, not a live-trading
 approval. The authoritative readiness score remains
 `docs/LIVE_READINESS_SCORECARD.md`.
 
+## 2026-06-30 Render Worker Follow-Up
+
+- A local Render-equivalent smoke run with `ENV=production`,
+  `MOCK_PROVIDERS=false`, and `RUN_ONCE=true` reproduced the hosted-worker
+  startup failure against the configured hosted Supabase and provider keys.
+- The first crash was a PostgREST `400` because the hosted
+  `strategy_versions` schema did not yet expose the later `version` column.
+  `SupabaseRepository.load_active_strategy_version()` now prefers the base
+  `version_name` path, falls back to the active/paper row, and only probes the
+  newer `version` column after those schema-compatible paths are exhausted.
+- The next crash was a PostgREST `400` because the hosted
+  `decision_snapshots` schema cache did not yet expose `decided_at`.
+  `decision_to_row()` now writes the base `created_at` decision-time column,
+  while read paths continue to tolerate `decided_at` when aligned migrations are
+  present.
+- The redacted Render-equivalent smoke now exits `0` and records heartbeat,
+  health, decision snapshot, and feature observations without broker order
+  placement. `render.yaml` still keeps `autoDeployTrigger: "off"`, so pushing
+  this fix does not deploy it until an operator manually deploys Render.
+- Hosted Supabase should still be migrated through
+  `supabase/migrations/0005_schema_alignment.sql`; the runtime compatibility
+  changes keep the worker alive on the base schema but do not replace migration
+  verification.
+
 ## Current Status
 
 The repository is materially stronger than the original MVP, but it is still
@@ -116,7 +140,7 @@ channel ACK drills, and published retained artifacts.
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `490 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `499 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
 - `npm run desktop:typecheck`: passed

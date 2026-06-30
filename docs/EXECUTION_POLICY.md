@@ -59,8 +59,9 @@ Once a local order is already `unknown_requires_manual_check`, reconciliation mu
 review before the order can leave the manual recovery path.
 If any live order remains in `sent`, `partial_filled`, or
 `unknown_requires_manual_check` after that reconciliation pass, the worker records
-`live_pending_reconciliation_blocks_new_decisions` and stops before creating new
-live decisions or broker calls.
+`live_pending_reconciliation_blocks_new_live_orders` and stops before creating new
+live order proposals or broker calls. Decision snapshots may still be written so
+provider health, features, and signals remain observable while execution is gated.
 
 ## Toss Adapter Boundary
 

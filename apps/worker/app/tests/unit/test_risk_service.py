@@ -101,9 +101,19 @@ def test_missing_quote_blocks_paper_order() -> None:
     assert "missing_quote" in result.reasons
 
 
-def test_provider_health_bad_blocks_paper_order() -> None:
+def test_provider_health_bad_does_not_block_paper_order() -> None:
     settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
     result = RiskService().evaluate_paper_order(
+        replace(_risk_input(settings), provider_health={"supabase": True, "toss": False})
+    )
+
+    assert result.allowed is True
+    assert "critical_provider_unhealthy:toss" not in result.reasons
+
+
+def test_provider_health_bad_blocks_live_order() -> None:
+    settings = BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    result = RiskService().evaluate_live_order(
         replace(_risk_input(settings), provider_health={"supabase": True, "toss": False})
     )
 

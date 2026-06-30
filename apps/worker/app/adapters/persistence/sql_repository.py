@@ -4,10 +4,17 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from app.adapters.persistence.models import decision_to_row, order_to_row
+from app.adapters.persistence.models import (
+    decision_to_row,
+    fundamentals_row_from_decision,
+    news_rows_from_decision,
+    order_to_row,
+    position_to_row,
+)
 from app.application.ports.outcome_tracking_port import OutcomeTrackingRows
 from app.application.ports.paper_health_port import PaperHealthRows
 from app.domain.common.json import JsonObject, json_object, to_json_value
+from app.domain.portfolio.entities import Position
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
@@ -35,6 +42,8 @@ class InMemoryRepository:
         self.api_health: list[dict[str, object]] = []
         self.outcomes: list[JsonObject] = []
         self.news_events: list[JsonObject] = []
+        self.positions: list[JsonObject] = []
+        self.fundamentals_quarterly: list[JsonObject] = []
         self.features_daily: list[JsonObject] = []
         self.backtest_runs: list[JsonObject] = []
         self.ai_upgrade_candidates: list[AIUpgradeCandidate] = []
@@ -50,6 +59,37 @@ class InMemoryRepository:
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None:
         self.decisions.append(snapshot)
+
+    async def persist_feature_observations(self, snapshot: DecisionSnapshot) -> None:
+        fundamentals = fundamentals_row_from_decision(snapshot)
+        if fundamentals is not None:
+            fundamentals_key = (
+                fundamentals.get("symbol"),
+                fundamentals.get("fiscal_year"),
+                fundamentals.get("fiscal_quarter"),
+            )
+            self.fundamentals_quarterly = [
+                row
+                for row in self.fundamentals_quarterly
+                if (
+                    row.get("symbol"),
+                    row.get("fiscal_year"),
+                    row.get("fiscal_quarter"),
+                )
+                != fundamentals_key
+            ]
+            self.fundamentals_quarterly.append(fundamentals)
+        for news_event in news_rows_from_decision(snapshot):
+            news_key = (news_event.get("symbol"), news_event.get("title_hash"))
+            self.news_events = [
+                row
+                for row in self.news_events
+                if (row.get("symbol"), row.get("title_hash")) != news_key
+            ]
+            self.news_events.append(news_event)
+
+    async def replace_positions(self, positions: list[Position], synced_at: datetime) -> None:
+        self.positions = [position_to_row(position, synced_at) for position in positions]
 
     async def persist_order(self, order: Order, risk_result: RiskResult | None = None) -> None:
         self.orders.append(order)

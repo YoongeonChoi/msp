@@ -33,6 +33,27 @@ No secrets are stored in `render.yaml`; secret env vars use `sync: false`.
 `ALERT_WEBHOOK_URL` is treated as a worker-only secret because provider tokens are
 often embedded in webhook URLs.
 
+## Startup Smoke And Schema Compatibility
+
+Use a local Render-equivalent one-shot before or after a manual Render deploy:
+
+```bash
+ENV=production MOCK_PROVIDERS=false RUN_ONCE=true python -m app.main
+```
+
+If the worker exits during startup with a PostgREST `400`, inspect only the
+redacted response body. Hosted projects that have not yet applied
+`supabase/migrations/0005_schema_alignment.sql` may be missing
+`strategy_versions.version` or `decision_snapshots.decided_at`. The worker keeps
+runtime compatibility with those base-schema projects by loading strategies via
+`version_name`/active rows and by writing decision time through
+`decision_snapshots.created_at`, but the hosted migration still needs to be
+applied and verified before live-readiness evidence can be accepted.
+
+Because `autoDeployTrigger` remains `off`, a successful Git push does not update
+Render by itself. Deploy the pushed commit manually, then verify a fresh
+heartbeat and repeat the one-shot smoke against the deployed environment.
+
 Before any live-mode consideration, run:
 
 ```bash

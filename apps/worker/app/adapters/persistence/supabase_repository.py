@@ -9,13 +9,17 @@ import httpx
 from app.adapters.persistence.models import (
     ai_candidate_to_row,
     decision_to_row,
+    fundamentals_row_from_decision,
+    news_rows_from_decision,
     order_from_row,
     order_to_row,
+    position_to_row,
 )
 from app.adapters.persistence.supabase_row_parsing import strategy_version_from_row
 from app.config import Settings
 from app.domain.common.json import JsonObject, json_object
 from app.domain.common.time import now_utc
+from app.domain.portfolio.entities import Position
 from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
@@ -69,27 +73,48 @@ class SupabaseRepository:
         return [str(row["symbol"]) for row in response.json()]
 
     async def load_active_strategy_version(self) -> StrategyVersion | None:
-        rows = await self._select_strategy_versions(
-            "version=eq.strategy_v1_weighted_factor&status=in.(paper,active)&order=created_at.desc&limit=1"
+        queries = (
+            "version_name=eq.strategy_v1_weighted_factor&status=in.(paper,active)"
+            "&order=created_at.desc&limit=1",
+            "status=in.(paper,active)&order=created_at.desc&limit=1",
+            "version=eq.strategy_v1_weighted_factor&status=in.(paper,active)"
+            "&order=created_at.desc&limit=1",
         )
-        if not rows:
-            rows = await self._select_strategy_versions(
-                "status=in.(paper,active)&order=created_at.desc&limit=1"
-            )
-        if not rows:
-            return None
-        return strategy_version_from_row(rows[0])
+        for query in queries:
+            rows = await self._select_strategy_versions(query)
+            if rows:
+                return strategy_version_from_row(rows[0])
+        return None
 
     async def _select_strategy_versions(self, query: str) -> list[JsonObject]:
-        response = await self.client.get(f"{self.base_url}/strategy_versions?select=*&{query}")
-        response.raise_for_status()
-        rows = response.json()
-        if not isinstance(rows, list):
-            return []
-        return [json_object(row) for row in rows]
+        return await self._select_optional_rows("strategy_versions", f"select=*&{query}")
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None:
         await self._insert("decision_snapshots", decision_to_row(snapshot))
+
+    async def persist_feature_observations(self, snapshot: DecisionSnapshot) -> None:
+        fundamentals = fundamentals_row_from_decision(snapshot)
+        if fundamentals is not None:
+            await self._upsert(
+                "fundamentals_quarterly",
+                fundamentals,
+                "symbol,fiscal_year,fiscal_quarter",
+            )
+        for news_event in news_rows_from_decision(snapshot):
+            await self._upsert("news_events", news_event, "symbol,title_hash")
+
+    async def replace_positions(self, positions: list[Position], synced_at: datetime) -> None:
+        seen_symbols = {position.symbol for position in positions}
+        for position in positions:
+            await self._upsert("positions", position_to_row(position, synced_at), "symbol")
+        existing = await self._select_rows("positions", "select=symbol")
+        for row in existing:
+            symbol = row.get("symbol")
+            if isinstance(symbol, str) and symbol not in seen_symbols:
+                response = await self.client.delete(
+                    f"{self.base_url}/positions?symbol=eq.{quote(symbol, safe='')}"
+                )
+                response.raise_for_status()
 
     async def persist_order(self, order: Order, risk_result: RiskResult | None = None) -> None:
         await self._insert("orders", order_to_row(order, risk_result))

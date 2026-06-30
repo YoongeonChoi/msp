@@ -27,7 +27,7 @@ export function SignalsPage() {
     <Panel>
       <SectionTitle title="최근 시그널" />
       {rows.length === 0 ? (
-        <EmptyState title="시그널 없음" detail="bot_settings.enabled=true인 paper cycle 후 표시됩니다." />
+        <EmptyState title="시그널 없음" detail="Worker cycle이 한 번 실행되면 표시됩니다." />
       ) : (
         <>
           <div className="hidden overflow-x-auto lg:block">

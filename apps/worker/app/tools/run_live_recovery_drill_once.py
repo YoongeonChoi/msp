@@ -28,7 +28,8 @@ from app.application.services.risk_service import RiskService
 from app.application.use_cases.run_trading_cycle import RunTradingCycle
 from app.domain.common.errors import ProviderTimeoutError
 from app.domain.common.time import now_utc
-from app.domain.trading.entities import AccountState, BotSettings, Order, OrderStatus
+from app.domain.strategy.entities import FeatureVector
+from app.domain.trading.entities import AccountState, BotSettings, Order, OrderStatus, Quote
 
 
 class RecoveryDrillBroker:
@@ -176,7 +177,10 @@ async def main() -> None:
         raise RuntimeError(f"live_recovery_drill_status_call_count_failed: {broker.status_calls}")
     if broker.cancel_calls != 2:
         raise RuntimeError(f"live_recovery_drill_cancel_call_count_failed: {broker.cancel_calls}")
-    pending_order_blocked = await _pending_order_blocks_new_decisions(repository, broker)
+    pending_order_blocked = await _pending_order_blocks_new_live_orders(
+        repository,
+        broker,
+    )
     if not pending_order_blocked:
         raise RuntimeError("live_recovery_drill_pending_order_block_failed")
     manual_check_preserved = await _manual_check_status_preserved()
@@ -243,12 +247,12 @@ async def _manual_check_status_preserved() -> bool:
     return updated == 1 and broker.status_calls == 1 and broker.cancel_calls == 0
 
 
-async def _pending_order_blocks_new_decisions(
+async def _pending_order_blocks_new_live_orders(
     repository: InMemoryRepository,
     broker: RecoveryDrillBroker,
 ) -> bool:
     risk = RiskService()
-    market_data = KrxMock()
+    market_data = RecoveryDrillMarketData()
     cycle = RunTradingCycle(
         repository=repository,
         broker=broker,
@@ -263,12 +267,7 @@ async def _pending_order_blocks_new_decisions(
         ),
         execution_service=ExecutionService(broker, repository, risk),
         risk_service=risk,
-        feature_service=FeatureService(
-            fundamentals=OpenDartMock(),
-            news=NaverNewsMock(),
-            fundamentals_provider_name="opendart_mock",
-            news_provider_name="naver_mock",
-        ),
+        feature_service=RecoveryDrillFeatureService(),
         live_system_order_count_scope_accepted=True,
     )
     decisions_before = len(repository.decisions)
@@ -277,15 +276,50 @@ async def _pending_order_blocks_new_decisions(
     cancel_calls_before = broker.cancel_calls
     await cycle.execute()
     return (
-        len(repository.decisions) == decisions_before
+        len(repository.decisions) == decisions_before + 1
         and len(repository.orders) == orders_before
         and broker.status_calls == status_calls_before
         and broker.cancel_calls == cancel_calls_before
         and any(
-            event["message"] == "live_pending_reconciliation_blocks_new_decisions"
+            event["message"] == "live_pending_reconciliation_blocks_new_live_orders"
             for event in repository.engine_events
         )
     )
+
+
+class RecoveryDrillMarketData(KrxMock):
+    async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        now = now_utc()
+        return {
+            symbol: Quote(
+                symbol=symbol,
+                price_krw=75_000,
+                as_of=now,
+                source="toss",
+            )
+            for symbol in symbols
+        }
+
+    async def is_market_open(self) -> bool | None:
+        return True
+
+
+class RecoveryDrillFeatureService(FeatureService):
+    async def build_live_features(self, symbol: str, quote: Quote) -> FeatureVector:
+        return FeatureVector(
+            symbol=symbol,
+            technical_score=0.82,
+            fundamental_score=0.60,
+            market_sector_score=0.60,
+            news_event_score=0.65,
+            portfolio_score=0.80,
+            raw={
+                "quote_price_krw": quote.price_krw,
+                "source": quote.source,
+                "feature_source": "recovery_drill_fixture",
+                "live_trading_ready": True,
+            },
+        )
 
 
 def _live_order(
