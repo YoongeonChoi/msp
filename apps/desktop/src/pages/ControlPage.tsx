@@ -157,7 +157,7 @@ export function ControlPage({
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_0.9fr]">
       <Panel>
-        <SectionTitle title="자동매매 제어" />
+        <SectionTitle title="거래 봇 제어" />
         <div className="grid gap-3 sm:grid-cols-3">
           <button
             className={pageButtonClass("safe")}
@@ -169,19 +169,19 @@ export function ControlPage({
             }}
           >
             <Power size={16} aria-hidden="true" />
-            Paper 시작
+            거래 봇 시작
           </button>
           <button
             className={pageButtonClass("warning")}
             disabled={updateMutation.isPending}
             onClick={() => {
-              if (window.confirm("거래 loop를 정지할까요? enabled=false로 변경됩니다.")) {
+              if (window.confirm("거래 봇을 정지할까요? enabled=false로 변경되며 데이터 조회는 계속 가능합니다.")) {
                 updateMutation.mutate({ enabled: false });
               }
             }}
           >
             <CircleStop size={16} aria-hidden="true" />
-            Stop
+            거래 봇 정지
           </button>
           <button
             className={pageButtonClass("danger")}
@@ -202,7 +202,7 @@ export function ControlPage({
 
         <div className="mt-5 rounded-md border border-line p-4">
           <SectionTitle title="현재 상태" />
-          <KeyValue label="봇 상태" value={<Pill tone={current?.enabled ? "safe" : "danger"}>{current?.enabled ? "실행" : "정지"}</Pill>} />
+          <KeyValue label="거래 봇" value={<Pill tone={current?.enabled ? "safe" : "danger"}>{current?.enabled ? "실행" : "정지"}</Pill>} />
           <KeyValue label="모드" value={<Pill tone={current?.mode === "live" ? "danger" : "safe"}>{current?.mode ?? "-"}</Pill>} />
           <KeyValue
             label="실주문 허용"

@@ -11,10 +11,10 @@ Design principles:
 
 Global status:
 
-- 봇 상태
+- 거래 봇 상태
 - 모드
 - 실주문 허용 여부
-- Worker heartbeat age
+- 데이터 수집 heartbeat age
 - API health
 - 오늘 손익
 - 오늘 주문 수
@@ -35,6 +35,9 @@ Navigation:
 11. Logs
 
 Dangerous changes require confirmation. Live trading requires typed Korean phrase.
+`bot_settings.enabled=false` means order creation is stopped; it must not imply
+that cached Supabase data, provider health display, or feature pages are
+unavailable.
 
 ## Strategy Lab
 

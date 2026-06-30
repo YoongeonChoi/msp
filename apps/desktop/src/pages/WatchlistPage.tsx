@@ -6,7 +6,7 @@ import type { WatchlistInput } from "../lib/supabaseData";
 import type { WatchlistItem } from "../lib/rows";
 import { formatKrw, formatRatio } from "../lib/formatters";
 import { useAdminAccess } from "../lib/useAdminAccess";
-import { AuthRequiredState } from "../components/AuthRequiredState";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, pageButtonClass, Panel, Pill, SectionTitle } from "../components/ui";
 
 interface WatchlistForm {
@@ -54,16 +54,14 @@ export function WatchlistPage() {
   if (watchlist.error) {
     return <ErrorState message="watchlist를 읽지 못했습니다." />;
   }
-  if (adminAccess.isLimited) {
-    return <AuthRequiredState surface="watchlist 추가/수정" />;
-  }
 
   return (
     <div className="grid gap-4 lg:grid-cols-[0.9fr_1.2fr]">
       <Panel>
         <SectionTitle title="관심종목 추가/수정" detail={<Plus size={18} aria-hidden="true" />} />
+        {adminAccess.isLimited ? <AuthRequiredBlock surface="watchlist 추가/수정" /> : null}
         <form
-          className="space-y-3"
+          className="mt-3 space-y-3"
           onSubmit={(event) => {
             event.preventDefault();
             const input = parseWatchlistForm(form);

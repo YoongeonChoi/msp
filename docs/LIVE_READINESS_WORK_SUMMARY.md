@@ -199,6 +199,9 @@ channel ACK drills, and published retained artifacts.
   keep critical events visible in render fixtures, and now surface missing
   Supabase Auth admin sessions as `권한 필요` instead of making
   worker/provider rows or feature tables look silently absent.
+- The cockpit labels now separate `거래 봇` from `데이터 수집`: `enabled=false`
+  is presented as an order-creation stop, not a reason for cached Supabase
+  data, provider health, or feature pages to disappear.
 - Desktop unit and browser tests cover approval helper logic, control page
   query/mutation states, dashboard rendering, schema compatibility, and a
   mocked Supabase live-gate flow across desktop and mobile viewports.

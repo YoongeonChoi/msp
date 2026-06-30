@@ -48,20 +48,20 @@ export function DashboardPage() {
         <Panel className="border-amber-200 bg-amber-50">
           <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
             <AlertTriangle size={16} aria-hidden="true" />
-            {adminAccess.warning} Settings에서 admin 계정으로 로그인하면 worker/provider 상태가 표시됩니다.
+            {adminAccess.warning} Settings에서 admin 계정으로 로그인하면 데이터/provider 상태가 표시됩니다.
           </div>
         </Panel>
       ) : null}
 
       <div className="grid gap-3 md:grid-cols-4">
         <Metric
-          title="봇 상태"
+          title="거래 봇"
           value={formatBotStatus(settings.data, dataAccessLimited)}
           detail={settings.data ? (settings.data.enabled ? "enabled=true" : "enabled=false") : dataAccessLimited ? "admin 필요" : "settings 없음"}
           tone={settings.data ? (settings.data.enabled ? "safe" : "danger") : "warning"}
         />
         <Metric
-          title="Worker"
+          title="데이터 수집"
           value={formatWorkerStatus(latestHeartbeat?.createdAt, dataAccessLimited)}
           detail={dataAccessLimited ? "admin 필요" : formatAge(latestHeartbeat?.createdAt)}
           tone={dataAccessLimited || heartbeatStale ? "warning" : "safe"}
@@ -84,7 +84,7 @@ export function DashboardPage() {
         <Panel className="border-amber-200 bg-amber-50">
           <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
             <AlertTriangle size={16} aria-hidden="true" />
-            Worker heartbeat가 2분 이상 갱신되지 않았습니다.
+            데이터 수집 heartbeat가 2분 이상 갱신되지 않았습니다. 거래 봇 정지와는 별개로 확인이 필요합니다.
           </div>
         </Panel>
       ) : null}
@@ -106,7 +106,7 @@ export function DashboardPage() {
                   <p className="mt-1 text-xs text-muted">
                     {item?.message ??
                       item?.errorCode ??
-                      (dataAccessLimited ? "admin 세션이 필요합니다." : `최근 확인: ${formatKst(item?.checkedAt)}`)}
+                      (dataAccessLimited ? "Supabase admin 세션이 필요합니다. 거래 봇 정지와는 별개입니다." : `최근 확인: ${formatKst(item?.checkedAt)}`)}
                   </p>
                 </div>
               );
@@ -118,6 +118,7 @@ export function DashboardPage() {
           <SectionTitle title="Paper Trading 상태" detail={<Info size={18} aria-hidden="true" />} />
           <div className="space-y-2 text-sm text-muted">
             <p>Paper mode에서는 decision_snapshots와 paper/proposed/blocked orders만 모니터링합니다.</p>
+            <p>enabled=false는 주문 생성만 멈추며, 데이터 조회와 provider 상태 표시는 Supabase 권한과 데이터 수집 heartbeat로 판단합니다.</p>
             <p>Desktop은 broker 호출을 하지 않으며, 모든 변경은 Supabase RLS 정책을 통과해야 합니다.</p>
             <p>live_order_allowed=true가 보이면 전역 위험 배너와 Emergency Stop을 우선 확인하세요.</p>
           </div>
@@ -205,7 +206,7 @@ function CountRows({
     return dataAccessLimited ? (
       <AuthRequiredBlock surface={surface} />
     ) : (
-      <EmptyState title={emptyLabel} detail="Worker가 아직 수집 전이거나 Supabase 연결 확인이 필요합니다." />
+      <EmptyState title={emptyLabel} detail="데이터 수집기가 아직 수집 전이거나 Supabase 연결 확인이 필요합니다." />
     );
   }
   return (

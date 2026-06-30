@@ -54,7 +54,7 @@ const authRequiredCases: Array<readonly [string, React.ReactElement, Array<reado
 
 for (const [label, element, seeds] of authRequiredCases) {
   const markup = renderWithSeededQueries(element, seeds);
-  assert.match(markup, /admin 권한 필요/, `${label} should show auth-required state`);
+  assert.match(markup, /데이터 접근 권한 필요/, `${label} should show auth-required state`);
   assert.match(markup, /Settings에서 admin 계정으로 로그인/, `${label} should point to Settings login`);
 }
 

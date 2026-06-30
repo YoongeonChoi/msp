@@ -34,7 +34,7 @@ import type {
   OutcomeRow,
   StrategyVersionRow
 } from "../lib/rows";
-import { AuthRequiredState } from "../components/AuthRequiredState";
+import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import {
   EmptyState,
   ErrorState,
@@ -108,12 +108,11 @@ export function StrategyLabPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ai_upgrade_candidates"] })
   });
 
-  if (adminAccess.isLimited) {
-    return <AuthRequiredState surface="Strategy Lab 데이터와 후보 검토" />;
-  }
-
   return (
     <div className="space-y-4">
+      {adminAccess.isLimited ? (
+        <AuthRequiredBlock surface="Strategy Lab 데이터와 후보 검토" />
+      ) : null}
       <Panel className="border-red-200 bg-red-50">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>

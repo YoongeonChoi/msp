@@ -33,6 +33,11 @@ cd apps/worker
 py -m app.tools.paper_health_report
 ```
 
+`bot_settings.enabled=false` stops order creation only. The worker cycle still
+records heartbeat/provider health and can persist decision snapshots plus
+feature observations; if those rows are invisible in the cockpit, check the
+Supabase Auth/RLS session before treating it as a bot-stop issue.
+
 ## Migration Order
 
 Run migrations in this exact order:

@@ -139,7 +139,7 @@ function StatusBar() {
     <header className="border-b border-line bg-white">
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
         <Pill tone={currentSettings ? (currentSettings.enabled ? "safe" : "danger") : "warning"}>
-          봇 상태: {currentSettings ? (currentSettings.enabled ? "실행" : "정지") : dataAccessLimited ? "권한 필요" : "설정 없음"}
+          거래 봇: {currentSettings ? (currentSettings.enabled ? "실행" : "정지") : dataAccessLimited ? "권한 필요" : "설정 없음"}
         </Pill>
         <Pill tone={currentSettings?.mode === "live" ? "danger" : currentSettings ? "safe" : "warning"}>
           모드: {currentSettings?.mode ?? (dataAccessLimited ? "권한 필요" : "-")}
@@ -148,7 +148,7 @@ function StatusBar() {
           실주문 허용: {currentSettings ? (currentSettings.liveOrderAllowed ? "예" : "아니오") : dataAccessLimited ? "권한 필요" : "아니오"}
         </Pill>
         <Pill tone={heartbeatStale || dataAccessLimited ? "warning" : "safe"}>
-          Heartbeat: {dataAccessLimited ? "권한 필요" : formatAge(latestHeartbeat?.createdAt)}
+          데이터 heartbeat: {dataAccessLimited ? "권한 필요" : formatAge(latestHeartbeat?.createdAt)}
         </Pill>
         <Pill tone={unhealthyCount > 0 ? "warning" : "safe"}>
           {dataAccessLimited ? "API: 권한 필요" : `API: 정상 ${healthyCount} / 이상 ${unhealthyCount}`}
