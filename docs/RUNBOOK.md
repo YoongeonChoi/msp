@@ -384,10 +384,11 @@ verification even if the line starts with `FINAL=PASS live_execution_safety_dril
 
 4. The live broker path must also reject mock/static or unready strategy
    features. Live mode must use `provider_live_v1` feature evidence with
-   retained quote, fundamentals, and news provenance; mocked, unconfigured, or
-   missing provider inputs must keep `live_trading_ready=false` and record
-   `live_feature_snapshot_not_ready`. Broker placement can continue only when
-   `live_trading_ready=true` and `feature_source` is non-mock.
+   retained quote, fundamentals, news, positive PER/PBR valuation inputs, and
+   market/sector provenance; mocked, unconfigured, missing provider, missing
+   valuation, or missing market/sector inputs must keep `live_trading_ready=false`
+   and record `live_feature_snapshot_not_ready`. Broker placement can continue
+   only when `live_trading_ready=true` and `feature_source` is non-mock.
 
 5. This is not a provider sandbox/live proof. Before live operation, still run a
    real provider lifecycle drill and audit the retained provider evidence.
@@ -861,8 +862,8 @@ py -m app.tools.verify_security_scan_evidence --evidence path\to\security_scan_s
 The security verifier must print:
 
 ```text
-FINAL=PASS security_scan_evidence scan_id=3649a5f_20260630214017 worklist_rows=4 completion_receipts=4 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
-FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=4 candidate_findings=0 reportable_findings=0
+FINAL=PASS security_scan_evidence scan_id=abc46bf_20260630220125 worklist_rows=1 completion_receipts=1 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=1 candidate_findings=0 reportable_findings=0
 ```
 
 `FINAL=FAIL security_scan_evidence` blocks live-mode consideration. Run the verifier

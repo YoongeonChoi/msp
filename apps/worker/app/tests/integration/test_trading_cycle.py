@@ -578,7 +578,7 @@ async def test_live_cycle_marks_default_mock_provider_features_not_ready() -> No
     )
 
 
-async def test_live_cycle_places_order_with_provider_backed_features() -> None:
+async def test_live_cycle_blocks_provider_features_without_sector_evidence() -> None:
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="live", live_order_allowed=True)
     )
@@ -599,20 +599,22 @@ async def test_live_cycle_places_order_with_provider_backed_features() -> None:
 
     await cycle.execute()
 
-    assert len(repository.orders) == 1
-    order = repository.orders[0]
-    assert broker.place_order_calls == 1
-    assert order.mode == "live"
-    assert order.status == "sent"
-    assert order.provider_order_id == "test-live-order-1"
+    assert repository.orders == []
+    assert broker.place_order_calls == 0
     raw = repository.decisions[0].feature_snapshot["raw"]
     assert isinstance(raw, dict)
     assert raw["feature_source"] == "provider_live_v1"
-    assert raw["live_trading_ready"] is True
+    assert raw["live_trading_ready"] is False
     assert raw["quote_source"] == "toss"
     assert raw["fundamentals_source"] == "opendart"
     assert raw["news_provider"] == "naver"
     assert raw["news_sources"] == ["naver"]
+    assert raw["feature_unready_reasons"] == ["market_sector_evidence_missing"]
+    assert any(
+        event["message"] == "live_feature_snapshot_not_ready"
+        and _event_reasons_include(event, "market_sector_evidence_missing")
+        for event in repository.engine_events
+    )
 
 
 async def test_live_allowed_cycle_places_order_with_verified_account_state() -> None:

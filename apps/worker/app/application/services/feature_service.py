@@ -50,7 +50,7 @@ class FeatureService:
             "source": quote.source,
             "feature_source": "provider_live_v1",
             "feature_evidence_version": "provider_live_v1",
-            "market_sector_source": "strategy_context_default_neutral",
+            "market_sector_source": "missing_live_sector_provider",
             "live_trading_ready": False,
         }
         unready_reasons: list[str] = []
@@ -58,6 +58,7 @@ class FeatureService:
             unready_reasons.append("quote_price_invalid")
         if _is_mock_source(quote.source):
             unready_reasons.append("quote_source_not_live_provider")
+        unready_reasons.append("market_sector_evidence_missing")
 
         fundamentals = await self._load_fundamentals(symbol, raw, unready_reasons)
         news_events = await self._load_news(symbol, raw, unready_reasons)
@@ -107,6 +108,10 @@ class FeatureService:
             "operating_margin": fundamentals.operating_margin,
             "debt_ratio": fundamentals.debt_ratio,
         }
+        missing_valuation_fields = _missing_required_valuation_fields(fundamentals)
+        if missing_valuation_fields:
+            raw["fundamentals_missing_live_fields"] = missing_valuation_fields
+            unready_reasons.append("fundamentals_valuation_missing")
         if not _has_fundamental_signal(fundamentals):
             unready_reasons.append("fundamentals_values_missing")
         return fundamentals
@@ -162,6 +167,17 @@ def _has_fundamental_signal(fundamentals: QuarterlyFundamentals) -> bool:
             fundamentals.debt_ratio,
         )
     )
+
+
+def _missing_required_valuation_fields(
+    fundamentals: QuarterlyFundamentals,
+) -> list[str]:
+    missing: list[str] = []
+    if fundamentals.per is None or fundamentals.per <= 0:
+        missing.append("per")
+    if fundamentals.pbr is None or fundamentals.pbr <= 0:
+        missing.append("pbr")
+    return missing
 
 
 def _fundamental_score(fundamentals: QuarterlyFundamentals | None) -> float:

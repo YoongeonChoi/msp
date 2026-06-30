@@ -83,6 +83,11 @@ Live trading:
   until provider contracts, price/quantity policy, and rollback workflows exist.
 - UI and OpenAI output cannot call broker execution.
 - `live_order_allowed=false` blocks live proposals before any broker call.
+- `provider_live_v1` features are not live-ready until they include non-mock
+  quote, provider fundamentals, provider news, positive PER/PBR valuation
+  inputs, and verified market/sector evidence. Missing valuation or
+  market/sector evidence records `live_feature_snapshot_not_ready` and stops
+  before live order proposal creation.
 
 Initial scoring:
 

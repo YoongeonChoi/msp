@@ -26,6 +26,8 @@ Unit:
   events for repeated-critical counts while still failing on worker criticals
 - provider health failure details persist only safe bounded fields and redact
   secret-looking keys or values
+- live feature snapshots require positive PER/PBR valuation inputs and
+  market/sector evidence before `live_trading_ready=true`
 - provider error mapping
 - redaction
 - config validation
@@ -45,6 +47,8 @@ Integration with mocks:
 - live mode blocked by default
 - `live_order_allowed=false` prevents broker calls
 - Supabase/Toss health failure blocks order creation
+- provider-backed live quote/fundamental/news evidence still blocks before the
+  broker when market/sector evidence is missing
 - OpenAI invalid JSON rejected
 - retention dry-run
 

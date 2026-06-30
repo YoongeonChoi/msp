@@ -24,9 +24,11 @@ Before deploy:
    system-originated orders while broker-wide Toss closed-order history is unavailable, including
    deployment environment, operator, runtime env confirmation, evidence URI, and SHA-256 hash.
 9. Confirm the deployed live strategy feature builder emits `provider_live_v1`
-   evidence from non-mock quote, fundamentals, and news providers. Live decisions
-   must carry `feature_snapshot.raw.live_trading_ready=true` and a non-mock
-   `feature_source`; otherwise `ExecutionService` must block before broker placement.
+   evidence from non-mock quote, fundamentals, and news providers with positive
+   PER/PBR valuation inputs plus market/sector provenance. Live decisions must
+   carry `feature_snapshot.raw.live_trading_ready=true` and a non-mock
+   `feature_source`; otherwise `ExecutionService` must block before broker
+   placement.
 10. Consider live only after manual confirmation.
 
 No secrets are stored in `render.yaml`; secret env vars use `sync: false`.

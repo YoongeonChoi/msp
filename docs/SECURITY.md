@@ -85,9 +85,10 @@ Secret scans must print only file paths, not matched secret values. CI must fail
 - Live control RLS policies use cached `select public.is_admin()` checks for the hottest control tables.
 - Live order placement must not treat mock/static or unready strategy features
   as live-ready evidence. Live mode feature snapshots use `provider_live_v1`
-  with retained quote, fundamentals, and news provenance; broker placement
-  requires `feature_snapshot.raw.live_trading_ready=true` and a non-mock
-  `feature_source` after final risk evaluation.
+  with retained quote, fundamentals, news, positive PER/PBR valuation inputs,
+  and market/sector provenance; broker placement requires
+  `feature_snapshot.raw.live_trading_ready=true` and a non-mock `feature_source`
+  after final risk evaluation.
 - Release evidence artifact/report URIs must be retained remote HTTPS references with a valid DNS host or global IP; local, test, private-IP, non-global-IP, localhost, invalid-host, invalid-port, credential-bearing, query/fragment, raw or percent-decoded path traversal, encoded slash/backslash path separators, and ad hoc inline evidence are not accepted.
 - Published provider lifecycle artifacts must pass `--verify-remote-artifacts`, which fetches retained HTTPS artifact bytes, rejects GitHub `blob` pages, caps response size, and compares the downloaded bytes to the declared SHA-256 without leaking URI, body, or hash values in failures.
 - Provider contract gap release evidence must include a retained `provider_gap_evidence` manifest binding the exact `docs/API_GAPS.md` SHA-256, every parsed provider gap id in order, provider-matching retained source artifacts, unique retained URI/SHA-256 pairs, and non-future capture timestamps; final bundle verification requires `provider_gap_evidence=1`.

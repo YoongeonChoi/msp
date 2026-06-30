@@ -97,7 +97,9 @@ channel ACK drills, and published retained artifacts.
 - OpenAI structured-output usage now has a model allowlist and strict schema
   requirements so AI output remains advisory and cannot promote live execution.
 - Live mode now requires `provider_live_v1` feature snapshots built from real
-  provider evidence; mock/static paper features stay non-live-ready.
+  provider evidence. Mock/static paper features, missing provider valuation
+  inputs, and missing market/sector evidence stay non-live-ready and stop
+  before live order proposal creation.
 
 ## Supabase Control Plane
 
@@ -152,33 +154,32 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `3649a5f_20260630214017`.
+  `abc46bf_20260630220125`.
 - The retained report is
-  `security-artifacts/3649a5f_20260630214017/report.md`.
-- The scan summary records 4 worklist rows, 4 completion receipts,
+  `security-artifacts/abc46bf_20260630220125/report.md`.
+- The scan summary records 1 worklist row, 1 completion receipt,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers provider-health diagnostic persistence and paper-health
-  aggregation in `toss_client.py`, `toss_market_data.py`, `health_service.py`,
-  and `paper_health_report_service.py`: unsafe provider detail persistence is
-  bounded and redacted, raised fail-closed errors are sanitized, Toss provider
-  health remains read-only and fail-closed, and paper health excludes only its
-  own diagnostic events from repeated-critical counting. The earlier
-  `fb223a4_20260628182340`, `83add88_20260630113328`,
-  `c288dcd_20260630120402`, and `93e239b_20260630211736` scans remain retained
-  under `security-artifacts/` as broader historical baseline evidence.
+- The delta scan covers the live feature evidence gate in `feature_service.py`:
+  `provider_live_v1` remains fail-closed until positive PER/PBR valuation inputs
+  and verified market/sector evidence exist, and the existing trading cycle skips
+  live proposal creation for not-ready provider snapshots before any broker call.
+  The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
+  `c288dcd_20260630120402`, `93e239b_20260630211736`, and
+  `3649a5f_20260630214017` scans remain retained under `security-artifacts/` as
+  broader historical baseline evidence.
 
 ## Verification Snapshot
 
 The latest local verification recorded before this handoff included:
 
-- `py -m pytest -q --tb=short` from `apps/worker`: `510 passed`
+- `py -m pytest -q --tb=short` from `apps/worker`: `512 passed`
 - `py -m ruff check .` from `apps/worker`: passed
 - `py -m mypy .` from `apps/worker`: passed
-- `py -m pytest app/tests/unit/test_toss_readonly.py app/tests/unit/test_toss_market_data.py -q --tb=short`
-  from `apps/worker`: `19 passed`
+- `py -m pytest app/tests/unit/test_feature_service.py app/tests/integration/test_trading_cycle.py -q --tb=short`
+  from `apps/worker`: `24 passed`
 - Scorecard/security evidence gates:
-  retained scan report prepared for `3649a5f_20260630214017`; regenerate the
+  retained scan report prepared for `abc46bf_20260630220125`; regenerate the
   source-bound `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.
