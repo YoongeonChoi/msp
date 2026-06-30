@@ -1,6 +1,14 @@
 import { AlertTriangle, CircleStop, Database } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchApiHealth, fetchBotSettings, fetchLatestHeartbeat, fetchTodayDecisions, fetchTodayOrders, updateBotSettings } from "../lib/supabaseData";
+import {
+  fetchApiHealth,
+  fetchAuthRole,
+  fetchBotSettings,
+  fetchLatestHeartbeat,
+  fetchTodayDecisions,
+  fetchTodayOrders,
+  updateBotSettings
+} from "../lib/supabaseData";
 import { formatAge, isOlderThan } from "../lib/formatters";
 import { brandIcon, getPageLabel, navItems, parsePageKey } from "../lib/navigation";
 import type { PageKey } from "../lib/navigation";
@@ -107,6 +115,7 @@ function MobileNav({ page, setPage }: { readonly page: PageKey; readonly setPage
 function StatusBar() {
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
+  const auth = useQuery({ queryKey: ["auth_role"], queryFn: fetchAuthRole, retry: false, refetchInterval: 60_000 });
   const heartbeat = useQuery({ queryKey: ["worker_heartbeats", "latest"], queryFn: fetchLatestHeartbeat, refetchInterval: 30_000 });
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
   const todayDecisions = useQuery({ queryKey: ["decision_snapshots", "today"], queryFn: fetchTodayDecisions, refetchInterval: 60_000 });
@@ -119,7 +128,8 @@ function StatusBar() {
 
   const currentSettings = settings.data;
   const latestHeartbeat = heartbeat.data;
-  const heartbeatStale = isOlderThan(latestHeartbeat?.createdAt, 120);
+  const dataAccessLimited = auth.data ? auth.data.role !== "admin" : false;
+  const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const healthyCount = apiHealth.data?.filter((item) => item.healthy).length ?? 0;
   const unhealthyCount = apiHealth.data ? apiHealth.data.length - healthyCount : 0;
   const paperOrders =
@@ -128,14 +138,18 @@ function StatusBar() {
   return (
     <header className="border-b border-line bg-white">
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-        <Pill tone={currentSettings?.enabled ? "safe" : "danger"}>
-          봇 상태: {currentSettings?.enabled ? "실행" : "정지"}
+        <Pill tone={currentSettings ? (currentSettings.enabled ? "safe" : "danger") : "warning"}>
+          봇 상태: {currentSettings ? (currentSettings.enabled ? "실행" : "정지") : dataAccessLimited ? "권한 필요" : "설정 없음"}
         </Pill>
-        <Pill tone={currentSettings?.mode === "live" ? "danger" : "safe"}>모드: {currentSettings?.mode ?? "-"}</Pill>
-        <Pill tone={currentSettings?.liveOrderAllowed ? "danger" : "safe"}>
-          실주문 허용: {currentSettings?.liveOrderAllowed ? "예" : "아니오"}
+        <Pill tone={currentSettings?.mode === "live" ? "danger" : currentSettings ? "safe" : "warning"}>
+          모드: {currentSettings?.mode ?? (dataAccessLimited ? "권한 필요" : "-")}
         </Pill>
-        <Pill tone={heartbeatStale ? "warning" : "safe"}>Heartbeat: {formatAge(latestHeartbeat?.createdAt)}</Pill>
+        <Pill tone={currentSettings?.liveOrderAllowed ? "danger" : currentSettings ? "safe" : "warning"}>
+          실주문 허용: {currentSettings ? (currentSettings.liveOrderAllowed ? "예" : "아니오") : dataAccessLimited ? "권한 필요" : "아니오"}
+        </Pill>
+        <Pill tone={heartbeatStale || dataAccessLimited ? "warning" : "safe"}>
+          Heartbeat: {dataAccessLimited ? "권한 필요" : formatAge(latestHeartbeat?.createdAt)}
+        </Pill>
         <Pill tone={unhealthyCount > 0 ? "warning" : "safe"}>
           API: 정상 {healthyCount} / 이상 {unhealthyCount}
         </Pill>
@@ -162,6 +176,11 @@ function StatusBar() {
       {settings.error ? (
         <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
           Supabase 설정 또는 RLS 권한 때문에 bot_settings를 읽지 못했습니다.
+        </div>
+      ) : null}
+      {auth.data?.warning ? (
+        <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          {auth.data.warning} Settings에서 admin 계정으로 로그인하세요.
         </div>
       ) : null}
     </header>

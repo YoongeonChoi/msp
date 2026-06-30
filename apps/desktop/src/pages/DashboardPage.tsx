@@ -2,6 +2,7 @@ import { Activity, AlertTriangle, Info } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchApiHealth,
+  fetchAuthRole,
   fetchBotSettings,
   fetchEngineEvents,
   fetchLatestHeartbeat,
@@ -20,6 +21,7 @@ const monitoredProviders = [
 ];
 
 export function DashboardPage() {
+  const auth = useQuery({ queryKey: ["auth_role"], queryFn: fetchAuthRole, retry: false, refetchInterval: 60_000 });
   const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
   const heartbeat = useQuery({ queryKey: ["worker_heartbeats", "latest"], queryFn: fetchLatestHeartbeat, refetchInterval: 30_000 });
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
@@ -32,7 +34,8 @@ export function DashboardPage() {
   }
 
   const latestHeartbeat = heartbeat.data;
-  const heartbeatStale = isOlderThan(latestHeartbeat?.createdAt, 120);
+  const dataAccessLimited = auth.data ? auth.data.role !== "admin" : false;
+  const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const decisionCounts = countBy(decisions.data ?? [], (item) => item.action);
   const orderCounts = countBy(orders.data ?? [], (item) => item.status);
   const warningEvents =
@@ -40,18 +43,27 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-4">
+      {auth.data?.warning ? (
+        <Panel className="border-amber-200 bg-amber-50">
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
+            <AlertTriangle size={16} aria-hidden="true" />
+            {auth.data.warning} Settings에서 admin 계정으로 로그인하면 worker/provider 상태가 표시됩니다.
+          </div>
+        </Panel>
+      ) : null}
+
       <div className="grid gap-3 md:grid-cols-4">
         <Metric
           title="봇 상태"
-          value={settings.data?.enabled ? "실행" : "정지"}
-          detail={settings.data?.enabled ? "enabled=true" : "enabled=false"}
-          tone={settings.data?.enabled ? "safe" : "danger"}
+          value={formatBotStatus(settings.data, dataAccessLimited)}
+          detail={settings.data ? (settings.data.enabled ? "enabled=true" : "enabled=false") : dataAccessLimited ? "admin 필요" : "settings 없음"}
+          tone={settings.data ? (settings.data.enabled ? "safe" : "danger") : "warning"}
         />
         <Metric
           title="Worker"
-          value={heartbeatStale ? "확인 필요" : "온라인"}
-          detail={formatAge(latestHeartbeat?.createdAt)}
-          tone={heartbeatStale ? "warning" : "safe"}
+          value={formatWorkerStatus(latestHeartbeat?.createdAt, dataAccessLimited)}
+          detail={dataAccessLimited ? "admin 필요" : formatAge(latestHeartbeat?.createdAt)}
+          tone={dataAccessLimited || heartbeatStale ? "warning" : "safe"}
         />
         <Metric
           title="오늘 주문"
@@ -87,11 +99,13 @@ export function DashboardPage() {
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-medium uppercase text-ink">{provider.label}</span>
                     <Pill tone={item?.healthy ? "safe" : "warning"}>
-                      {item ? (item.healthy ? "정상" : item.status) : "미확인"}
+                      {item ? (item.healthy ? "정상" : item.status) : dataAccessLimited ? "권한 필요" : "미확인"}
                     </Pill>
                   </div>
                   <p className="mt-1 text-xs text-muted">
-                    {item?.message ?? item?.errorCode ?? `최근 확인: ${formatKst(item?.checkedAt)}`}
+                    {item?.message ??
+                      item?.errorCode ??
+                      (dataAccessLimited ? "admin 세션이 필요합니다." : `최근 확인: ${formatKst(item?.checkedAt)}`)}
                   </p>
                 </div>
               );
@@ -142,6 +156,23 @@ export function DashboardPage() {
       </div>
     </div>
   );
+}
+
+function formatBotStatus(
+  settings: { readonly enabled: boolean } | null | undefined,
+  dataAccessLimited: boolean
+): string {
+  if (!settings) {
+    return dataAccessLimited ? "권한 필요" : "설정 없음";
+  }
+  return settings.enabled ? "실행" : "정지";
+}
+
+function formatWorkerStatus(createdAt: string | null | undefined, dataAccessLimited: boolean): string {
+  if (dataAccessLimited) {
+    return "권한 필요";
+  }
+  return isOlderThan(createdAt, 120) ? "확인 필요" : "온라인";
 }
 
 function CountRows({

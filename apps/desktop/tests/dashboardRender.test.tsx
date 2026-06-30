@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { DashboardPage } from "../src/pages/DashboardPage";
+import type { AuthRoleState } from "../src/lib/supabaseData";
 import type { ApiHealth, BotSettings, EngineEventRow, WorkerHeartbeat } from "../src/lib/rows";
 
 const nowIso = "2026-06-28T00:00:00.000Z";
@@ -67,6 +68,20 @@ const criticalEvent: EngineEventRow = {
   createdAt: nowIso
 };
 
+const adminRole: AuthRoleState = {
+  signedIn: true,
+  email: "admin@example.com",
+  role: "admin",
+  warning: null
+};
+
+const loggedOutRole: AuthRoleState = {
+  signedIn: false,
+  email: null,
+  role: null,
+  warning: "Supabase Auth 로그인 세션이 필요합니다."
+};
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -75,6 +90,7 @@ const queryClient = new QueryClient({
   }
 });
 queryClient.setQueryData(["bot_settings"], settings);
+queryClient.setQueryData(["auth_role"], adminRole);
 queryClient.setQueryData(["worker_heartbeats", "latest"], heartbeat);
 queryClient.setQueryData(["api_health"], apiHealth);
 queryClient.setQueryData(["decision_snapshots", "today"], []);
@@ -93,5 +109,29 @@ assert.match(markup, /정상/);
 assert.match(markup, /critical/);
 assert.match(markup, /live_order_manual_check_still_unknown/);
 assert.match(markup, /unknown_requires_manual_check/);
+
+const loggedOutQueryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: false
+    }
+  }
+});
+loggedOutQueryClient.setQueryData(["auth_role"], loggedOutRole);
+loggedOutQueryClient.setQueryData(["bot_settings"], null);
+loggedOutQueryClient.setQueryData(["worker_heartbeats", "latest"], null);
+loggedOutQueryClient.setQueryData(["api_health"], []);
+loggedOutQueryClient.setQueryData(["decision_snapshots", "today"], []);
+loggedOutQueryClient.setQueryData(["orders", "today"], []);
+loggedOutQueryClient.setQueryData(["engine_events"], []);
+
+const loggedOutMarkup = renderToStaticMarkup(
+  <QueryClientProvider client={loggedOutQueryClient}>
+    <DashboardPage />
+  </QueryClientProvider>
+);
+
+assert.match(loggedOutMarkup, /Settings에서 admin 계정으로 로그인/);
+assert.match(loggedOutMarkup, /권한 필요/);
 
 console.log("dashboard render fixtures passed");

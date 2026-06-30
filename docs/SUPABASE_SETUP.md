@@ -12,6 +12,26 @@
 
 Desktop must not use service role or secret key.
 
+## Desktop Admin Session
+
+The desktop cockpit uses only `VITE_SUPABASE_URL` and
+`VITE_SUPABASE_PUBLISHABLE_KEY`. It still needs a Supabase Auth session for an
+admin user whose `auth.users.id` exists in `public.user_roles` with
+`role='admin'`.
+
+If the dashboard shows `권한 필요`, `모드: 권한 필요`, missing provider health,
+or a stale-looking worker card while the worker health tool shows fresh hosted
+rows, open `Settings` and sign in with the admin Auth account. Without that
+session, RLS returns empty table results rather than a hard query error, so
+`bot_settings`, `worker_heartbeats`, and `api_health` can all look absent.
+
+Worker-side verification remains service-role only:
+
+```bash
+cd apps/worker
+py -m app.tools.paper_health_report
+```
+
 ## Migration Order
 
 Run migrations in this exact order:

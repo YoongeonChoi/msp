@@ -76,6 +76,11 @@ export interface AuthRoleState {
   readonly warning: string | null;
 }
 
+export interface AuthCredentials {
+  readonly email: string;
+  readonly password: string;
+}
+
 export interface OptionalBacktestRuns {
   readonly available: boolean;
   readonly warning: string | null;
@@ -432,6 +437,21 @@ export async function fetchAuthRole(): Promise<AuthRoleState> {
     role: role || null,
     warning: role === "admin" ? null : "admin role이 아니면 cockpit 데이터 접근이 제한됩니다."
   };
+}
+
+export async function signInWithPassword(input: AuthCredentials): Promise<void> {
+  const client = requireClient();
+  const result = await client.auth.signInWithPassword({
+    email: input.email,
+    password: input.password
+  });
+  failOnError("auth", result.error);
+}
+
+export async function signOut(): Promise<void> {
+  const client = requireClient();
+  const result = await client.auth.signOut();
+  failOnError("auth", result.error);
 }
 
 function requireClient() {
