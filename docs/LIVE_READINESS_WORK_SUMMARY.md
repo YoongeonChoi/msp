@@ -52,7 +52,9 @@ approval. The authoritative readiness score remains
   passing the output through secret redaction.
 - The report continues to exclude its own `component='paper_ops'`,
   `message='paper_health_report'` diagnostic events from the
-  repeated-critical-event count, preventing self-sustaining FAIL reports.
+  repeated-critical-event count and from the rendered recent critical event
+  list, preventing self-sustaining FAIL reports and keeping the triage list
+  focused on worker/provider events.
   Operational critical events from `worker` and provider components still count
   and still block.
 - Render was observed running the previously pushed release metadata commit.
@@ -224,25 +226,25 @@ channel ACK drills, and published retained artifacts.
 ## Security Work
 
 - The current retained Codex Security scan is
-  `provider_gap_remote_artifacts_20260630150324`.
+  `paper_health_self_noise_20260630151326`.
 - The retained report is
-  `security-artifacts/provider_gap_remote_artifacts_20260630150324/report.md`.
+  `security-artifacts/paper_health_self_noise_20260630151326/report.md`.
 - The scan summary records 2 worklist rows, 2 completion receipts,
   0 promoted candidates, 0 validation receipts, 0 attack-path receipts, and
   0 surviving reportable findings.
-- The delta scan covers provider gap remote source-artifact verification and
-  collector pass-through: the remote check is opt-in, GitHub `blob` pages are
-  rejected before fetch, response bytes are capped, and mismatch/fetch failures
-  use fixed reason codes without printing artifact URI, response body, declared
-  hash, or calculated hash. The live-order boundary is unchanged:
+- The delta scan covers paper health self-diagnostic filtering: only
+  `paper_ops/paper_health_report` rows are removed from rendered recent critical
+  event output, while worker/provider/live execution/alerting critical events
+  still render and still block. The live-order boundary is unchanged:
   `RiskService`, `ExecutionService`, `BrokerPort`, and desktop broker/order API
   paths were not modified.
   The earlier `fb223a4_20260628182340`, `83add88_20260630113328`,
   `c288dcd_20260630120402`, `93e239b_20260630211736`, and
   `3649a5f_20260630214017` scans, plus `abc46bf_20260630220125` and
   `release_metadata_20260630132334`, `provider_detail_20260630133946`,
-  `hosted_env_files_20260630142933`, `release_freshness_20260630140851`, and
-  `render_deploy_hook_20260630144442`, remain retained under
+  `hosted_env_files_20260630142933`, `release_freshness_20260630140851`,
+  `render_deploy_hook_20260630144442`, and
+  `provider_gap_remote_artifacts_20260630150324`, remain retained under
   `security-artifacts/` as broader historical baseline evidence.
 
 ## Verification Snapshot
@@ -267,7 +269,9 @@ The latest local verification recorded before this handoff included:
   `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
 - `py -m app.tools.paper_health_report` from `apps/worker`: expected
   `FINAL=FAIL` against hosted data, with degraded provider lines including
-  `error_type=ProviderAuthError reason=toss_access_denied`
+  `error_type=ProviderAuthError reason=toss_access_denied`; the rendered recent
+  critical event list excludes self-generated `paper_ops: paper_health_report`
+  rows and shows only operational worker/provider events
 - `py -m app.tools.verify_worker_release_freshness --repo-root ...` from
   `apps/worker`: expected `FINAL=FAIL` before manual Render redeploy, with
   `reason=release_sha_mismatch`
@@ -276,7 +280,7 @@ The latest local verification recorded before this handoff included:
   `reason=render_deploy_hook_env_missing` when no operator hook URL is present
 - Scorecard/security evidence gates:
   retained scan report prepared for
-  `provider_gap_remote_artifacts_20260630150324`; regenerate the source-bound
+  `paper_health_self_noise_20260630151326`; regenerate the source-bound
   `security_scan_summary.json` after the final commit hash exists,
   then run `verify_security_scan_evidence` and `verify_live_readiness_scorecard`
   before release bundle assembly.

@@ -145,9 +145,13 @@ async def test_report_ignores_own_critical_events_for_repeated_critical_count() 
     repository = FakePaperHealthRepository(rows=rows)
 
     report = await PaperHealthReportService(repository).collect(NOW)
+    rendered = format_paper_health_report(report)
 
     assert report.result == PaperHealthResult.PASS
+    assert report.recent_error_events == ()
     assert "repeated_critical_events" not in _finding_codes(report)
+    assert "[recent_error_critical_engine_events]\nnone" in rendered
+    assert "paper_ops: paper_health_report" not in rendered
 
 
 async def test_report_still_fails_on_repeated_operational_critical_events() -> None:
@@ -161,9 +165,13 @@ async def test_report_still_fails_on_repeated_operational_critical_events() -> N
     repository = FakePaperHealthRepository(rows=rows)
 
     report = await PaperHealthReportService(repository).collect(NOW)
+    rendered = format_paper_health_report(report)
 
     assert report.result == PaperHealthResult.FAIL
     assert "repeated_critical_events" in _finding_codes(report)
+    assert len(report.recent_error_events) == 2
+    assert "worker: unexpected error; live orders blocked" in rendered
+    assert "paper_ops: paper_health_report" not in rendered
 
 
 @dataclass(slots=True)

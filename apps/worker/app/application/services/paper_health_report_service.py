@@ -25,6 +25,7 @@ from app.application.services.paper_health_row_parsing import (
     missing_optional_outcomes,
     utc_now,
 )
+from app.domain.common.json import JsonObject
 from app.domain.trading.entities import BotSettings
 
 STALE_HEARTBEAT_SECONDS = 300
@@ -72,7 +73,7 @@ def _build_report(
     decisions_by_action = count_by(rows.decisions_last_24h, "action")
     orders_by_status = count_by(rows.orders_last_24h, "status")
     duplicate_keys = duplicate_idempotency_keys(rows.order_key_rows)
-    recent_events = event_summaries(rows.recent_engine_events)
+    recent_events = _operational_event_summaries(rows.recent_engine_events)
     outcome_missing = missing_optional_outcomes(
         rows.orders_last_24h, rows.outcomes_last_24h, now
     )
@@ -221,8 +222,18 @@ def _operational_critical_event_count(events: Sequence[EngineEventSummary]) -> i
         1
         for event in events
         if event.level == "critical"
-        and not (
-            event.component == "paper_ops"
-            and event.message == "paper_health_report"
-        )
     )
+
+
+def _operational_event_summaries(
+    rows: Sequence[JsonObject],
+) -> tuple[EngineEventSummary, ...]:
+    return tuple(
+        event
+        for event in event_summaries(rows)
+        if not _is_paper_health_self_event(event)
+    )
+
+
+def _is_paper_health_self_event(event: EngineEventSummary) -> bool:
+    return event.component == "paper_ops" and event.message == "paper_health_report"

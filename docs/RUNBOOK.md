@@ -891,7 +891,7 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
-FINAL=PASS security_scan_evidence scan_id=provider_gap_remote_artifacts_20260630150324 worklist_rows=2 completion_receipts=2 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
+FINAL=PASS security_scan_evidence scan_id=paper_health_self_noise_20260630151326 worklist_rows=2 completion_receipts=2 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
 FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=2 candidate_findings=0 reportable_findings=0
 FINAL=PASS worker_release_freshness expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300
 ```
@@ -1164,9 +1164,11 @@ py -m app.tools.paper_health_report
 
 The report writes one `engine_events` row with `component='paper_ops'` and
 `message='paper_health_report'`. Those diagnostic rows are excluded from the
-repeated-critical-event count so the report cannot make future reports fail by
-itself. Operational critical events from `worker`, provider, live execution, or
-alerting components still count and must be investigated.
+repeated-critical-event count and from the rendered recent critical event list,
+so the report cannot make future reports fail by itself or hide worker/provider
+events behind self-generated diagnostics. Operational critical events from
+`worker`, provider, live execution, or alerting components still count and must
+be investigated.
 
 4. Verify the summary event:
 
