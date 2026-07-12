@@ -90,6 +90,28 @@ async def test_reconcile_live_order_updates_final_broker_status() -> None:
     assert repository.engine_events[-1]["message"] == "live_order_reconciled"
 
 
+async def test_reconcile_rejects_mismatched_provider_order_identity() -> None:
+    repository = InMemoryRepository(BotSettings())
+    order = _live_order(provider_order_id="provider-order-1")
+    repository.orders.append(order)
+    broker = StatusBroker(
+        BrokerOrderStatusResult(
+            provider_order_id="different-provider-order",
+            status="filled",
+            raw_summary={"status": "FILLED"},
+        )
+    )
+
+    updated = await OrderReconciliationService(broker, repository).reconcile_live_orders()
+
+    assert updated == 1
+    assert repository.orders[0].status == "unknown_requires_manual_check"
+    assert repository.orders[0].reason == "broker_order_status_identity_mismatch"
+    assert repository.engine_events[-1]["message"] == (
+        "live_order_reconciliation_identity_mismatch"
+    )
+
+
 async def test_reconcile_live_order_without_provider_id_requires_manual_check() -> None:
     repository = InMemoryRepository(BotSettings())
     repository.orders.append(_live_order(provider_order_id=None))

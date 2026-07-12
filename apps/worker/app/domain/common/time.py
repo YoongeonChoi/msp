@@ -15,8 +15,14 @@ def now_kst() -> datetime:
 
 
 def age_seconds(value: datetime, now: datetime | None = None) -> float:
+    return max(0.0, signed_age_seconds(value, now))
+
+
+def signed_age_seconds(value: datetime, now: datetime | None = None) -> float:
     current = now or now_utc()
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
-    return max(0.0, (current - value.astimezone(UTC)).total_seconds())
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    return (current.astimezone(UTC) - value.astimezone(UTC)).total_seconds()
 

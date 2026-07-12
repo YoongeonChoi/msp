@@ -58,6 +58,7 @@ async def test_live_features_accept_provider_market_sector_evidence() -> None:
 
     assert features.raw["live_trading_ready"] is True
     assert features.raw["feature_unready_reasons"] == []
+    assert features.raw["critical_news_risk"] is False
     assert features.market_sector_score == 0.60
     assert features.raw["market_sector_provider"] == "krx_sector"
     assert features.raw["market_sector_source"] == "krx_sector"
@@ -86,6 +87,36 @@ async def test_live_features_reject_mock_market_sector_evidence() -> None:
     assert "market_sector_source_not_live_provider" in features.raw[
         "feature_unready_reasons"
     ]
+
+
+async def test_live_features_record_critical_news_evidence() -> None:
+    service = FeatureService(
+        fundamentals=FundamentalsWithValuation(),
+        news=CriticalNews(),
+        market_sector=VerifiedMarketSector(),
+        fundamentals_provider_name="opendart",
+        news_provider_name="naver",
+        market_sector_provider_name="krx_sector",
+    )
+
+    features = await service.build_live_features("005930", _quote())
+
+    assert features.raw["critical_news_risk"] is True
+
+
+async def test_critical_news_takes_precedence_over_unknown_news() -> None:
+    service = FeatureService(
+        fundamentals=FundamentalsWithValuation(),
+        news=CriticalAndUnknownNews(),
+        market_sector=VerifiedMarketSector(),
+        fundamentals_provider_name="opendart",
+        news_provider_name="naver",
+        market_sector_provider_name="krx_sector",
+    )
+
+    features = await service.build_live_features("005930", _quote())
+
+    assert features.raw["critical_news_risk"] is True
 
 
 class FundamentalsWithValuation:
@@ -140,6 +171,55 @@ class PositiveNews:
                     confidence=0.9,
                 ),
             )
+        ]
+
+
+class CriticalNews:
+    async def provider_health(self) -> bool:
+        return True
+
+    async def get_recent(self, symbol: str) -> list[NewsEvent]:
+        return [
+            NewsEvent(
+                symbol=symbol,
+                title="Provider backed critical risk",
+                source="naver",
+                published_at=now_utc(),
+                classification=NewsClassification(
+                    symbol=symbol,
+                    relevance_score=0.9,
+                    sentiment="negative",
+                    event_type="regulatory",
+                    risk_level="critical",
+                    summary_short="critical provider-backed fixture",
+                    trading_relevance=0.9,
+                    confidence=0.9,
+                ),
+            )
+        ]
+
+
+class CriticalAndUnknownNews(CriticalNews):
+    async def get_recent(self, symbol: str) -> list[NewsEvent]:
+        events = await super().get_recent(symbol)
+        return [
+            *events,
+            NewsEvent(
+                symbol=symbol,
+                title="Provider classification pending",
+                source="naver",
+                published_at=now_utc(),
+                classification=NewsClassification(
+                    symbol=symbol,
+                    relevance_score=0.5,
+                    sentiment="unknown",
+                    event_type="other",
+                    risk_level="unknown",
+                    summary_short="classification pending",
+                    trading_relevance=0.5,
+                    confidence=0.0,
+                ),
+            ),
         ]
 
 

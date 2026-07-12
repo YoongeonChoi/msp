@@ -48,7 +48,10 @@ def main(
 ) -> int:
     args = _parse_args(argv)
     try:
-        env = merge_env_files(args.env_file, environ or os.environ)
+        env = merge_env_files(
+            args.env_file,
+            environ if environ is not None else os.environ,
+        )
     except HostedEnvFileError as exc:
         print("FINAL=FAIL hosted_supabase_live_readiness")
         print(str(exc))
@@ -183,11 +186,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--url", default=None, help="Supabase project URL")
     parser.add_argument("--publishable-key", default=None, help="Supabase publishable/anon key")
-    parser.add_argument(
-        "--secret-key", default=None, help="Supabase worker secret/service role key"
+    _reject_secret_cli_options(
+        argv,
+        parser,
+        {"--secret-key", "--requester-jwt", "--reviewer-jwt"},
     )
-    parser.add_argument("--requester-jwt", default=None, help="Requester admin user access token")
-    parser.add_argument("--reviewer-jwt", default=None, help="Reviewer admin user access token")
     parser.add_argument("--timeout-sec", type=float, default=10.0)
     parser.add_argument(
         "--env-file",
@@ -196,7 +199,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=[],
         help=(
             "Optional local .env file to merge before process env. "
-            "Process env and explicit CLI args take precedence."
+            "Process env and non-secret explicit CLI args take precedence."
         ),
     )
     return parser.parse_args(argv)
@@ -213,9 +216,9 @@ def _config_from_env(
         or env.get("VITE_SUPABASE_PUBLISHABLE_KEY")
         or env.get("SUPABASE_ANON_KEY")
     )
-    secret_key = args.secret_key or env.get("SUPABASE_SECRET_KEY")
-    requester_jwt = args.requester_jwt or env.get("SUPABASE_LIVE_REQUESTER_JWT")
-    reviewer_jwt = args.reviewer_jwt or env.get("SUPABASE_LIVE_REVIEWER_JWT")
+    secret_key = env.get("SUPABASE_SECRET_KEY")
+    requester_jwt = env.get("SUPABASE_LIVE_REQUESTER_JWT")
+    reviewer_jwt = env.get("SUPABASE_LIVE_REVIEWER_JWT")
     values = {
         "SUPABASE_URL": url,
         "SUPABASE_PUBLISHABLE_KEY": publishable_key,
@@ -237,6 +240,23 @@ def _config_from_env(
         ),
         [],
     )
+
+
+def _reject_secret_cli_options(
+    argv: list[str] | None,
+    parser: argparse.ArgumentParser,
+    forbidden_options: set[str],
+) -> None:
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    env_names = {
+        "--secret-key": "SUPABASE_SECRET_KEY",
+        "--requester-jwt": "SUPABASE_LIVE_REQUESTER_JWT",
+        "--reviewer-jwt": "SUPABASE_LIVE_REVIEWER_JWT",
+    }
+    for token in raw_args:
+        option = token.partition("=")[0]
+        if option in forbidden_options:
+            parser.error(f"{option} is forbidden; use {env_names[option]} or --env-file")
 
 
 def _validate_config(config: HostedSupabaseConfig) -> None:
@@ -434,6 +454,12 @@ def _normalize_url(value: str) -> str:
         raise RuntimeError("supabase_url_must_not_include_query_or_fragment")
     if parsed.path not in {"", "/"}:
         raise RuntimeError("supabase_url_must_not_include_path")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("supabase_url_port_invalid") from exc
+    if port not in {None, 443}:
+        raise RuntimeError("supabase_url_must_use_default_https_port")
     _reject_non_hosted_hostname(parsed.hostname)
     return parsed.geturl().rstrip("/")
 

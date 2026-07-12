@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
@@ -44,6 +44,10 @@ def test_hosted_live_enable_verifier_skips_when_required_env_is_missing(
     assert "SUPABASE_URL" in output
     assert "SUPABASE_LIVE_REQUESTER_JWT" in output
     assert "SUPABASE_LIVE_REVIEWER_JWT" in output
+    assert "SUPABASE_STAGING_PROJECT_REF" in output
+    assert "SUPABASE_PRODUCTION_PROJECT_REF" in output
+    assert "SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET" in output
+    assert "--confirm-staging-project" in output
 
 
 def test_hosted_live_enable_verifier_loads_explicit_env_file_without_printing_secrets(
@@ -61,6 +65,9 @@ def test_hosted_live_enable_verifier_loads_explicit_env_file_without_printing_se
                 "SUPABASE_SECRET_KEY=secret-test-key",
                 "SUPABASE_LIVE_REQUESTER_JWT=requester-jwt",
                 "SUPABASE_LIVE_REVIEWER_JWT=reviewer-jwt",
+                "SUPABASE_STAGING_PROJECT_REF=project",
+                "SUPABASE_PRODUCTION_PROJECT_REF=production-project",
+                "SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET=staging",
             ]
         ),
         encoding="utf-8",
@@ -77,6 +84,10 @@ def test_hosted_live_enable_verifier_loads_explicit_env_file_without_printing_se
         assert config.secret_key == "secret-test-key"
         assert config.requester_jwt == "requester-jwt"
         assert config.reviewer_jwt == "reviewer-jwt"
+        assert config.staging_project_ref == "project"
+        assert config.production_project_ref == "production-project"
+        assert config.verification_target == "staging"
+        assert config.confirmation_project_ref == "project"
         return verifier.HostedLiveEnableResult(
             requester_admin_ok=True,
             reviewer_admin_ok=True,
@@ -90,7 +101,15 @@ def test_hosted_live_enable_verifier_loads_explicit_env_file_without_printing_se
 
     monkeypatch.setattr(verifier, "run_checks", fake_run_checks)
 
-    result = verifier.main(["--env-file", str(env_file)], environ={})
+    result = verifier.main(
+        [
+            "--env-file",
+            str(env_file),
+            "--confirm-staging-project",
+            "project",
+        ],
+        environ={},
+    )
 
     output = capsys.readouterr().out
     assert result == 0
@@ -131,6 +150,10 @@ def test_hosted_live_enable_verifier_checks_user_flow_without_printing_secrets()
         requester_jwt="requester-jwt",
         reviewer_jwt="reviewer-jwt",
         timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
     )
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result = verifier.run_checks(config, client=client)
@@ -152,6 +175,90 @@ def test_hosted_live_enable_verifier_checks_user_flow_without_printing_secrets()
     assert "publishable-test-key" not in output
 
 
+def test_hosted_live_enable_verifier_allows_fresh_mock_worker() -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(worker_state="fresh_mock")
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with httpx.Client(transport=httpx.MockTransport(state.handle)) as client:
+        result = verifier.run_checks(config, client=client)
+
+    assert result.activation_consumed_once is True
+
+
+def test_hosted_live_enable_verifier_rejects_fresh_real_worker_before_mutation() -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(worker_state="fresh_real")
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(state.handle)) as client,
+        pytest.raises(RuntimeError, match="hosted_worker_must_be_fresh_mock_only"),
+    ):
+        verifier.run_checks(config, client=client)
+
+    assert state.command is None
+    assert state.activation_count == 0
+
+
+@pytest.mark.parametrize("worker_state", ["stopped", "stale_mock", "mixed_recent"])
+def test_hosted_live_enable_verifier_requires_fresh_mock_worker_isolation(
+    worker_state: str,
+) -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(worker_state=worker_state)
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(state.handle)) as client,
+        pytest.raises(
+            RuntimeError,
+            match=(
+                "worker_preflight_response_invalid"
+                if worker_state == "stopped"
+                else "hosted_worker_must_be_fresh_mock_only"
+            ),
+        ),
+    ):
+        verifier.run_checks(config, client=client)
+
+    assert state.command is None
+    assert state.activation_count == 0
+
+
 def test_hosted_live_enable_verifier_fails_on_preexisting_unapplied_approval() -> None:
     verifier = _module()
     state = _MockHostedLiveEnableState(preexisting_unapplied=True)
@@ -163,6 +270,10 @@ def test_hosted_live_enable_verifier_fails_on_preexisting_unapplied_approval() -
         requester_jwt="requester-jwt",
         reviewer_jwt="reviewer-jwt",
         timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
     )
     with httpx.Client(transport=httpx.MockTransport(state.handle)) as client:
         try:
@@ -171,6 +282,26 @@ def test_hosted_live_enable_verifier_fails_on_preexisting_unapplied_approval() -
             assert str(exc) == "preexisting_unapplied_live_enable_command"
         else:
             raise AssertionError("expected preexisting approval failure")
+
+
+def test_hosted_live_enable_verifier_rejects_malformed_preexisting_check() -> None:
+    verifier = _module()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "unexpected"}, request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(
+            RuntimeError,
+            match="preexisting_live_enable_check_invalid_response",
+        ),
+    ):
+        verifier._assert_no_unapplied_live_enable(
+            client,
+            "https://project.supabase.co",
+            "secret-test-key",
+        )
 
 
 def test_hosted_live_enable_verifier_rejects_reused_requester_and_reviewer_jwt(
@@ -184,14 +315,17 @@ def test_hosted_live_enable_verifier_rejects_reused_requester_and_reviewer_jwt(
             "https://project.supabase.co",
             "--publishable-key",
             "publishable-test-key",
-            "--secret-key",
-            "secret-test-key",
-            "--requester-jwt",
-            "reused-admin-jwt",
-            "--reviewer-jwt",
-            "reused-admin-jwt",
+            "--confirm-staging-project",
+            "project",
         ],
-        environ={},
+        environ={
+            "SUPABASE_SECRET_KEY": "secret-test-key",
+            "SUPABASE_LIVE_REQUESTER_JWT": "reused-admin-jwt",
+            "SUPABASE_LIVE_REVIEWER_JWT": "reused-admin-jwt",
+            "SUPABASE_STAGING_PROJECT_REF": "project",
+            "SUPABASE_PRODUCTION_PROJECT_REF": "production-project",
+            "SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET": "staging",
+        },
     )
 
     output = capsys.readouterr().out
@@ -199,6 +333,19 @@ def test_hosted_live_enable_verifier_rejects_reused_requester_and_reviewer_jwt(
     assert "FINAL=FAIL hosted_live_enable_flow" in output
     assert "requester_and_reviewer_jwts_must_be_distinct" in output
     assert "reused-admin-jwt" not in output
+
+
+def test_hosted_live_enable_verifier_rejects_secret_cli_values_without_echoing_them(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    verifier = _module()
+
+    with pytest.raises(SystemExit):
+        verifier._parse_args(["--reviewer-jwt", "must-not-leak"])
+
+    output = capsys.readouterr().err
+    assert "--reviewer-jwt is forbidden" in output
+    assert "must-not-leak" not in output
 
 
 def test_hosted_live_enable_verifier_rejects_user_jwt_reusing_service_key() -> None:
@@ -210,6 +357,10 @@ def test_hosted_live_enable_verifier_rejects_user_jwt_reusing_service_key() -> N
         requester_jwt="secret-test-key",
         reviewer_jwt="reviewer-jwt",
         timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
     )
 
     with pytest.raises(RuntimeError, match="requester_jwt_must_not_reuse_supabase_key"):
@@ -225,6 +376,10 @@ def test_hosted_live_enable_verifier_rejects_reused_publishable_and_secret_key()
         requester_jwt="requester-jwt",
         reviewer_jwt="reviewer-jwt",
         timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
     )
 
     with pytest.raises(
@@ -232,6 +387,144 @@ def test_hosted_live_enable_verifier_rejects_reused_publishable_and_secret_key()
         match="supabase_publishable_and_secret_keys_must_be_distinct",
     ):
         verifier._validate_config(config)
+
+
+def test_hosted_live_enable_verifier_refuses_production_project() -> None:
+    verifier = _module()
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://production-project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="staging-project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="staging-project",
+    )
+
+    with pytest.raises(RuntimeError, match="production_project_mutation_forbidden"):
+        verifier._validate_config(config)
+
+
+def test_hosted_live_enable_verifier_requires_explicit_staging_target() -> None:
+    verifier = _module()
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="production",
+        confirmation_project_ref="project",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="hosted_live_enable_verification_target_must_be_staging",
+    ):
+        verifier._validate_config(config)
+
+
+def test_hosted_live_enable_verifier_requires_typed_staging_confirmation() -> None:
+    verifier = _module()
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="wrong-project",
+    )
+
+    with pytest.raises(RuntimeError, match="staging_project_confirmation_mismatch"):
+        verifier._validate_config(config)
+
+
+def test_hosted_live_enable_verifier_requires_exact_singleton_cleanup_row() -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(cleanup_row_count=0)
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(state.handle)) as client,
+        pytest.raises(RuntimeError, match="disable_live_unexpected_response"),
+    ):
+        verifier.run_checks(config, client=client)
+
+
+def test_hosted_live_enable_verifier_treats_cleanup_failure_as_fatal() -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(fail_disable_after_activation=True)
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(state.handle)) as client,
+        pytest.raises(RuntimeError, match="disable_live_failed status=500"),
+    ):
+        verifier.run_checks(config, client=client)
+
+
+def test_hosted_live_enable_verifier_deletes_unapplied_command_after_failure() -> None:
+    verifier = _module()
+    state = _MockHostedLiveEnableState(fail_activation_before_apply=True)
+    config = verifier.HostedLiveEnableConfig(
+        supabase_url="https://project.supabase.co",
+        publishable_key="publishable-test-key",
+        secret_key="secret-test-key",
+        requester_jwt="requester-jwt",
+        reviewer_jwt="reviewer-jwt",
+        timeout_sec=1.0,
+        staging_project_ref="project",
+        production_project_ref="production-project",
+        verification_target="staging",
+        confirmation_project_ref="project",
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(state.handle)) as client,
+        pytest.raises(RuntimeError, match="live_enable_activation_failed status=500"),
+    ):
+        verifier.run_checks(config, client=client)
+
+    assert state.command is None
+    assert state.deleted_command_status == "accepted"
+    assert state.bot_settings == {
+        "id": "singleton",
+        "enabled": False,
+        "mode": "paper",
+        "live_order_allowed": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -244,6 +537,10 @@ def test_hosted_live_enable_verifier_rejects_reused_publishable_and_secret_key()
         ("https://example.com", "supabase_url_must_be_hosted_supabase_project"),
         ("https://user:pass@project.supabase.co", "supabase_url_must_not_include_credentials"),
         ("https://project.supabase.co/rest/v1", "supabase_url_must_not_include_path"),
+        (
+            "https://project.supabase.co:444",
+            "supabase_url_must_use_default_https_port",
+        ),
         (
             "https://project.supabase.co?apikey=secret",
             "supabase_url_must_not_include_query_or_fragment",
@@ -282,8 +579,20 @@ def test_hosted_live_enable_verifier_redacts_secrets_from_failure_output() -> No
 
 
 class _MockHostedLiveEnableState:
-    def __init__(self, *, preexisting_unapplied: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        preexisting_unapplied: bool = False,
+        fail_disable_after_activation: bool = False,
+        fail_activation_before_apply: bool = False,
+        worker_state: str = "fresh_mock",
+        cleanup_row_count: int = 1,
+    ) -> None:
         self.preexisting_unapplied = preexisting_unapplied
+        self.fail_disable_after_activation = fail_disable_after_activation
+        self.fail_activation_before_apply = fail_activation_before_apply
+        self.worker_state = worker_state
+        self.cleanup_row_count = cleanup_row_count
         self.command_id = str(uuid4())
         self.command: dict[str, object] | None = None
         self.bot_settings = {
@@ -295,6 +604,7 @@ class _MockHostedLiveEnableState:
         self.self_review_attempted = False
         self.activation_count = 0
         self.second_activation_denied = False
+        self.deleted_command_status: str | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         token = request.headers.get("authorization", "").replace("Bearer ", "")
@@ -302,6 +612,8 @@ class _MockHostedLiveEnableState:
             return self._auth_user(token, request)
         if request.url.path == "/rest/v1/user_roles" and request.method == "GET":
             return httpx.Response(200, json=[{"role": "admin"}], request=request)
+        if request.url.path == "/rest/v1/worker_heartbeats" and request.method == "GET":
+            return self._get_worker_heartbeats(request)
         if request.url.path == "/rest/v1/bot_settings" and request.method == "PATCH":
             return self._patch_bot_settings(request)
         if request.url.path == "/rest/v1/manual_commands" and request.method == "GET":
@@ -310,6 +622,8 @@ class _MockHostedLiveEnableState:
             return self._post_manual_commands(request)
         if request.url.path == "/rest/v1/manual_commands" and request.method == "PATCH":
             return self._patch_manual_commands(token, request)
+        if request.url.path == "/rest/v1/manual_commands" and request.method == "DELETE":
+            return self._delete_manual_commands(request)
         return httpx.Response(
             500,
             json={"message": f"unexpected {request.method} {request.url}"},
@@ -330,7 +644,19 @@ class _MockHostedLiveEnableState:
             and body.get("mode") == "live"
             and body.get("live_order_allowed") is True
         )
+        if (
+            not wants_live
+            and self.activation_count > 0
+            and self.fail_disable_after_activation
+        ):
+            return httpx.Response(500, json={"message": "cleanup failed"}, request=request)
         if wants_live:
+            if self.fail_activation_before_apply and self.activation_count == 0:
+                return httpx.Response(
+                    500,
+                    json={"message": "activation failed"},
+                    request=request,
+                )
             if self.command is None or self.command["status"] != "accepted":
                 self.second_activation_denied = True
                 return httpx.Response(
@@ -344,8 +670,51 @@ class _MockHostedLiveEnableState:
         self.bot_settings.update(body)
         prefer = request.headers.get("prefer", "")
         status_code = 200 if "return=representation" in prefer else 204
-        json_body = [self.bot_settings] if status_code == 200 else None
+        json_body = (
+            [self.bot_settings] * (1 if wants_live else self.cleanup_row_count)
+            if status_code == 200
+            else None
+        )
         return httpx.Response(status_code, json=json_body, request=request)
+
+    def _get_worker_heartbeats(self, request: httpx.Request) -> httpx.Response:
+        if self.worker_state == "stopped":
+            return httpx.Response(200, json=[], request=request)
+        if self.worker_state == "mixed_recent":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "status": "ok",
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "details": {"mock_providers": True},
+                    },
+                    {
+                        "status": "ok",
+                        "created_at": (
+                            datetime.now(UTC) - timedelta(seconds=30)
+                        ).isoformat(),
+                        "details": {"mock_providers": False},
+                    },
+                ],
+                request=request,
+            )
+        is_mock = self.worker_state == "fresh_mock"
+        created_at = datetime.now(UTC)
+        if self.worker_state == "stale_mock":
+            is_mock = True
+            created_at -= timedelta(seconds=121)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "status": "ok",
+                    "created_at": created_at.isoformat(),
+                    "details": {"mock_providers": is_mock},
+                }
+            ],
+            request=request,
+        )
 
     def _get_manual_commands(self, request: httpx.Request) -> httpx.Response:
         query = dict(request.url.params)
@@ -388,3 +757,15 @@ class _MockHostedLiveEnableState:
         self.command["reviewed_at"] = datetime.now(UTC).isoformat()
         self.command["applied_at"] = None
         return httpx.Response(200, json=[self.command], request=request)
+
+    def _delete_manual_commands(self, request: httpx.Request) -> httpx.Response:
+        if self.command is None:
+            return httpx.Response(200, json=[], request=request)
+        expected_status = dict(request.url.params).get("status")
+        if expected_status != f"eq.{self.command['status']}":
+            return httpx.Response(200, json=[], request=request)
+        deleted = dict(self.command)
+        status = deleted.get("status")
+        self.deleted_command_status = status if isinstance(status, str) else None
+        self.command = None
+        return httpx.Response(200, json=[deleted], request=request)

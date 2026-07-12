@@ -10,6 +10,7 @@ build/
 venv/
 __pycache__/
 .pytest_cache/
+apps/worker/.pytest-tmp*/
 .ruff_cache/
 .mypy_cache/
 *.pyc

@@ -34,6 +34,10 @@ Before deploy:
 No secrets are stored in `render.yaml`; secret env vars use `sync: false`.
 `ALERT_WEBHOOK_URL` is treated as a worker-only secret because provider tokens are
 often embedded in webhook URLs.
+Production uses Python `3.12.13` and installs `apps/worker/requirements.lock`
+with `--require-hashes --only-binary=:all:`. Update the lock only through a
+reviewed dependency change; never make Render resolve the ranged
+`requirements.txt` directly.
 
 ## Startup Smoke And Schema Compatibility
 
@@ -79,11 +83,21 @@ persisted.
 If the operator uses a Render deploy hook instead of the dashboard, keep the
 hook URL in the operator shell only as `RENDER_DEPLOY_HOOK_URL`. The URL is a
 secret because it contains the deploy token. Triggering is still a manual action:
-the helper refuses to call the hook unless `--yes` is present, appends the
-current commit as `ref=<sha>`, accepts only `https://api.render.com/deploy/...`
-hook URLs, polls hosted `worker_heartbeats` until the expected release is
-observed, and never prints the hook URL, token, response body, or full commit
-hash.
+the helper refuses to call the hook unless `--yes` is present, atomically sets
+the hosted `deployment_lock`, disables `enabled` and `live_order_allowed`, and
+waits for a fresh heartbeat that reports the same lock target before calling
+Render. It appends the current commit as `ref=<sha>`, accepts only
+`https://api.render.com/deploy/...` hook URLs, and releases the database lock
+only after a fresh healthy heartbeat reports both the expected release and the
+same deployment target. A timeout or hook/unlock failure leaves the lock in
+place. After Render accepts the hook, the helper records
+`deployment_triggered_at`; only a heartbeat created strictly after that DB
+timestamp may release the lock. A parallel deployment start is rejected. If an
+operator determines a failed deployment will not be resumed, the service-role
+only `abort_worker_deployment(target_sha)` RPC clears the matching lock while
+keeping the bot disabled and records a completion boundary that requires a new
+live approval. The command never accepts the hook URL on the command line and never
+prints the URL, token, response body, or full commit hash.
 
 ```bash
 python -m app.tools.redeploy_render_worker --repo-root . --yes
@@ -110,7 +124,12 @@ Before any live-mode consideration, run:
 python -m app.tools.run_live_alert_drill_once
 python -m app.tools.run_live_incident_response_drill_once --require-ack --ack-timeout-sec 300
 python supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
-python supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+# The env/env-files must also define staging/production project refs and
+# SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET=staging.
+python supabase/verify_hosted_live_enable_flow.py \
+  --env-file apps/worker/.env \
+  --env-file apps/desktop/.env.local \
+  --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
 python -m app.tools.verify_provider_lifecycle_evidence --evidence path/to/provider_lifecycle_evidence.json --verify-remote-artifacts
 python -m app.tools.verify_incident_response_evidence --incident-output-file path/to/incident_output.txt --incident-channel-evidence path/to/incident_channel_evidence.json --verify-remote-channel-evidence
 python -m app.tools.verify_system_order_scope_evidence --evidence path/to/system_order_scope_evidence.json --verify-remote-evidence
@@ -138,7 +157,9 @@ collected, decoded, or read, the verifier fails closed with
 `security_scan.source_binding_unavailable`; this is not live-readiness evidence.
 `redeploy_render_worker` prints both `FINAL=PASS render_deploy_hook` and
 `FINAL=PASS render_worker_redeploy` only after the hosted heartbeat observes the
-current commit. `verify_worker_release_freshness` separately proves dashboard
+current commit. Its final line also reports `pause_attempts`,
+`deployment_locked=1`, and `deployment_unlocked=1`; any other unlock result is
+fail-closed. `verify_worker_release_freshness` separately proves dashboard
 deploys by comparing hosted `worker_heartbeats.details.release_sha` with local
 Git `HEAD` and by rejecting a missing, mismatched, stale, or future heartbeat. A
 missing local Render CLI, a successful push, or a hook HTTP 200 alone is not
@@ -152,7 +173,9 @@ and missing live-system-order-count scope acceptance scenarios, with
 The incident response command must be run with the real Render
 `ALERT_WEBHOOK_URL` and a human operator watching the incident channel. It must
 return `FINAL=PASS live_incident_response_drill` with `delivered=4`,
-`max_latency_ms<=2000`, `acknowledged=true`, and `ack_latency_ms<=300000`. A
+`max_latency_ms<=2000`, `acknowledged=true`, `ack_latency_ms<=300000`, and
+`transport=real`. ACK-gated execution refuses to start without the real webhook.
+A
 local mock webhook, slow delivery line, scripted ACK, or ACK attributed to
 automation instead of a human operator does not prove live incident readiness.
 Retain a redacted incident-channel evidence manifest with
@@ -175,7 +198,7 @@ missing human ACK metadata, automated ACK operator identities, extra incident
 final-output metrics, suffixed incident check names, or duplicate incident final-output metrics are not
 live-readiness evidence. The captured
 `live_incident_response_drill` final line must use that exact check-name token and may contain only `delivered`,
-`max_latency_ms`, `acknowledged`, `ack_latency_ms`, and `drill_id`, with
+`max_latency_ms`, `acknowledged`, `ack_latency_ms`, `drill_id`, and `transport`, with
 `max_latency_ms<=2000` and `ack_latency_ms<=300000`; raw channel payloads and
 operator notes must stay in retained artifacts referenced by HTTPS URI and
 SHA-256.
@@ -204,6 +227,16 @@ and return `FINAL=PASS hosted_live_enable_flow` with all seven gate metrics set 
 `1`: requester admin, reviewer admin, request created, self-review denied, review
 accepted, activation consumed once, and second activation denied. `FINAL=SKIP
 hosted_live_enable_env_missing` is not live-readiness evidence.
+It requires `--confirm-staging-project` to exactly repeat the configured staging
+project ref. Before the first mutation, a `status=ok`,
+`details.mock_providers=true` heartbeat must be no older than 120 seconds and
+every heartbeat in the recent 3,720-second isolation window must be mock-backed.
+Missing, stale, truncated, or real-provider heartbeat history blocks the drill.
+Cleanup is successful only when
+PostgREST returns exactly the singleton `bot_settings` row in paper-disabled
+state. A command created by a failed drill is deleted only while it is still
+unapplied and only after its exact ID, status, and verifier payload are
+revalidated; the audit trigger retains the delete event.
 Its `SUPABASE_URL` is subject to the same `.supabase.co` project origin restrictions, and
 failure output must redact configured publishable/secret keys and both admin JWTs.
 The requester/reviewer JWTs must be distinct from each other and must not reuse

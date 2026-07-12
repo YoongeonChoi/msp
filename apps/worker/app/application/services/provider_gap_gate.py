@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
-from urllib.request import Request, urlopen
+
+from app.infrastructure.retained_https import fetch_retained_https
 
 ALLOWED_PROVIDER_GAP_STATUSES = {
     "partial-system-only-accepted-fail-closed",
@@ -493,12 +494,12 @@ def _default_remote_provider_gap_artifact_fetcher(
     uri: str,
     timeout_seconds: int,
 ) -> bytes:
-    request = Request(
+    return fetch_retained_https(
         uri,
-        headers={"User-Agent": "kr-auto-trading-lab-live-readiness-verifier"},
+        timeout_seconds,
+        max_bytes=MAX_PROVIDER_GAP_REMOTE_ARTIFACT_BYTES,
+        user_agent="kr-auto-trading-lab-live-readiness-verifier",
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return cast(bytes, response.read(MAX_PROVIDER_GAP_REMOTE_ARTIFACT_BYTES + 1))
 
 
 def _reject_unknown_keys(

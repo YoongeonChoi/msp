@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -37,3 +38,5 @@ class StrategyVersion:
     weights: StrategyWeights
     buy_threshold: float
     sell_threshold: float
+    approved_by: UUID | None = None
+    approved_at: datetime | None = None

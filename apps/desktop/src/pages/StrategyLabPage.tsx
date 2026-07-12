@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -17,6 +17,7 @@ import {
   reviewAiUpgradeCandidate,
   updateDraftStrategyJson
 } from "../lib/supabaseData";
+import type { StrategyJsonPatch } from "../lib/supabaseData";
 import {
   formatKst,
   formatNumber,
@@ -27,6 +28,12 @@ import {
   summarizeJson
 } from "../lib/formatters";
 import { useAdminAccess } from "../lib/useAdminAccess";
+import {
+  strategyWeightFields,
+  strategyWeightFormFromRecord,
+  validateStrategyWeightForm
+} from "../lib/strategyWeights";
+import type { StrategyWeightForm } from "../lib/strategyWeights";
 import type {
   AiUpgradeCandidateRow,
   BacktestRunRow,
@@ -46,12 +53,13 @@ import {
   SectionTitle
 } from "../components/ui";
 
-const editableStrategyStatuses = new Set(["draft", "proposed"]);
+const editableStrategyStatuses = new Set(["draft"]);
 const reviewableCandidateStatuses = new Set(["proposed", "backtesting"]);
 
 export function StrategyLabPage() {
   const queryClient = useQueryClient();
   const adminAccess = useAdminAccess();
+  const [selectedEditableStrategyId, setSelectedEditableStrategyId] = useState("");
   const strategies = useQuery({
     queryKey: ["strategy_versions", "strategy_lab"],
     queryFn: () => fetchStrategyVersions(30),
@@ -78,25 +86,15 @@ export function StrategyLabPage() {
     refetchInterval: 60_000
   });
 
-  const currentStrategy = useMemo(
-    () => selectCurrentStrategy(strategies.data ?? []),
-    [strategies.data]
-  );
+  const strategyRows = strategies.data ?? [];
+  const currentStrategy = selectCurrentStrategy(strategyRows);
+  const editableStrategies = strategyRows.filter((strategy) => editableStrategyStatuses.has(strategy.status));
+  const selectedEditableStrategy =
+    editableStrategies.find((strategy) => strategy.id === selectedEditableStrategyId) ?? editableStrategies[0] ?? null;
   const performance = useMemo(
     () => summarizePerformance(outcomes.data ?? [], orders.data ?? []),
     [outcomes.data, orders.data]
   );
-
-  const [weightsText, setWeightsText] = useState("{}");
-  const [paramsText, setParamsText] = useState("{}");
-
-  useEffect(() => {
-    if (!currentStrategy) {
-      return;
-    }
-    setWeightsText(formatJson(currentStrategy.weightsJson));
-    setParamsText(formatJson(currentStrategy.paramsJson));
-  }, [currentStrategy]);
 
   const strategyMutation = useMutation({
     mutationFn: updateDraftStrategyJson,
@@ -133,25 +131,6 @@ export function StrategyLabPage() {
           strategy={currentStrategy}
           isLoading={strategies.isLoading}
           isError={strategies.isError}
-          weightsText={weightsText}
-          paramsText={paramsText}
-          onWeightsTextChange={setWeightsText}
-          onParamsTextChange={setParamsText}
-          isSaving={strategyMutation.isPending}
-          onSave={() => {
-            if (!currentStrategy) {
-              return;
-            }
-            const weightsJson = parseJsonRecord(weightsText);
-            const paramsJson = parseJsonRecord(paramsText);
-            if (!weightsJson || !paramsJson) {
-              window.alert("weights_json 또는 params_json이 올바른 JSON object가 아닙니다.");
-              return;
-            }
-            if (window.confirm("draft/proposed 전략 JSON만 저장합니다. live 배포나 주문 권한은 변경하지 않습니다.")) {
-              strategyMutation.mutate({ id: currentStrategy.id, weightsJson, paramsJson });
-            }
-          }}
         />
         <PaperPerformanceSection
           performance={performance}
@@ -160,6 +139,18 @@ export function StrategyLabPage() {
           isError={outcomes.isError || orders.isError}
         />
       </div>
+
+      <DraftStrategySection
+        strategies={editableStrategies}
+        selectedStrategy={selectedEditableStrategy}
+        isLoading={strategies.isLoading}
+        isError={strategies.isError}
+        isSaving={strategyMutation.isPending}
+        saveError={strategyMutation.error}
+        canEdit={adminAccess.isAdmin}
+        onSelectedStrategyIdChange={setSelectedEditableStrategyId}
+        onSave={(input) => strategyMutation.mutate(input)}
+      />
 
       <BacktestSection data={backtests.data} isLoading={backtests.isLoading} isError={backtests.isError} />
 
@@ -186,30 +177,17 @@ export function StrategyLabPage() {
 function CurrentStrategySection({
   strategy,
   isLoading,
-  isError,
-  weightsText,
-  paramsText,
-  onWeightsTextChange,
-  onParamsTextChange,
-  isSaving,
-  onSave
+  isError
 }: {
   readonly strategy: StrategyVersionRow | null;
   readonly isLoading: boolean;
   readonly isError: boolean;
-  readonly weightsText: string;
-  readonly paramsText: string;
-  readonly onWeightsTextChange: (value: string) => void;
-  readonly onParamsTextChange: (value: string) => void;
-  readonly isSaving: boolean;
-  readonly onSave: () => void;
 }) {
-  const canEdit = strategy ? editableStrategyStatuses.has(strategy.status) : false;
   return (
     <Panel>
       <SectionTitle
         title="현재 전략"
-        detail={strategy ? <StatusPill status={strategy.status} /> : <Pill tone="warning">전략 없음</Pill>}
+        detail={strategy ? <StatusPill status={strategy.status} /> : <Pill tone="warning">paper/active 없음</Pill>}
       />
       {isLoading ? (
         <LoadingState label="strategy_versions를 불러오는 중" />
@@ -218,7 +196,7 @@ function CurrentStrategySection({
         <ErrorState message="strategy_versions를 읽지 못했습니다." />
       ) : null}
       {!isLoading && !isError && !strategy ? (
-        <EmptyState title="전략 버전 없음" detail="strategy_v1_weighted_factor seed 또는 paper 전략을 먼저 추가하세요." />
+        <EmptyState title="현재 운영 전략 없음" detail="paper 또는 active 상태의 전략이 등록되면 여기에 표시됩니다." />
       ) : null}
       {!isLoading && !isError && strategy ? (
         <div className="space-y-4">
@@ -228,30 +206,213 @@ function CurrentStrategySection({
             <KeyValue label="strategy_type" value={strategy.strategyType} />
             <KeyValue label="deployed_at" value={formatKst(strategy.deployedAt ?? strategy.approvedAt)} />
             <KeyValue label="created_at" value={formatKst(strategy.createdAt)} />
-            <KeyValue
-              label="편집 가능"
-              value={canEdit ? <Pill tone="info">draft/proposed</Pill> : <Pill tone="neutral">읽기 전용</Pill>}
-            />
+            <KeyValue label="편집" value={<Pill tone="neutral">읽기 전용</Pill>} />
           </div>
-
-          {canEdit ? (
-            <div className="grid gap-3 lg:grid-cols-2">
-              <JsonEditor label="weights_json" value={weightsText} onChange={onWeightsTextChange} />
-              <JsonEditor label="params_json" value={paramsText} onChange={onParamsTextChange} />
-              <button className={pageButtonClass("neutral")} disabled={isSaving} onClick={onSave}>
-                <Save size={16} aria-hidden="true" />
-                JSON 저장
-              </button>
-            </div>
-          ) : (
-            <div className="grid gap-3 lg:grid-cols-2">
-              <ReadonlyJson title="weights_json" value={strategy.weightsJson} />
-              <ReadonlyJson title="params_json" value={strategy.paramsJson} />
-            </div>
-          )}
+          <div className="grid gap-3 lg:grid-cols-2">
+            <ReadonlyJson title="weights_json" value={strategy.weightsJson} />
+            <ReadonlyJson title="params_json" value={strategy.paramsJson} />
+          </div>
         </div>
       ) : null}
     </Panel>
+  );
+}
+
+function DraftStrategySection({
+  strategies,
+  selectedStrategy,
+  isLoading,
+  isError,
+  isSaving,
+  saveError,
+  canEdit,
+  onSelectedStrategyIdChange,
+  onSave
+}: {
+  readonly strategies: readonly StrategyVersionRow[];
+  readonly selectedStrategy: StrategyVersionRow | null;
+  readonly isLoading: boolean;
+  readonly isError: boolean;
+  readonly isSaving: boolean;
+  readonly saveError: Error | null;
+  readonly canEdit: boolean;
+  readonly onSelectedStrategyIdChange: (id: string) => void;
+  readonly onSave: (input: StrategyJsonPatch) => void;
+}) {
+  return (
+    <Panel>
+      <SectionTitle title="Draft 가중치 편집" detail={<Pill tone="info">draft · Paper 전용</Pill>} />
+      <p className="mb-4 text-sm text-muted">
+        현재 paper/active 전략은 위에서 읽기만 합니다. 여기서는 선택한 draft 버전만 수정하며 broker 또는 Live 설정은 호출하지 않습니다.
+      </p>
+      {isLoading ? <LoadingState label="편집 가능한 전략을 불러오는 중" /> : null}
+      {isError ? <ErrorState message="strategy_versions를 읽지 못했습니다." /> : null}
+      {!isLoading && !isError && strategies.length === 0 ? (
+        <EmptyState title="편집 가능한 전략 없음" detail="draft 상태의 전략 버전을 먼저 준비하세요." />
+      ) : null}
+      {!isLoading && !isError && selectedStrategy ? (
+        <div className="space-y-4">
+          <label className="block text-sm">
+            <span className="font-semibold text-ink">편집할 draft 전략</span>
+            <select
+              aria-label="편집할 전략"
+              value={selectedStrategy.id}
+              disabled={!canEdit}
+              onChange={(event) => onSelectedStrategyIdChange(event.currentTarget.value)}
+              className="mt-2 w-full rounded-md border border-line bg-white px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+            >
+              {strategies.map((strategy) => (
+                <option key={strategy.id} value={strategy.id}>
+                  {strategy.version} · {strategy.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          <DraftStrategyEditor
+            key={selectedStrategy.id}
+            strategy={selectedStrategy}
+            isSaving={isSaving}
+            canEdit={canEdit}
+            onSave={onSave}
+          />
+          {saveError ? <p className="text-sm text-red-700">draft 전략 저장에 실패했습니다.</p> : null}
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
+
+function DraftStrategyEditor({
+  strategy,
+  isSaving,
+  canEdit,
+  onSave
+}: {
+  readonly strategy: StrategyVersionRow;
+  readonly isSaving: boolean;
+  readonly canEdit: boolean;
+  readonly onSave: (input: StrategyJsonPatch) => void;
+}) {
+  const [weightsForm, setWeightsForm] = useState<StrategyWeightForm>(() =>
+    strategyWeightFormFromRecord(strategy.weightsJson)
+  );
+  const [paramsText, setParamsText] = useState(() => formatJson(strategy.paramsJson));
+  const weightValidation = validateStrategyWeightForm(weightsForm);
+  const paramsJson = parseJsonRecord(paramsText);
+  const weightsChanged =
+    weightValidation.ok &&
+    strategyWeightFields.some(({ key }) => numberValue(strategy.weightsJson[key]) !== weightValidation.values[key]);
+  const paramsChanged = paramsJson !== null && JSON.stringify(paramsJson) !== JSON.stringify(strategy.paramsJson);
+  const hasChanges = weightsChanged || paramsChanged;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill status={strategy.status} />
+        <span className="text-sm text-muted">{strategy.versionName}</span>
+      </div>
+
+      <div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-ink">가중치</h3>
+          <Pill tone={weightValidation.ok ? "safe" : "warning"}>
+            합계 {weightValidation.sum === null ? "-" : weightValidation.sum.toFixed(6)} / 1.000000
+          </Pill>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {strategyWeightFields.map((field) => (
+            <StrategyWeightInput
+              key={field.key}
+              label={field.label}
+              previousValue={numberValue(strategy.weightsJson[field.key])}
+              value={weightsForm[field.key]}
+              disabled={!canEdit}
+              onChange={(value) =>
+                setWeightsForm((current) => ({
+                  ...current,
+                  [field.key]: value
+                }))
+              }
+            />
+          ))}
+        </div>
+        {!weightValidation.ok ? <p className="mt-2 text-sm text-amber-800">{weightValidation.message}</p> : null}
+      </div>
+
+      <div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-ink">전략 파라미터</h3>
+          <Pill tone={paramsJson ? "safe" : "warning"}>{paramsJson ? "JSON object 유효" : "JSON object 확인 필요"}</Pill>
+        </div>
+        <JsonEditor label="params_json" value={paramsText} onChange={setParamsText} disabled={!canEdit} />
+      </div>
+
+      <div className="rounded-md border border-line bg-slate-50 p-3 text-sm">
+        <p className="font-semibold text-ink">변경 요약</p>
+        <p className="mt-1 text-muted">
+          가중치 {weightsChanged ? "변경됨" : "변경 없음"} · params {paramsChanged ? "변경됨" : "변경 없음"}
+        </p>
+      </div>
+
+      <button
+        className={pageButtonClass("neutral")}
+        disabled={!canEdit || isSaving || !weightValidation.ok || paramsJson === null || !hasChanges}
+        onClick={() => {
+          if (!editableStrategyStatuses.has(strategy.status)) {
+            window.alert("draft 전략만 저장할 수 있습니다.");
+            return;
+          }
+          if (!weightValidation.ok) {
+            window.alert(weightValidation.message);
+            return;
+          }
+          if (!paramsJson) {
+            window.alert("params_json이 올바른 JSON object가 아닙니다.");
+            return;
+          }
+          if (window.confirm("선택한 draft 전략만 저장합니다. live 배포나 주문 권한은 변경하지 않습니다.")) {
+            onSave({ id: strategy.id, weightsJson: { ...weightValidation.values }, paramsJson });
+          }
+        }}
+      >
+        <Save size={16} aria-hidden="true" />
+        Draft 저장
+      </button>
+    </div>
+  );
+}
+
+function StrategyWeightInput({
+  label,
+  previousValue,
+  value,
+  disabled,
+  onChange
+}: {
+  readonly label: string;
+  readonly previousValue: number | null;
+  readonly value: string;
+  readonly disabled: boolean;
+  readonly onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="flex items-center justify-between gap-2 font-medium text-muted">
+        <span>{label}</span>
+        <span className="text-xs">저장 전 {formatNumber(previousValue, 3)}</span>
+      </span>
+      <input
+        type="number"
+        min="0"
+        max="1"
+        step="0.01"
+        inputMode="decimal"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        className="mt-1 w-full rounded-md border border-line px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+      />
+    </label>
   );
 }
 
@@ -497,10 +658,12 @@ function AiCandidatesSection({
 function JsonEditor({
   label,
   value,
+  disabled = false,
   onChange
 }: {
   readonly label: string;
   readonly value: string;
+  readonly disabled?: boolean;
   readonly onChange: (value: string) => void;
 }) {
   return (
@@ -508,6 +671,7 @@ function JsonEditor({
       <span className="font-semibold text-ink">{label}</span>
       <textarea
         value={value}
+        disabled={disabled}
         onChange={(event) => onChange(event.currentTarget.value)}
         className="mt-2 min-h-56 w-full rounded-md border border-line bg-slate-50 px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-slate-400"
         spellCheck={false}
@@ -577,13 +741,7 @@ function CandidateText({
 }
 
 function selectCurrentStrategy(rows: readonly StrategyVersionRow[]): StrategyVersionRow | null {
-  return (
-    rows.find((row) => row.status === "paper") ??
-    rows.find((row) => row.status === "active") ??
-    rows.find((row) => row.version === "strategy_v1_weighted_factor") ??
-    rows[0] ??
-    null
-  );
+  return rows.find((row) => row.status === "paper") ?? rows.find((row) => row.status === "active") ?? null;
 }
 
 interface PerformanceSummary {

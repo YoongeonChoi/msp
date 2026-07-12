@@ -16,6 +16,8 @@ export const botSettingsSchema = z.object({
   enabled: z.boolean().default(false),
   mode: tradingModeSchema.default("paper"),
   live_order_allowed: z.boolean().default(false),
+  deployment_lock: z.boolean().default(false),
+  deployment_target_sha: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/).nullable().default(null),
   max_order_amount_krw: z.number().int().positive().max(100000000).default(100000),
   max_daily_loss_pct: z.number().positive().max(0.2).default(0.02),
   max_daily_order_count: z.number().int().positive().max(1000).default(10),

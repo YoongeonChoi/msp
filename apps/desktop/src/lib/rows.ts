@@ -12,6 +12,10 @@ export interface BotSettings {
   readonly enabled: boolean;
   readonly mode: "paper" | "live";
   readonly liveOrderAllowed: boolean;
+  readonly deploymentLock: boolean;
+  readonly deploymentTargetSha: string | null;
+  readonly deploymentStartedAt: string | null;
+  readonly deploymentCompletedAt: string | null;
   readonly maxOrderAmountKrw: number;
   readonly maxDailyLossPct: number;
   readonly maxDailyOrderCount: number;
@@ -221,6 +225,10 @@ export function mapBotSettings(value: unknown): BotSettings {
     enabled: booleanValue(row.enabled),
     mode: stringValue(row.mode, "paper") === "live" ? "live" : "paper",
     liveOrderAllowed: booleanValue(row.live_order_allowed),
+    deploymentLock: booleanValue(row.deployment_lock),
+    deploymentTargetSha: nullableString(row.deployment_target_sha),
+    deploymentStartedAt: nullableString(row.deployment_started_at),
+    deploymentCompletedAt: nullableString(row.deployment_completed_at),
     maxOrderAmountKrw: integerValue(row.max_order_amount_krw) ?? 100000,
     maxDailyLossPct: numberValue(row.max_daily_loss_pct) ?? 0.02,
     maxDailyOrderCount: integerValue(row.max_daily_order_count) ?? 10,

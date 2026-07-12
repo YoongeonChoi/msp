@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
 from app.tools.verify_live_readiness_evidence_bundle import (
     BundleValidationError,
     LiveReadinessEvidenceBundleSummary,
@@ -420,7 +421,10 @@ def collect_live_readiness_evidence_bundle(
     }
 
     try:
-        summary = verify_live_readiness_evidence_bundle(bundle)
+        summary = verify_live_readiness_evidence_bundle(
+            bundle,
+            current_time=reviewed_at,
+        )
     except BundleValidationError as exc:
         raise CollectorError(str(exc)) from exc
 
@@ -540,10 +544,10 @@ def _extract_single_final_line(output: str, name: str) -> str:
 
 def _load_security_scan_summary(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("security_scan_summary_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("security_scan_summary_json_invalid") from exc
     if not isinstance(payload, Mapping):
         raise CollectorError("security_scan_summary_must_be_object")
@@ -557,10 +561,10 @@ def _load_security_scan_summary(path: Path) -> dict[str, object]:
 
 def _load_provider_lifecycle_evidence(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("provider_lifecycle_evidence_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("provider_lifecycle_evidence_json_invalid") from exc
     if not isinstance(payload, dict):
         raise CollectorError("provider_lifecycle_evidence_must_be_object")
@@ -569,10 +573,10 @@ def _load_provider_lifecycle_evidence(path: Path) -> dict[str, object]:
 
 def _load_provider_gap_evidence(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("provider_gap_evidence_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("provider_gap_evidence_json_invalid") from exc
     if not isinstance(payload, dict):
         raise CollectorError("provider_gap_evidence_must_be_object")
@@ -582,10 +586,10 @@ def _load_provider_gap_evidence(path: Path) -> dict[str, object]:
 
 def _load_feature_evidence(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("feature_evidence_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("feature_evidence_json_invalid") from exc
     if not isinstance(payload, dict):
         raise CollectorError("feature_evidence_must_be_object")
@@ -727,10 +731,10 @@ def _run_git(repo_root: Path, *args: str) -> bytes:
 
 def _load_incident_channel_evidence(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("incident_channel_evidence_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("incident_channel_evidence_json_invalid") from exc
     if not isinstance(payload, Mapping):
         raise CollectorError("incident_channel_evidence_must_be_object")
@@ -744,10 +748,10 @@ def _load_incident_channel_evidence(path: Path) -> dict[str, object]:
 
 def _load_system_order_scope_evidence(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise CollectorError("system_order_scope_evidence_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise CollectorError("system_order_scope_evidence_json_invalid") from exc
     if not isinstance(payload, Mapping):
         raise CollectorError("system_order_scope_evidence_must_be_object")

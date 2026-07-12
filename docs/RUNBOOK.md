@@ -170,13 +170,16 @@ limit 50;
 
 Hosted Supabase readiness gate:
 
-1. After applying migrations through `0011_data_api_grants.sql` to a hosted
+1. After applying migrations through `0013_worker_deployment_lock.sql` to a hosted
    Supabase staging project, set these variables only in the worker/operator shell:
 
 ```bash
 SUPABASE_URL=...
 SUPABASE_PUBLISHABLE_KEY=...
 SUPABASE_SECRET_KEY=...
+SUPABASE_STAGING_PROJECT_REF=...
+SUPABASE_PRODUCTION_PROJECT_REF=...
+SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET=staging
 ```
 
 `VITE_SUPABASE_PUBLISHABLE_KEY` may be used instead of `SUPABASE_PUBLISHABLE_KEY`
@@ -217,15 +220,23 @@ FINAL=PASS hosted_supabase_live_readiness postgrest=1 anon_rpc_denied=2 service_
 ```bash
 SUPABASE_LIVE_REQUESTER_JWT=...
 SUPABASE_LIVE_REVIEWER_JWT=...
-python supabase/verify_hosted_live_enable_flow.py
-python supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local
+python supabase/verify_hosted_live_enable_flow.py \
+  --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
+python supabase/verify_hosted_live_enable_flow.py \
+  --env-file apps/worker/.env \
+  --env-file apps/desktop/.env.local \
+  --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
 ```
 
 On Windows:
 
 ```bash
-py supabase\verify_hosted_live_enable_flow.py
-py supabase\verify_hosted_live_enable_flow.py --env-file apps\worker\.env --env-file apps\desktop\.env.local
+py supabase\verify_hosted_live_enable_flow.py `
+  --confirm-staging-project $env:SUPABASE_STAGING_PROJECT_REF
+py supabase\verify_hosted_live_enable_flow.py `
+  --env-file apps\worker\.env `
+  --env-file apps\desktop\.env.local `
+  --confirm-staging-project $env:SUPABASE_STAGING_PROJECT_REF
 ```
 
 The command must print:
@@ -233,6 +244,22 @@ The command must print:
 ```text
 FINAL=PASS hosted_live_enable_flow requester_admin=1 reviewer_admin=1 request_created=1 self_review_denied=1 review_accepted=1 activation_consumed_once=1 second_activation_denied=1
 ```
+
+The verifier runs only against the project whose ref exactly matches
+`SUPABASE_STAGING_PROJECT_REF`, rejects the production ref, and accepts secret
+keys/JWTs only from process env or explicitly supplied ignored env files. Its
+cleanup is mandatory: failure to restore paper-disabled state is a failed gate.
+`--confirm-staging-project` is mandatory and must exactly repeat the staging
+project ref; it is intentionally not read from an env file. Before making any
+mutation, the verifier requires a `status=ok`, `details.mock_providers=true`
+heartbeat no older than 120 seconds and requires every heartbeat in the recent
+3,720-second isolation window to be mock-backed. Missing, stale, truncated, or
+real-provider heartbeat history fails the gate. Cleanup succeeds only when
+PostgREST returns exactly the singleton `bot_settings` row in
+`enabled=false`, `mode=paper`, and `live_order_allowed=false` state.
+If the drill fails after creating a command but before applying it, cleanup
+revalidates that exact command ID, status, and verifier payload before deleting
+it with the service role; the database audit trigger retains the delete event.
 
 The final live-readiness evidence bundle verifier independently requires the exact
 hosted Supabase metrics above. `hosted_supabase_live_readiness` must retain
@@ -635,7 +662,7 @@ py -m app.tools.run_live_incident_response_drill_once
 The non-blocking dry run must print:
 
 ```text
-FINAL=PASS live_incident_delivery_drill delivered=4 max_latency_ms=... ack_required=false
+FINAL=PASS live_incident_delivery_drill delivered=4 max_latency_ms=... ack_required=false transport=mock
 ```
 
 2. To produce live-readiness evidence, set the real worker-side
@@ -650,13 +677,15 @@ The operator must type the exact `ACK <drill_id>` phrase printed by the
 command. The command must then print:
 
 ```text
-FINAL=PASS live_incident_response_drill delivered=4 max_latency_ms=... acknowledged=true ack_latency_ms=... drill_id=...
+FINAL=PASS live_incident_response_drill delivered=4 max_latency_ms=... acknowledged=true ack_latency_ms=... drill_id=... transport=real
 ```
 
 The final live-readiness evidence bundle verifier requires `delivered=4`,
 `max_latency_ms<=2000`, `acknowledged=true`, `ack_latency_ms<=300000`, and a
 matching retained incident-channel `drill_id`. A slower incident delivery line
 is not live-readiness evidence even if the human ACK arrives before the timeout.
+The ACK-gated command refuses to run when `ALERT_WEBHOOK_URL` is absent, and the
+bundle rejects every incident line whose `transport` is not exactly `real`.
 The ACK must be attributed to a human operator; `operator_ack_by` identity
 segments such as `automation`, `bot`, `ci`, `github-actions`, `script`,
 `service-account`, or `system` are rejected as automated ACK evidence.
@@ -706,7 +735,8 @@ incident command
 `FINAL=PASS` line is also a closed contract: its check-name token must be exactly
 `live_incident_response_drill`, not a suffixed or preview variant, and it may contain
 only `delivered`, `max_latency_ms`, `acknowledged`, `ack_latency_ms`, and `drill_id`
-metrics, with `max_latency_ms<=2000` and `ack_latency_ms<=300000`. Extra or
+plus `transport` metrics, with `max_latency_ms<=2000`,
+`ack_latency_ms<=300000`, and `transport=real`. Extra or
 duplicate metrics such as webhook URLs, channel payloads, or ad hoc operator
 notes block live-mode consideration and must stay in retained channel evidence
 artifacts. With `--verify-remote-channel-evidence`, the verifier also fetches
@@ -855,9 +885,17 @@ If the operator uses a Render deploy hook instead of the Render dashboard, keep
 `RENDER_DEPLOY_HOOK_URL` only in the operator shell. It is a secret-bearing URL,
 so do not paste it into Git, logs, docs, retained evidence, or desktop env. The
 trigger remains manual: the helper requires `--yes`, sends only a POST to
-`https://api.render.com/deploy/...`, pins `ref` to the current Git commit, polls
-hosted `worker_heartbeats`, and prints only short release SHA values, HTTP
-status, heartbeat age, and attempt counts.
+`https://api.render.com/deploy/...`, pins `ref` to the current Git commit, and
+accepts the hook URL only from `RENDER_DEPLOY_HOOK_URL`. Before the POST it calls
+`begin_worker_deployment`, which atomically disables the bot and sets a target
+SHA lock, then waits for a worker heartbeat that has observed that lock. After
+the POST it polls for the expected release and calls
+`complete_worker_deployment`; timeout or verification failure leaves the lock
+set. `mark_worker_deployment_triggered` stores the DB timestamp of the accepted
+hook; `complete_worker_deployment` accepts only a heartbeat created strictly
+after it, and a second `begin_worker_deployment` is rejected while the lock is
+held. Output contains only short SHA values, HTTP status, heartbeat age, and
+attempt/lock state counts.
 
 ```bash
 python -m app.tools.redeploy_render_worker --repo-root . --yes
@@ -894,7 +932,7 @@ The security verifier must print:
 
 ```text
 FINAL=PASS render_deploy_hook expected_sha_short=<12hex> status_code=200
-FINAL=PASS render_worker_redeploy deploy_status_code=200 expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300 attempts=<n>
+FINAL=PASS render_worker_redeploy deploy_status_code=200 expected_sha_short=<12hex> observed_sha_short=<12hex> heartbeat_age_sec=<n> max_age_sec=300 attempts=<n> pause_attempts=<n> deployment_locked=1 deployment_unlocked=1
 FINAL=PASS security_scan_evidence scan_id=d4415550-5104-47e5-a896-32ca72005b89 worklist_rows=8 completion_receipts=8 candidate_findings=0 validation_receipts=0 attack_path_receipts=0 report_uri=https://...
 FINAL=PASS live_readiness_scorecard scorecard_security_scan=1 worklist_rows=8 candidate_findings=0 reportable_findings=0
 ```
@@ -1237,7 +1275,9 @@ select
   (select count(*) from public.decision_snapshots) as decision_snapshots_count;
 ```
 
-4. Run pending migrations through `0005_schema_alignment.sql`.
+4. Use `supabase/README.md` as the canonical migration list and run every
+   pending migration in order through `0013_worker_deployment_lock.sql`; do not skip
+   any intermediate migration.
 5. Verify the singleton:
 
 ```sql

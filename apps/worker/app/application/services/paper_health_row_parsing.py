@@ -90,7 +90,7 @@ def age_seconds(row: JsonObject | None, key: str, now: datetime) -> int | None:
     value = datetime_value(row.get(key))
     if value is None:
         return None
-    return max(0, int((now - value).total_seconds()))
+    return int((now - value).total_seconds())
 
 
 def first_present(row: Mapping[str, JsonValue], keys: Sequence[str]) -> JsonValue:

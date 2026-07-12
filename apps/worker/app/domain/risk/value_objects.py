@@ -17,12 +17,14 @@ class RiskInput:
     now: datetime
     provider_health: Mapping[str, bool]
     market_open: bool | None
-    existing_position_pct: float
-    sector_position_pct: float
-    critical_news_risk: bool
+    existing_position_pct: float | None
+    sector_position_pct: float | None
+    critical_news_risk: bool | None
     liquidity_ok: bool | None
     volatility_ok: bool | None
     cooldown_active: bool
     duplicate_order: bool
     strategy_version_id: UUID | None
+    strategy_status: str
+    strategy_approved: bool
     shutdown_requested: bool = False

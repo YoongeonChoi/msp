@@ -4,6 +4,7 @@ from .cooldown_policy import CooldownPolicy
 from .duplicate_order_policy import DuplicateOrderPolicy
 from .liquidity_policy import LiquidityPolicy
 from .live_permission_policy import LivePermissionPolicy
+from .live_strategy_approval_policy import LiveStrategyApprovalPolicy
 from .market_open_policy import MarketOpenPolicy
 from .max_daily_loss_policy import MaxDailyLossPolicy
 from .max_daily_order_count_policy import MaxDailyOrderCountPolicy
@@ -25,6 +26,7 @@ __all__ = [
     "DuplicateOrderPolicy",
     "LiquidityPolicy",
     "LivePermissionPolicy",
+    "LiveStrategyApprovalPolicy",
     "MarketOpenPolicy",
     "MaxDailyLossPolicy",
     "MaxDailyOrderCountPolicy",

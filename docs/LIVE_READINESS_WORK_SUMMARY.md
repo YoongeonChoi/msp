@@ -1,11 +1,52 @@
 # Live Readiness Work Summary
 
-Generated: 2026-07-01 KST
+Generated: 2026-07-12 KST
 
 This document summarizes the live-readiness hardening work completed in this
 checkpoint. It is a handoff summary for commit review, not a live-trading
 approval. The authoritative readiness score remains
 `docs/LIVE_READINESS_SCORECARD.md`.
+
+## 2026-07-12 Full Safety And Security Hardening
+
+- Added DB-enforced runtime/strategy invariants and a deployment lock through
+  migrations `0012` and `0013`. Sticky live approval reuse, invalid risk limits,
+  mutation of approved strategies, pre-deploy approvals, and unlock without a
+  fresh matching worker heartbeat now fail closed.
+- Bound broker responses to the submitted client order id, made live order
+  state transitions atomic, rejected future/stale provider evidence, bounded
+  retained downloads/decoding, and required complete provider portfolio data.
+- Live cycles now refresh time, settings, provider/calendar state, account,
+  positions, strategy approval, and quote evidence after feature collection and
+  immediately before the final `RiskService` decision. A market close or gate
+  change during feature collection therefore blocks before broker execution.
+- Live cancellation atomically reserves the order as
+  `unknown_requires_manual_check` before calling the broker. Only the reservation
+  winner may issue the cancel, so concurrent operator requests cannot send
+  duplicate cancellation calls; uncertain outcomes remain visible for manual
+  recovery.
+- Supabase settings reads now require exactly one strictly typed singleton row,
+  finite bounded numerics, valid live-state tuples, and no bool/int coercion.
+  Runtime configuration applies the same bounded numeric policy at startup.
+- Removed secret-bearing CLI arguments from deploy and hosted verifier paths.
+  The hosted live-enable drill is staging-only, requires an exact typed project
+  confirmation, requires a fresh healthy mock heartbeat plus an all-mock recent
+  isolation window, and always treats missing/stale/real-provider history or an
+  inexact cleanup as fatal.
+- ACK-gated incident evidence now requires a real webhook transport. Mock
+  delivery remains regression coverage only and cannot enter the final bundle.
+- Production Python dependencies are exact and hash-locked in
+  `apps/worker/requirements.lock`; Render uses Python `3.12.13` and installs only
+  hashed binary artifacts.
+- OpenDART XML is parsed with `defusedxml`, and CI now treats `npm audit`,
+  `pip-audit`, and Bandit as blocking gates. Third-party GitHub Actions are
+  pinned to immutable full commit SHAs.
+- Centralized RLS/workflow safety checks cover both `.yml` and `.yaml`, the full
+  protected secret set, `CREATE TABLE IF NOT EXISTS`, multiline policies, and
+  default write-capable policies.
+- This checkpoint still does not claim live readiness: real hosted Supabase,
+  Render, provider, incident-channel, and retained artifact evidence remain
+  mandatory.
 
 ## 2026-07-01 Continuous Worker Fail-Closed Loop
 
@@ -30,8 +71,8 @@ approval. The authoritative readiness score remains
 ## 2026-07-01 Render Redeploy Freshness Gate
 
 - Added `app.tools.redeploy_render_worker`, an operator command that requires
-  `--yes`, reads `RENDER_DEPLOY_HOOK_URL` only from the operator shell or
-  `--hook-url`, triggers the Render deploy hook with `ref=<current HEAD>`, and
+  `--yes`, reads the hook URL only from `RENDER_DEPLOY_HOOK_URL`, triggers the
+  Render deploy hook with `ref=<current HEAD>`, and
   polls hosted `worker_heartbeats` until `release_sha` matches the expected
   commit.
 - The command refuses to trigger if hosted Supabase verification env is missing,
@@ -155,7 +196,7 @@ approval. The authoritative readiness score remains
 - Added `app.tools.trigger_render_deploy_hook`, a manual operator tool for
   triggering a Render deploy hook without enabling automatic Render deploys.
 - The tool requires `--yes` before any network call, reads the secret-bearing
-  hook URL from `RENDER_DEPLOY_HOOK_URL` or `--hook-url`, pins `ref` to the
+  hook URL only from `RENDER_DEPLOY_HOOK_URL`, pins `ref` to the
   expected Git commit, and only allows `https://api.render.com/deploy/...`.
 - Output is bounded to a single `FINAL` line and never prints the hook URL,
   secret query token, response body, or full commit hash.
@@ -341,7 +382,7 @@ The latest local verification recorded before this handoff included:
 - `py supabase/verify_hosted_live_readiness.py --env-file apps/worker/.env --env-file apps/desktop/.env.local`:
   expected `FINAL=SKIP hosted_supabase_env_missing` with only
   `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
-- `py supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local`:
+- `py supabase/verify_hosted_live_enable_flow.py --env-file apps/worker/.env --env-file apps/desktop/.env.local --confirm-staging-project <staging-ref>`:
   expected `FINAL=SKIP hosted_live_enable_env_missing` with only
   `SUPABASE_LIVE_REQUESTER_JWT,SUPABASE_LIVE_REVIEWER_JWT` missing
 - `py -m app.tools.paper_health_report` from `apps/worker`: expected

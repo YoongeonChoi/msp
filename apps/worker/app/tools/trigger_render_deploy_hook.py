@@ -5,6 +5,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +60,7 @@ def main(
     environ: Mapping[str, str] | None = None,
     client: httpx.Client | None = None,
 ) -> int:
+    del client
     args = _parse_args(argv)
     env = environ if environ is not None else os.environ
     try:
@@ -68,7 +70,7 @@ def main(
         print(f"FINAL=FAIL render_deploy_hook reason={exc}")
         return 1
 
-    hook_url = args.hook_url or env.get(RENDER_DEPLOY_HOOK_ENV)
+    hook_url = env.get(RENDER_DEPLOY_HOOK_ENV)
     if not hook_url:
         print(
             "FINAL=SKIP render_deploy_hook "
@@ -83,22 +85,12 @@ def main(
         )
         return 2
 
-    try:
-        result = trigger_render_deploy_hook(
-            hook_url,
-            expected_sha=normalized_sha,
-            timeout_sec=args.timeout_sec,
-            client=client,
-        )
-    except RenderDeployHookError as exc:
-        print(
-            "FINAL=FAIL render_deploy_hook "
-            f"reason={exc} expected_sha_short={_short_sha(normalized_sha)}"
-        )
-        return 1
-
-    print(_format_result(result))
-    return 0
+    print(
+        "FINAL=SKIP render_deploy_hook "
+        "reason=locked_redeploy_required tool=redeploy_render_worker "
+        f"expected_sha_short={_short_sha(normalized_sha)}"
+    )
+    return 2
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -108,7 +100,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "without printing the hook URL or secret query token."
         )
     )
-    parser.add_argument("--hook-url", default=None, help="Render deploy hook URL")
+    _reject_secret_cli_options(argv, parser, {"--hook-url"})
     parser.add_argument(
         "--expected-sha",
         default=None,
@@ -124,6 +116,18 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _reject_secret_cli_options(
+    argv: Sequence[str] | None,
+    parser: argparse.ArgumentParser,
+    forbidden_options: set[str],
+) -> None:
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    for token in raw_args:
+        option = token.partition("=")[0]
+        if option in forbidden_options:
+            parser.error(f"{option} is forbidden; use {RENDER_DEPLOY_HOOK_ENV}")
+
+
 def _format_result(result: RenderDeployHookResult) -> str:
     return (
         "FINAL=PASS render_deploy_hook "
@@ -135,6 +139,10 @@ def _format_result(result: RenderDeployHookResult) -> str:
 def _render_deploy_hook_url_with_ref(hook_url: str, expected_sha: str) -> str:
     normalized_sha = _normalize_sha(expected_sha, "expected_sha")
     parsed = urlparse(hook_url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RenderDeployHookError("render_deploy_hook_url_invalid") from exc
     if parsed.scheme != "https":
         raise RenderDeployHookError("render_deploy_hook_url_invalid")
     if parsed.hostname != "api.render.com":
@@ -144,6 +152,8 @@ def _render_deploy_hook_url_with_ref(hook_url: str, expected_sha: str) -> str:
     if not parsed.path.startswith("/deploy/"):
         raise RenderDeployHookError("render_deploy_hook_url_invalid")
     if parsed.fragment:
+        raise RenderDeployHookError("render_deploy_hook_url_invalid")
+    if port not in {None, 443}:
         raise RenderDeployHookError("render_deploy_hook_url_invalid")
     query_pairs = [
         (key, value)

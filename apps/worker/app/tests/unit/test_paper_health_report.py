@@ -87,6 +87,16 @@ async def test_report_fails_if_heartbeat_stale() -> None:
     assert "heartbeat_stale" in _finding_codes(report)
 
 
+async def test_report_fails_if_heartbeat_timestamp_is_future() -> None:
+    rows = _normal_rows(heartbeat_age=timedelta(seconds=-1))
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+
+    assert report.result == PaperHealthResult.FAIL
+    assert "heartbeat_future" in _finding_codes(report)
+
+
 async def test_report_output_does_not_print_secrets() -> None:
     rows = _normal_rows(
         api_health=[

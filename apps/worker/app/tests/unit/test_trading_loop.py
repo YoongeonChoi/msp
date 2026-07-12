@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,11 +12,15 @@ from app.domain.common.errors import KnownFailClosedError
 from app.infrastructure.graceful_shutdown import ShutdownFlag
 
 
-async def test_continuous_loop_records_known_fail_closed_and_keeps_running() -> None:
+async def test_continuous_loop_records_known_fail_closed_and_keeps_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     shutdown = ShutdownFlag()
     cycle = FakeTradingCycle(shutdown)
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.application.services.trading_loop.asyncio.sleep", sleep)
     loop = TradingLoop(
-        Settings(RUN_ONCE=False, LOOP_INTERVAL_SEC=0),
+        Settings(RUN_ONCE=False, LOOP_INTERVAL_SEC=5),
         shutdown,
         cast(RunTradingCycle, cycle),
     )
@@ -23,6 +28,7 @@ async def test_continuous_loop_records_known_fail_closed_and_keeps_running() -> 
     await loop.run()
 
     assert cycle.calls == 2
+    sleep.assert_awaited_once_with(5)
     assert cycle.repository.events == [
         {
             "level": "warning",
@@ -37,7 +43,7 @@ async def test_run_once_preserves_known_fail_closed_for_operator_smoke() -> None
     shutdown = ShutdownFlag()
     cycle = FakeTradingCycle(shutdown, always_fail=True)
     loop = TradingLoop(
-        Settings(RUN_ONCE=True, LOOP_INTERVAL_SEC=0),
+        Settings(RUN_ONCE=True, LOOP_INTERVAL_SEC=5),
         shutdown,
         cast(RunTradingCycle, cycle),
     )

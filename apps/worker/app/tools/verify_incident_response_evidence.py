@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
 from app.tools.verify_live_readiness_evidence_bundle import (
     REMOTE_EVIDENCE_TIMEOUT_SECONDS,
     BundleValidationError,
@@ -36,12 +36,12 @@ def verify_incident_response_evidence_files(
         raise IncidentResponseEvidenceValidationError("incident_output_file_unreadable") from exc
 
     try:
-        payload = json.loads(incident_channel_evidence.read_text(encoding="utf-8"))
+        payload = loads_strict_json(incident_channel_evidence.read_text(encoding="utf-8"))
     except OSError as exc:
         raise IncidentResponseEvidenceValidationError(
             "incident_channel_evidence_unreadable"
         ) from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise IncidentResponseEvidenceValidationError(
             "incident_channel_evidence_json_invalid"
         ) from exc

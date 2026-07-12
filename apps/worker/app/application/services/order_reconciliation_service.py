@@ -8,7 +8,7 @@ from app.domain.common.errors import (
     ProviderTimeoutError,
     ProviderUnknownError,
 )
-from app.domain.trading.entities import Order
+from app.domain.trading.entities import Order, OrderStatus
 
 
 class OrderReconciliationService:
@@ -33,12 +33,13 @@ class OrderReconciliationService:
 
     async def _reconcile_order(self, order: Order) -> bool:
         if order.provider_order_id is None:
-            await self.repository.update_order_status(
-                order_id=str(order.id),
+            if not await self._update_if_current(
+                order,
                 status="unknown_requires_manual_check",
                 reason="missing_provider_order_id",
                 provider_payload_summary=order.provider_payload_summary,
-            )
+            ):
+                return False
             await self._record_engine_event(
                 "critical",
                 "live_reconciliation",
@@ -70,12 +71,13 @@ class OrderReconciliationService:
             )
             return False
         except KnownFailClosedError as exc:
-            await self.repository.update_order_status(
-                order_id=str(order.id),
+            if not await self._update_if_current(
+                order,
                 status="unknown_requires_manual_check",
                 reason=exc.safe_message,
                 provider_payload_summary=order.provider_payload_summary,
-            )
+            ):
+                return False
             await self._record_engine_event(
                 "critical",
                 "live_reconciliation",
@@ -89,13 +91,36 @@ class OrderReconciliationService:
             )
             return True
 
+        if broker_status.provider_order_id != order.provider_order_id:
+            reason = "broker_order_status_identity_mismatch"
+            if not await self._update_if_current(
+                order,
+                status="unknown_requires_manual_check",
+                reason=reason,
+                provider_payload_summary=broker_status.raw_summary,
+            ):
+                return False
+            await self._record_engine_event(
+                "critical",
+                "live_reconciliation",
+                "live_order_reconciliation_identity_mismatch",
+                {
+                    "order_id": str(order.id),
+                    "symbol": order.symbol,
+                    "provider_order_id_present": True,
+                    "reason": reason,
+                },
+            )
+            return True
+
         if broker_status.status == "unknown_requires_manual_check":
-            await self.repository.update_order_status(
-                order_id=str(order.id),
+            if not await self._update_if_current(
+                order,
                 status=broker_status.status,
                 reason=broker_status.reason,
                 provider_payload_summary=broker_status.raw_summary,
-            )
+            ):
+                return False
             await self._record_engine_event(
                 "critical",
                 "live_reconciliation",
@@ -112,12 +137,13 @@ class OrderReconciliationService:
             return True
         if order.status == "unknown_requires_manual_check":
             reason = f"manual_check_required_provider_status_{broker_status.status}"
-            await self.repository.update_order_status(
-                order_id=str(order.id),
+            if not await self._update_if_current(
+                order,
                 status="unknown_requires_manual_check",
                 reason=reason,
                 provider_payload_summary=broker_status.raw_summary,
-            )
+            ):
+                return False
             await self._record_engine_event(
                 "critical",
                 "live_reconciliation",
@@ -132,12 +158,13 @@ class OrderReconciliationService:
                 },
             )
             return True
-        await self.repository.update_order_status(
-            order_id=str(order.id),
+        if not await self._update_if_current(
+            order,
             status=broker_status.status,
             reason=broker_status.reason,
             provider_payload_summary=broker_status.raw_summary,
-        )
+        ):
+            return False
         await self.repository.record_engine_event(
             "info",
             "live_reconciliation",
@@ -151,6 +178,35 @@ class OrderReconciliationService:
             },
         )
         return True
+
+    async def _update_if_current(
+        self,
+        order: Order,
+        *,
+        status: OrderStatus,
+        reason: str | None,
+        provider_payload_summary: dict[str, object] | None,
+    ) -> bool:
+        updated = await self.repository.update_order_status(
+            order_id=str(order.id),
+            status=status,
+            reason=reason,
+            provider_payload_summary=provider_payload_summary,
+            expected_statuses={order.status},
+        )
+        if not updated:
+            await self._record_engine_event(
+                "warning",
+                "live_reconciliation",
+                "live_order_reconciliation_concurrent_transition_skipped",
+                {
+                    "order_id": str(order.id),
+                    "symbol": order.symbol,
+                    "observed_status": order.status,
+                    "attempted_status": status,
+                },
+            )
+        return updated
 
     async def _record_engine_event(
         self,

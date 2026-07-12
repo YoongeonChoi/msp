@@ -7,6 +7,17 @@ class MaxSectorPolicy:
     name = "max_sector"
 
     def evaluate(self, risk_input: RiskInput) -> PolicyResult:
-        if risk_input.sector_position_pct >= risk_input.settings.max_sector_pct:
+        if risk_input.signal.action != "buy":
+            return allow(self.name)
+        if risk_input.sector_position_pct is None:
+            return block(self.name, "sector_exposure_unknown", severity="high")
+        account = risk_input.account_state
+        if account is None or account.equity_krw <= 0:
+            return block(self.name, "sector_exposure_equity_invalid", severity="high")
+        projected_sector_pct = (
+            risk_input.sector_position_pct
+            + (risk_input.signal.order_amount_krw / account.equity_krw)
+        )
+        if projected_sector_pct > risk_input.settings.max_sector_pct:
             return block(self.name, "max_sector_pct_exceeded", severity="high")
         return allow(self.name)

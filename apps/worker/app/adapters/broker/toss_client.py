@@ -157,25 +157,42 @@ class TossClient:
     async def get_positions(self, now: datetime) -> list[Position]:
         holdings = await self.get_holdings()
         positions: list[Position] = []
+        item_market_value_krw = 0
         for item in holdings.items:
             if (
                 item.market_country != "KR"
                 or item.currency != "KRW"
                 or _kr_symbol(item.symbol) is None
             ):
+                raise ProviderSchemaError("toss", "toss_position_scope_unsupported")
+            quantity = _decimal_integral_to_int(
+                item.quantity,
+                "toss_position_quantity_invalid",
+            )
+            provider_market_value = _decimal_krw_to_int(item.market_value.amount)
+            item_market_value_krw += provider_market_value
+            if quantity == 0:
+                if provider_market_value != 0:
+                    raise ProviderSchemaError("toss", "toss_zero_quantity_market_value_nonzero")
                 continue
+            current_price_krw = _decimal_positive_krw_to_int(
+                item.last_price,
+                "toss_position_last_price_invalid",
+            )
+            if quantity * current_price_krw != provider_market_value:
+                raise ProviderSchemaError("toss", "toss_position_market_value_mismatch")
             positions.append(
                 Position(
                     symbol=item.symbol,
-                    quantity=_decimal_integral_to_int(
-                        item.quantity,
-                        "toss_position_quantity_invalid",
-                    ),
+                    quantity=quantity,
                     avg_price_krw=_decimal_krw_to_int(item.average_purchase_price),
-                    current_price_krw=_decimal_krw_to_int(item.last_price),
+                    current_price_krw=current_price_krw,
                     sector="unknown",
                 )
             )
+        overview_market_value_krw = _decimal_krw_to_int(holdings.market_value.amount.krw)
+        if item_market_value_krw != overview_market_value_krw:
+            raise ProviderSchemaError("toss", "toss_positions_overview_mismatch")
         return positions
 
     async def get_prices(self, symbols: Sequence[str]) -> list[TossPriceResponse]:
@@ -249,6 +266,8 @@ class TossClient:
 
     async def get_order_status(self, provider_order_id: str) -> BrokerOrderStatusResult:
         order = await self.get_order(provider_order_id)
+        if order.order_id != provider_order_id:
+            raise ProviderSchemaError("toss", "toss_order_status_identity_mismatch")
         status = _map_toss_order_status(order.status)
         reason = (
             None
@@ -322,6 +341,8 @@ class TossClient:
             TossApiResponse[TossOrderCreateResult],
         )
         result = envelope.result
+        if result.client_order_id != request.idempotency_key:
+            raise ProviderUnknownError("toss", "toss_order_create_identity_mismatch")
         return BrokerOrderResult(
             provider_order_id=result.order_id,
             status="sent",
@@ -469,6 +490,12 @@ def _decimal_krw_to_int(value: Decimal) -> int:
 
 def _decimal_integral_to_int(value: Decimal, schema_code: str) -> int:
     if value < 0 or value != value.to_integral_value():
+        raise ProviderSchemaError("toss", schema_code)
+    return int(value)
+
+
+def _decimal_positive_krw_to_int(value: Decimal, schema_code: str) -> int:
+    if value <= 0 or value != value.to_integral_value():
         raise ProviderSchemaError("toss", schema_code)
     return int(value)
 

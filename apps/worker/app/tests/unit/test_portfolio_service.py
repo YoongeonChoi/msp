@@ -25,11 +25,12 @@ async def test_portfolio_service_replaces_positions() -> None:
         ]
     )
 
-    await PortfolioService(
+    result = await PortfolioService(
         cast(RepositoryPort, repository),
         cast(PortfolioReadPort, reader),
     ).sync_positions(NOW)
 
+    assert result == reader.positions
     assert repository.positions[0].symbol == "005930"
     assert repository.synced_at == NOW
     assert repository.events == []
@@ -38,11 +39,12 @@ async def test_portfolio_service_replaces_positions() -> None:
 async def test_portfolio_service_records_warning_on_provider_failure() -> None:
     repository = FakePortfolioRepository()
 
-    await PortfolioService(
+    result = await PortfolioService(
         cast(RepositoryPort, repository),
         cast(PortfolioReadPort, FailingPortfolioReader()),
     ).sync_positions(NOW)
 
+    assert result is None
     assert repository.positions == []
     assert repository.events == [
         {

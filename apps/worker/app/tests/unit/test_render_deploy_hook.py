@@ -99,10 +99,14 @@ def test_cli_skips_when_deploy_hook_env_missing(
     )
 
 
-def test_cli_failure_does_not_print_hook_url_or_token(
+def test_cli_refuses_direct_hook_and_does_not_print_hook_url_or_token(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    requested = False
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested = True
         return httpx.Response(500, text="secret diagnostic body")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -114,9 +118,11 @@ def test_cli_failure_does_not_print_hook_url_or_token(
     )
 
     output = capsys.readouterr().out
-    assert exit_code == 1
-    assert "FINAL=FAIL render_deploy_hook" in output
-    assert "reason=render_deploy_hook_status_unexpected" in output
+    assert exit_code == 2
+    assert requested is False
+    assert "FINAL=SKIP render_deploy_hook" in output
+    assert "reason=locked_redeploy_required" in output
+    assert "tool=redeploy_render_worker" in output
     assert EXPECTED_SHA not in output
     assert "super-secret-token" not in output
     assert "api.render.com" not in output
@@ -130,6 +136,7 @@ def test_trigger_render_deploy_hook_rejects_non_render_urls() -> None:
         "https://user:pass@api.render.com/deploy/srv-test?key=secret",
         "https://api.render.com/not-deploy/srv-test?key=secret",
         "https://api.render.com/deploy/srv-test?key=secret#fragment",
+        "https://api.render.com:444/deploy/srv-test?key=secret",
     ]
 
     for url in invalid_urls:
@@ -143,3 +150,14 @@ def test_trigger_render_deploy_hook_rejects_invalid_sha() -> None:
         deploy_hook.trigger_render_deploy_hook(HOOK_URL, expected_sha="abc123")
 
     assert str(exc_info.value) == "expected_sha_invalid"
+
+
+def test_cli_rejects_hook_url_without_echoing_secret(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        deploy_hook._parse_args(["--hook-url=https://api.render.com/deploy/srv?key=must-not-leak"])
+
+    output = capsys.readouterr().err
+    assert "--hook-url is forbidden" in output
+    assert "must-not-leak" not in output

@@ -58,7 +58,7 @@ Jobs:
 
 - CodeQL for Python and JavaScript/TypeScript
 - Dependency Review on PRs
-- Advisory audits:
+- Blocking security gates:
   - `npm audit --audit-level=moderate`
   - `pip-audit`
   - `bandit`
@@ -67,7 +67,10 @@ Jobs:
 - committed `.env` file block, allowing only `.env.example`
 - Workflow policy guard
 
-Audit jobs are advisory/non-blocking where dependency noise can block urgent safety work. Findings must still be reviewed before release.
+Dependency and code-audit findings fail the workflow. Third-party actions are
+pinned to immutable full commit SHAs, and the workflow policy guard rejects
+floating action tags, unpinned Docker actions, protected secret references, and
+unsafe workflow triggers.
 
 ### `.github/workflows/migration-check.yml`
 

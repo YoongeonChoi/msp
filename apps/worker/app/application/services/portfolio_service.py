@@ -21,7 +21,7 @@ class PortfolioService:
         self.repository = repository
         self.portfolio_reader = portfolio_reader
 
-    async def sync_positions(self, now: datetime) -> None:
+    async def sync_positions(self, now: datetime) -> list[Position] | None:
         try:
             positions = await self.portfolio_reader.get_positions(now)
         except ProviderError as exc:
@@ -31,5 +31,6 @@ class PortfolioService:
                 "portfolio_sync_failed",
                 {"provider": exc.provider, "reason": exc.safe_message},
             )
-            return
+            return None
         await self.repository.replace_positions(positions, now)
+        return positions

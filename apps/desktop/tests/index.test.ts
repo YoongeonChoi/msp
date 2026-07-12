@@ -4,3 +4,6 @@ import "./controlPageHydrated.test";
 import "./dashboardRender.test";
 import "./authRlsVisibility.test";
 import "./decisionSnapshotSchemaCompatibility.test";
+import "./strategyWeights.test";
+import "./strategyLabRender.test";
+import "./strategyDraftMutation.test";

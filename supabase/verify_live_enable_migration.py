@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -21,6 +22,10 @@ def main() -> int:
     parser.add_argument("--timeout-sec", type=int, default=60)
     args = parser.parse_args()
 
+    if shutil.which("docker") is None:
+        print("FINAL=SKIP docker_cli_unavailable")
+        print("Docker CLI is not installed. Install Docker and rerun this verifier.")
+        return 2
     if not _docker_ready():
         print("FINAL=SKIP docker_daemon_unavailable")
         print(
@@ -50,6 +55,7 @@ def main() -> int:
             _psql(container, migration.read_text(encoding="utf-8"), label=migration.name)
         _psql(container, SEED.read_text(encoding="utf-8"), label=SEED.name)
         _psql(container, _live_enable_once_sql(), label="live_enable_once_probe")
+        _psql(container, _deployment_lock_sql(), label="deployment_lock_probe")
         _verify_security_definer_rpc_grants(container)
     finally:
         if args.keep_container:
@@ -62,16 +68,38 @@ def main() -> int:
 
 
 def _docker_ready() -> bool:
-    result = _run(["docker", "info", "--format", "{{.ServerVersion}}"], check=False)
+    try:
+        result = _run(["docker", "info", "--format", "{{.ServerVersion}}"], check=False)
+    except OSError:
+        return False
     return result.returncode == 0
 
 
 def _wait_for_postgres(container: str, timeout_sec: int) -> None:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
-        result = _run(["docker", "exec", container, "pg_isready", "-U", "postgres"], check=False)
-        if result.returncode == 0:
-            return
+        ready = _run(
+            ["docker", "exec", container, "pg_isready", "-U", "postgres"],
+            check=False,
+        )
+        if ready.returncode == 0:
+            connection = _run(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "psql",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    "postgres",
+                    "-c",
+                    "select 1;",
+                ],
+                check=False,
+            )
+            if connection.returncode == 0:
+                return
         time.sleep(1)
     raise RuntimeError("postgres_container_not_ready")
 
@@ -155,6 +183,34 @@ def _verify_security_definer_rpc_grants(container: str) -> None:
             "set role authenticated;\nselect public.database_size_bytes();\n",
             ("permission denied", "database_size_bytes"),
         ),
+        (
+            "anon_begin_worker_deployment_denied",
+            "set role anon;\nselect public.begin_worker_deployment('"
+            + ("a" * 40)
+            + "');\n",
+            ("permission denied", "begin_worker_deployment"),
+        ),
+        (
+            "authenticated_complete_worker_deployment_denied",
+            "set role authenticated;\nselect public.complete_worker_deployment('"
+            + ("a" * 40)
+            + "', 300);\n",
+            ("permission denied", "complete_worker_deployment"),
+        ),
+        (
+            "authenticated_mark_worker_deployment_denied",
+            "set role authenticated;\nselect public.mark_worker_deployment_triggered('"
+            + ("a" * 40)
+            + "');\n",
+            ("permission denied", "mark_worker_deployment_triggered"),
+        ),
+        (
+            "authenticated_abort_worker_deployment_denied",
+            "set role authenticated;\nselect public.abort_worker_deployment('"
+            + ("a" * 40)
+            + "');\n",
+            ("permission denied", "abort_worker_deployment"),
+        ),
     ]
     for label, sql, fragments in denied_checks:
         _psql_expect_failure(container, sql, label=label, required_fragments=fragments)
@@ -169,6 +225,14 @@ def _verify_security_definer_rpc_grants(container: str) -> None:
                 "set role service_role;",
                 "select public.database_size_bytes();",
                 "select public.run_retention_cleanup(true);",
+                "select has_function_privilege(current_user,",
+                "  'public.begin_worker_deployment(text)', 'EXECUTE');",
+                "select has_function_privilege(current_user,",
+                "  'public.complete_worker_deployment(text,integer)', 'EXECUTE');",
+                "select has_function_privilege(current_user,",
+                "  'public.mark_worker_deployment_triggered(text)', 'EXECUTE');",
+                "select has_function_privilege(current_user,",
+                "  'public.abort_worker_deployment(text)', 'EXECUTE');",
                 "reset role;",
             ],
         ),
@@ -186,7 +250,7 @@ def _supabase_stub_sql() -> str:
             ");",
             "create role anon nologin;",
             "create role authenticated nologin;",
-            "create role service_role nologin;",
+            "create role service_role nologin bypassrls;",
             "create publication supabase_realtime;",
             "create or replace function auth.uid()",
             "returns uuid",
@@ -194,6 +258,16 @@ def _supabase_stub_sql() -> str:
             "stable",
             "as $$",
             "  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;",
+            "$$;",
+            "create or replace function auth.role()",
+            "returns text",
+            "language sql",
+            "stable",
+            "as $$",
+            "  select coalesce(",
+            "    nullif(current_setting('request.jwt.claim.role', true), ''),",
+            "    current_user",
+            "  );",
             "$$;",
         ],
     )
@@ -251,6 +325,24 @@ def _live_enable_once_sql() -> str:
             "  end if;",
             "end $$;",
             "update public.bot_settings",
+            "set live_order_allowed = false",
+            "where id = 'singleton';",
+            "do $$",
+            "begin",
+            "  begin",
+            "    update public.bot_settings",
+            "    set live_order_allowed = true",
+            "    where id = 'singleton';",
+            "    raise exception 'expected_sticky_live_reenable_to_require_new_approval';",
+            "  exception",
+            "    when check_violation then",
+            "      if sqlerrm not like",
+            " '%live_execution_requires_fresh_accepted_manual_command%' then",
+            "        raise;",
+            "      end if;",
+            "  end;",
+            "end $$;",
+            "update public.bot_settings",
             "set enabled = false,",
             "    mode = 'paper',",
             "    live_order_allowed = false",
@@ -267,12 +359,96 @@ def _live_enable_once_sql() -> str:
             "  exception",
             "    when check_violation then",
             "      if sqlerrm not like"
-            " '%live_order_allowed_requires_fresh_accepted_manual_command%' then",
+            " '%live_execution_requires_fresh_accepted_manual_command%' then",
             "        raise;",
             "      end if;",
             "  end;",
             "end $$;",
         ],
+    )
+
+
+def _deployment_lock_sql() -> str:
+    target_sha = "a" * 40
+    return "\n".join(
+        [
+            "set role service_role;",
+            "select set_config('request.jwt.claim.role', 'service_role', false);",
+            "do $$",
+            "begin",
+            "  begin",
+            "    perform public.begin_worker_deployment(null);",
+            "    raise exception 'expected_null_deployment_target_to_fail';",
+            "  exception",
+            "    when invalid_parameter_value then",
+            "      if sqlerrm not like '%deployment_target_sha_invalid%' then",
+            "        raise;",
+            "      end if;",
+            "  end;",
+            "  begin",
+            "    update public.bot_settings",
+            "    set deployment_lock = true,",
+            "        deployment_target_sha = null,",
+            "        deployment_started_at = now()",
+            "    where id = 'singleton';",
+            "    raise exception 'expected_null_locked_target_constraint_to_fail';",
+            "  exception",
+            "    when check_violation then null;",
+            "  end;",
+            "end $$;",
+            f"select public.begin_worker_deployment('{target_sha}');",
+            "reset role;",
+            "do $$",
+            "declare",
+            "  settings public.bot_settings%rowtype;",
+            "begin",
+            "  select * into settings from public.bot_settings where id = 'singleton';",
+            "  if settings.deployment_lock is not true",
+            "     or settings.deployment_target_sha <> '" + target_sha + "'",
+            "     or settings.enabled is true",
+            "     or settings.live_order_allowed is true then",
+            "    raise exception 'deployment_lock_did_not_fail_closed';",
+            "  end if;",
+            "end $$;",
+            "set role service_role;",
+            "select set_config('request.jwt.claim.role', 'service_role', false);",
+            f"select public.mark_worker_deployment_triggered('{target_sha}');",
+            "insert into public.worker_heartbeats (status, details, created_at)",
+            "values ('ok', '"
+            + '{"release_sha":"'
+            + target_sha
+            + '","deployment_lock":true,"deployment_target_sha":"'
+            + target_sha
+            + '"}'
+            + "'::jsonb, now() + interval '1 second');",
+            "do $$",
+            "begin",
+            "  begin",
+            f"    perform public.complete_worker_deployment('{target_sha}', null);",
+            "    raise exception 'expected_null_deployment_heartbeat_max_age_to_fail';",
+            "  exception",
+            "    when invalid_parameter_value then",
+            "      if sqlerrm not like '%deployment_heartbeat_max_age_invalid%' then",
+            "        raise;",
+            "      end if;",
+            "  end;",
+            "end $$;",
+            f"select public.complete_worker_deployment('{target_sha}', 300);",
+            "reset role;",
+            "do $$",
+            "declare",
+            "  settings public.bot_settings%rowtype;",
+            "begin",
+            "  select * into settings from public.bot_settings where id = 'singleton';",
+            "  if settings.deployment_lock is true",
+            "     or settings.deployment_target_sha is not null",
+            "     or settings.deployment_completed_at is null",
+            "     or settings.enabled is true",
+            "     or settings.live_order_allowed is true then",
+            "    raise exception 'deployment_lock_did_not_release_safely';",
+            "  end if;",
+            "end $$;",
+        ]
     )
 
 

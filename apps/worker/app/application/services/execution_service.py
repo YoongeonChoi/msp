@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Literal, assert_never
 from uuid import uuid4
 
@@ -24,10 +24,12 @@ class ExecutionService:
         broker: BrokerPort,
         repository: RepositoryPort,
         risk_service: RiskService,
+        shutdown_requested: Callable[[], bool] | None = None,
     ) -> None:
         self.broker = broker
         self.repository = repository
         self.risk_service = risk_service
+        self.shutdown_requested = shutdown_requested or (lambda: False)
 
     async def create_paper_order(
         self,
@@ -127,12 +129,11 @@ class ExecutionService:
                 reason="duplicate_idempotency_key",
                 created_at=decision.created_at,
             )
-            await self.repository.persist_order(blocked, final_risk)
             await self.repository.record_engine_event(
                 "warning",
                 "live_execution",
                 "live_order_blocked_duplicate_idempotency_key",
-                {"symbol": blocked.symbol, "idempotency_key": key},
+                {"symbol": blocked.symbol, "existing_order_preserved": True},
             )
             return blocked, final_risk
         proposed = Order(
@@ -178,6 +179,7 @@ class ExecutionService:
                 {"symbol": blocked.symbol, "reasons": evidence_reasons},
             )
             return blocked, final_risk
+        broker_dispatch_started = False
         try:
             if risk_input.quote is None:
                 raise KnownFailClosedError("execution", "live_order_missing_quote")
@@ -199,6 +201,9 @@ class ExecutionService:
                 created_at=proposed.created_at,
             )
             await self.repository.persist_order(pending, final_risk)
+            if self.shutdown_requested():
+                raise KnownFailClosedError("execution", "shutdown_requested")
+            broker_dispatch_started = True
             broker_result = await self.broker.place_order(
                 BrokerOrderRequest(
                     symbol=proposed.symbol,
@@ -212,7 +217,8 @@ class ExecutionService:
         except KnownFailClosedError as exc:
             failed_status: Literal["failed", "unknown_requires_manual_check"] = (
                 "unknown_requires_manual_check"
-                if isinstance(exc, ProviderTimeoutError | ProviderUnknownError)
+                if broker_dispatch_started
+                or isinstance(exc, ProviderTimeoutError | ProviderUnknownError)
                 else "failed"
             )
             failed = Order(
@@ -228,12 +234,17 @@ class ExecutionService:
                 created_at=proposed.created_at,
             )
             if await self.repository.idempotency_key_exists(failed.idempotency_key):
-                await self.repository.update_order_status(
+                updated = await self.repository.update_order_status(
                     order_id=str(failed.id),
                     status=failed.status,
                     reason=failed.reason,
                     provider_payload_summary=failed.provider_payload_summary,
+                    expected_statuses={"unknown_requires_manual_check"},
                 )
+                if not updated:
+                    current = await self.repository.load_order_by_id(str(failed.id))
+                    if current is not None:
+                        failed = current
             else:
                 await self.repository.persist_order(failed, final_risk)
             await self.repository.record_engine_event(
@@ -262,13 +273,28 @@ class ExecutionService:
             provider_order_id=broker_result.provider_order_id,
             provider_payload_summary=broker_result.raw_summary,
         )
-        await self.repository.update_order_status(
+        updated = await self.repository.update_order_status(
             order_id=str(sent.id),
             status=sent.status,
             reason=sent.reason,
             provider_payload_summary=sent.provider_payload_summary,
             provider_order_id=sent.provider_order_id,
+            expected_statuses={"unknown_requires_manual_check"},
         )
+        if not updated:
+            current = await self.repository.load_order_by_id(str(sent.id))
+            if current is not None:
+                await self.repository.record_engine_event(
+                    "critical",
+                    "live_execution",
+                    "live_broker_order_result_conflicted_with_newer_status",
+                    {
+                        "symbol": current.symbol,
+                        "status": current.status,
+                        "provider_order_id_present": current.provider_order_id is not None,
+                    },
+                )
+                return current, final_risk
         await self.repository.record_engine_event(
             "info",
             "live_execution",

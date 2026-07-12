@@ -1,10 +1,29 @@
 # Live Readiness Scorecard
 
-Generated: 2026-07-01 KST
+Generated: 2026-07-12 KST
 
 This scorecard is intentionally strict. A category reaches 100 only when the
 current repository state and an observed runtime surface prove the requirement.
 Passing tests alone is not enough.
+
+2026-07-12 hardening update: migrations `0012` and `0013` now enforce runtime
+limits, strategy approval integrity, one-time live approvals, and a service-role
+deployment lock. `redeploy_render_worker` must observe the lock in a fresh
+worker heartbeat before invoking Render and must observe the target release
+before unlocking. Hosted live-enable evidence is staging-only and explicitly
+rejects the configured production project. It also requires an exact typed
+staging-project confirmation, a fresh healthy mock heartbeat with an all-mock
+3,720-second isolation window, and an exact paper-disabled singleton row during
+cleanup. ACK-gated incident evidence now
+requires `transport=real`; earlier dry-run lines in the historical evidence
+table that omit `transport` are not valid release evidence. Production Python
+packages are installed from a reviewed, hash-locked snapshot. Final live risk
+inputs are refreshed after feature collection, concurrent cancellation is
+single-winner reserved before a broker call, and malformed Supabase singleton
+settings fail closed. OpenDART uses a hardened XML parser, dependency/code-audit
+jobs are blocking, and third-party Actions are pinned to full commit SHAs. These
+controls do not replace the still-missing real hosted/provider/incident evidence
+described below.
 
 | Category | Current score | Evidence | Remaining gap before 100 |
 | --- | ---: | --- | --- |
@@ -85,12 +104,18 @@ can pass, and failure output must not echo supplied secret values.
 
 ## Next Strict Iteration
 
-1. Apply migrations through `0011_data_api_grants.sql` to a hosted
+1. Apply migrations through `0013_worker_deployment_lock.sql` to a hosted
    Supabase/staging project, then run `python supabase/verify_hosted_live_readiness.py`
    and `python supabase/verify_hosted_live_enable_flow.py` with an official
    `https://<project_ref>.supabase.co` `SUPABASE_URL` that has no credentials, path,
-   query, or fragment, distinct publishable/secret keys, and distinct requester/reviewer
-   admin JWTs that do not reuse Supabase key values until they return
+   query, or fragment, distinct publishable/secret keys, distinct requester/reviewer
+   admin JWTs that do not reuse Supabase key values, and explicit distinct
+   `SUPABASE_STAGING_PROJECT_REF`/`SUPABASE_PRODUCTION_PROJECT_REF` values with
+   `SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET=staging`. Pass
+   `--confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"` explicitly and
+   run only while the verifier observes the required fresh all-mock heartbeat
+   isolation window, until
+   they return
    `FINAL=PASS hosted_supabase_live_readiness` with `postgrest=1`,
    `anon_rpc_denied=2`, `service_rpc_allowed=2`, `anon_table_denied=1`,
    `service_table_allowed=1`, `authenticated_table_allowed=2`, and `realtime=1`, plus
@@ -143,7 +168,7 @@ can pass, and failure output must not echo supplied secret values.
 4. Execute `python -m app.tools.run_live_incident_response_drill_once --require-ack`
    against the real incident channel and retain `delivered=4`,
    `max_latency_ms<=2000`, the human operator acknowledgment,
-   `ack_latency_ms<=300000`, output `drill_id`, and incident-channel evidence manifest
+   `ack_latency_ms<=300000`, `transport=real`, output `drill_id`, and incident-channel evidence manifest
    with matching `drill_id`, remote HTTPS artifact URI, SHA-256, and
    `captured_at` strictly after `operator_ack_at`. Then run
    `python -m app.tools.verify_incident_response_evidence

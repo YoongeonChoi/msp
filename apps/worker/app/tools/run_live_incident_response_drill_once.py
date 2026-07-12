@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import re
 import sys
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from time import perf_counter
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import httpx
@@ -23,7 +24,12 @@ from app.domain.trading.entities import BotSettings, Order
 from app.tools.run_live_alert_drill_once import DrillAlertNotifier, DrillTimeoutBroker
 
 AckReader = Callable[[str, float], Awaitable[bool]]
+IncidentTransport = Literal["mock", "real"]
 _DRILL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
+class IncidentResponseDrillConfigurationError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +40,7 @@ class IncidentResponseDrillResult:
     acknowledged: bool
     ack_latency_ms: int | None
     drill_id: str
+    transport: IncidentTransport
 
 
 async def run_incident_response_drill(
@@ -43,11 +50,16 @@ async def run_incident_response_drill(
     ack_reader: AckReader | None = None,
     drill_id: str | None = None,
 ) -> IncidentResponseDrillResult:
-    if ack_timeout_sec <= 0:
+    if not math.isfinite(ack_timeout_sec) or ack_timeout_sec <= 0:
         raise ValueError("ack_timeout_sec_must_be_positive")
     settings = load_settings()
     active_drill_id = _normalize_drill_id(drill_id)
     if settings.alert_webhook_url is None:
+        if require_ack:
+            raise IncidentResponseDrillConfigurationError(
+                "real_alert_webhook_required_for_ack_drill"
+            )
+        transport: IncidentTransport = "mock"
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(_mock_alert_handler))
         webhook_notifier = WebhookAlertNotifier(
             "https://alerts.example.test/live-incident-drill",
@@ -55,6 +67,7 @@ async def run_incident_response_drill(
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
     else:
+        transport = "real"
         webhook_notifier = WebhookAlertNotifier(
             settings.alert_webhook_url.get_secret_value(),
             timeout_sec=settings.alert_webhook_timeout_sec,
@@ -91,6 +104,7 @@ async def run_incident_response_drill(
             acknowledged=acknowledged,
             ack_latency_ms=ack_latency_ms,
             drill_id=active_drill_id,
+            transport=transport,
         )
     finally:
         await notifier.aclose()
@@ -117,19 +131,26 @@ async def main(argv: Sequence[str] | None = None) -> int:
         help="Optional deterministic drill id for controlled staging drills.",
     )
     args = parser.parse_args(argv)
-    if args.ack_timeout_sec <= 0:
+    if not math.isfinite(args.ack_timeout_sec) or args.ack_timeout_sec <= 0:
         parser.error("--ack-timeout-sec must be positive")
 
-    result = await run_incident_response_drill(
-        require_ack=args.require_ack,
-        ack_timeout_sec=args.ack_timeout_sec,
-        drill_id=args.drill_id,
-    )
+    try:
+        result = await run_incident_response_drill(
+            require_ack=args.require_ack,
+            ack_timeout_sec=args.ack_timeout_sec,
+            drill_id=args.drill_id,
+        )
+    except IncidentResponseDrillConfigurationError as exc:
+        print(
+            "FINAL=FAIL live_incident_response_drill "
+            f"transport=mock reason={exc}"
+        )
+        return 1
     if not result.ack_required:
         print(
             "FINAL=PASS live_incident_delivery_drill "
             f"delivered={result.delivered} max_latency_ms={result.max_latency_ms} "
-            "ack_required=false"
+            f"ack_required=false transport={result.transport}"
         )
         return 0
     if result.acknowledged:
@@ -137,13 +158,13 @@ async def main(argv: Sequence[str] | None = None) -> int:
             "FINAL=PASS live_incident_response_drill "
             f"delivered={result.delivered} max_latency_ms={result.max_latency_ms} "
             f"acknowledged=true ack_latency_ms={result.ack_latency_ms} "
-            f"drill_id={result.drill_id}"
+            f"drill_id={result.drill_id} transport={result.transport}"
         )
         return 0
     print(
         "FINAL=FAIL live_incident_response_drill "
         f"delivered={result.delivered} max_latency_ms={result.max_latency_ms} "
-        f"acknowledged=false drill_id={result.drill_id}"
+        f"acknowledged=false drill_id={result.drill_id} transport={result.transport}"
     )
     return 1
 

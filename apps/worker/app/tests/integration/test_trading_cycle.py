@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -15,11 +17,14 @@ from app.application.ports.news_port import NewsPort
 from app.application.services.execution_service import ExecutionService
 from app.application.services.feature_service import FeatureService
 from app.application.services.health_service import HealthService
+from app.application.services.portfolio_service import PortfolioReadPort, PortfolioService
 from app.application.services.risk_service import RiskService
 from app.application.use_cases.run_trading_cycle import RunTradingCycle, kst_day_window
+from app.domain.common.errors import ProviderUnavailableError
 from app.domain.common.time import now_utc
 from app.domain.fundamentals.entities import QuarterlyFundamentals
 from app.domain.news_intel.entities import NewsClassification, NewsEvent
+from app.domain.portfolio.entities import Position
 from app.domain.strategy.entities import FeatureVector, StrategyVersion
 from app.domain.trading.entities import AccountState, BotSettings, Order, OrderStatus, Quote
 from app.domain.trading.value_objects import StrategyWeights
@@ -77,6 +82,19 @@ class AccountStateBroker(SuccessfulBroker):
         )
 
 
+class StaticPortfolioReader:
+    def __init__(self, positions: list[Position] | None = None) -> None:
+        self.positions = positions or []
+
+    async def get_positions(self, now: datetime) -> list[Position]:
+        return self.positions
+
+
+class FailingPortfolioReader:
+    async def get_positions(self, now: datetime) -> list[Position]:
+        raise ProviderUnavailableError("toss", "toss_positions_unavailable")
+
+
 class DailyCountFailingRepository(InMemoryRepository):
     async def count_system_live_orders_created_between(
         self,
@@ -84,6 +102,21 @@ class DailyCountFailingRepository(InMemoryRepository):
         end: datetime,
     ) -> int:
         raise RuntimeError("count_unavailable")
+
+
+class StrategyDisappearingRepository(InMemoryRepository):
+    def __init__(self, settings: BotSettings) -> None:
+        super().__init__(settings)
+        self.strategy_loads = 0
+
+    async def load_active_strategy_version(
+        self,
+        required_status: str | None = None,
+    ) -> StrategyVersion | None:
+        self.strategy_loads += 1
+        if self.strategy_loads > 1:
+            return None
+        return await super().load_active_strategy_version(required_status)
 
 
 class QuoteOverrideMarketData(KrxMock):
@@ -96,6 +129,25 @@ class QuoteOverrideMarketData(KrxMock):
 
     async def is_market_open(self) -> bool | None:
         return self.market_open
+
+
+class ClosingDuringCycleMarketData(KrxMock):
+    def __init__(self) -> None:
+        self.market_open_calls = 0
+
+    async def is_market_open(self) -> bool | None:
+        self.market_open_calls += 1
+        return self.market_open_calls == 1
+
+
+class MutableMarketData(KrxMock):
+    def __init__(self) -> None:
+        self.closed = False
+        self.market_open_calls = 0
+
+    async def is_market_open(self) -> bool | None:
+        self.market_open_calls += 1
+        return not self.closed
 
 
 class PositiveFundamentals:
@@ -139,8 +191,42 @@ class PositiveNews:
 
 
 class LiveReadyFeatureService(FeatureService):
+    def __init__(
+        self,
+        *,
+        critical_news_risk: bool | None = False,
+        liquidity_ok: bool | None = True,
+        volatility_ok: bool | None = True,
+        sector: str | None = "semiconductors",
+    ) -> None:
+        self.critical_news_risk = critical_news_risk
+        self.liquidity_ok = liquidity_ok
+        self.volatility_ok = volatility_ok
+        self.sector = sector
+
     async def build_live_features(self, symbol: str, quote: Quote) -> FeatureVector:
         liquidity = 0.8 if quote.price_krw > 0 else 0.0
+        raw: dict[str, object] = {
+            "quote_price_krw": quote.price_krw,
+            "source": quote.source,
+            "feature_source": "verified_test_fixture",
+            "live_trading_ready": True,
+        }
+        if self.critical_news_risk is not None:
+            raw["critical_news_risk"] = self.critical_news_risk
+        if self.liquidity_ok is not None:
+            raw["liquidity_ok"] = self.liquidity_ok
+        if self.volatility_ok is not None:
+            raw["volatility_ok"] = self.volatility_ok
+        if self.sector is not None:
+            raw["market_sector_source"] = "verified_market_sector_test_provider"
+            raw["market_sector"] = {
+                "symbol": symbol,
+                "market": "KR",
+                "sector": self.sector,
+                "industry": "memory",
+                "as_of": now_utc().isoformat(),
+            }
         return FeatureVector(
             symbol=symbol,
             technical_score=0.82,
@@ -148,13 +234,19 @@ class LiveReadyFeatureService(FeatureService):
             market_sector_score=0.60,
             news_event_score=0.65,
             portfolio_score=liquidity,
-            raw={
-                "quote_price_krw": quote.price_krw,
-                "source": quote.source,
-                "feature_source": "verified_test_fixture",
-                "live_trading_ready": True,
-            },
+            raw=raw,
         )
+
+
+class MarketClosingFeatureService(LiveReadyFeatureService):
+    def __init__(self, market_data: MutableMarketData) -> None:
+        super().__init__()
+        self.market_data = market_data
+
+    async def build_live_features(self, symbol: str, quote: Quote) -> FeatureVector:
+        features = await super().build_live_features(symbol, quote)
+        self.market_data.closed = True
+        return features
 
 
 class MockLiveFeatureService(FeatureService):
@@ -172,6 +264,17 @@ class MockLiveFeatureService(FeatureService):
                 "source": quote.source,
                 "feature_source": "mock_static",
                 "live_trading_ready": False,
+                "critical_news_risk": False,
+                "liquidity_ok": True,
+                "volatility_ok": True,
+                "market_sector_source": "verified_market_sector_test_provider",
+                "market_sector": {
+                    "symbol": symbol,
+                    "market": "KR",
+                    "sector": "semiconductors",
+                    "industry": "memory",
+                    "as_of": now_utc().isoformat(),
+                },
             },
         )
 
@@ -210,6 +313,31 @@ async def test_cycle_heartbeat_includes_release_metadata(
     assert details["release_sha"] == "abcdef1234567890"
     assert details["release_sha_short"] == "abcdef123456"
     assert details["release_source"] == "APP_RELEASE_SHA"
+    assert details["deployment_lock"] is False
+
+
+async def test_cycle_heartbeat_reports_deployment_pause_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_sha = "a" * 40
+    monkeypatch.setenv("APP_RELEASE_SHA", "abcdef1234567890")
+    repository = InMemoryRepository(
+        BotSettings(
+            enabled=False,
+            mode="paper",
+            live_order_allowed=False,
+            deployment_lock=True,
+            deployment_target_sha=target_sha,
+        )
+    )
+    cycle = _cycle(repository)
+
+    await cycle.execute()
+
+    details = repository.heartbeats[0]["details"]
+    assert isinstance(details, dict)
+    assert details["deployment_lock"] is True
+    assert details["deployment_target_sha"] == target_sha
 
 
 async def test_paper_enabled_creates_paper_order_only() -> None:
@@ -234,6 +362,43 @@ async def test_paper_enabled_creates_paper_order_only() -> None:
     assert "news_event_score" in repository.decisions[0].feature_snapshot
     assert "portfolio_score" in repository.decisions[0].feature_snapshot
     assert "final_score" in repository.decisions[0].feature_snapshot
+    raw = repository.decisions[0].feature_snapshot["raw"]
+    assert isinstance(raw, dict)
+    assert raw["risk_evidence"] == {
+        "source": "paper_feature_evidence_with_simulated_exposure_assumptions",
+        "sector": None,
+        "existing_position_pct": 0.0,
+        "sector_position_pct": 0.0,
+        "critical_news_risk": False,
+        "liquidity_ok": True,
+        "volatility_ok": True,
+        "position_sync_verified": False,
+        "sector_exposure_verified": False,
+    }
+
+
+async def test_paper_cycle_uses_critical_news_feature_evidence() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    )
+    broker = CountingBroker()
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(critical_news_risk=True),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert repository.orders[0].reason is not None
+    assert "critical_negative_news_risk" in repository.orders[0].reason
+    raw = repository.decisions[0].feature_snapshot["raw"]
+    assert isinstance(raw, dict)
+    risk_evidence = raw["risk_evidence"]
+    assert isinstance(risk_evidence, dict)
+    assert risk_evidence["critical_news_risk"] is True
 
 
 async def test_live_mode_is_blocked_when_live_permission_false() -> None:
@@ -637,12 +802,149 @@ async def test_live_cycle_blocks_provider_features_without_sector_evidence() -> 
     )
 
 
+async def test_live_cycle_blocks_projected_position_over_limit_before_broker() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    positions = [
+        Position(
+            symbol="005930",
+            quantity=16,
+            avg_price_krw=65_000,
+            current_price_krw=72_000,
+            sector="unknown",
+        )
+    ]
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+        portfolio_reader=StaticPortfolioReader(positions),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    order = repository.orders[0]
+    assert order.status == "blocked"
+    assert order.reason is not None
+    assert "max_position_pct_exceeded" in order.reason
+    raw = repository.decisions[0].feature_snapshot["raw"]
+    assert isinstance(raw, dict)
+    risk_evidence = raw["risk_evidence"]
+    assert isinstance(risk_evidence, dict)
+    assert risk_evidence["existing_position_pct"] == pytest.approx(0.096)
+
+
+async def test_live_cycle_blocks_when_position_sync_fails_before_broker() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+        portfolio_reader=FailingPortfolioReader(),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    order = repository.orders[0]
+    assert order.status == "blocked"
+    assert order.reason is not None
+    assert "position_exposure_unknown" in order.reason
+    assert "sector_exposure_unknown" in order.reason
+
+
+async def test_live_cycle_blocks_unknown_verified_sector_before_broker() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(sector=None),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    order = repository.orders[0]
+    assert order.status == "blocked"
+    assert order.reason is not None
+    assert "sector_exposure_unknown" in order.reason
+    assert repository.decisions[0].signal.sector == "unknown"
+
+
+async def test_live_cycle_derives_critical_news_risk_from_feature_evidence() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(critical_news_risk=True),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    order = repository.orders[0]
+    assert order.status == "blocked"
+    assert order.reason is not None
+    assert "critical_negative_news_risk" in order.reason
+    raw = repository.decisions[0].feature_snapshot["raw"]
+    assert isinstance(raw, dict)
+    risk_evidence = raw["risk_evidence"]
+    assert isinstance(risk_evidence, dict)
+    assert risk_evidence["critical_news_risk"] is True
+
+
+async def test_live_cycle_blocks_missing_risk_boolean_evidence_before_broker() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(liquidity_ok=None),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    order = repository.orders[0]
+    assert order.status == "blocked"
+    assert order.reason is not None
+    assert "liquidity_unknown_or_insufficient" in order.reason
+
+
 async def test_live_allowed_cycle_places_order_with_verified_account_state() -> None:
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="live", live_order_allowed=True)
     )
     broker = AccountStateBroker(daily_order_count_verified=True)
-    cycle = _cycle(repository, broker=broker, feature_service=LiveReadyFeatureService())
+    positions = [
+        Position(
+            symbol="000660",
+            quantity=1,
+            avg_price_krw=90_000,
+            current_price_krw=100_000,
+            sector="semiconductors",
+        )
+    ]
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+        portfolio_reader=StaticPortfolioReader(positions),
+    )
 
     await cycle.execute()
 
@@ -652,6 +954,126 @@ async def test_live_allowed_cycle_places_order_with_verified_account_state() -> 
     assert order.mode == "live"
     assert order.status == "sent"
     assert order.provider_order_id == "test-live-order-1"
+    assert repository.decisions[0].signal.sector == "semiconductors"
+
+
+async def test_live_cycle_refreshes_market_state_before_dispatch() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    market_data = ClosingDuringCycleMarketData()
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        market_data=market_data,
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert market_data.market_open_calls >= 2
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert "market_closed_or_unknown" in (repository.orders[0].reason or "")
+
+
+async def test_live_cycle_rechecks_market_after_feature_collection() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    market_data = MutableMarketData()
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        market_data=market_data,
+        feature_service=MarketClosingFeatureService(market_data),
+    )
+
+    await cycle.execute()
+
+    assert market_data.market_open_calls >= 2
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert "market_closed_or_unknown" in (repository.orders[0].reason or "")
+
+
+async def test_live_cycle_enforces_symbol_cooldown() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    repository.orders.append(_live_order("filled", now_utc() - timedelta(minutes=30)))
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    assert repository.orders[-1].status == "blocked"
+    assert "symbol_in_cooldown" in (repository.orders[-1].reason or "")
+
+
+async def test_live_cycle_limits_each_cycle_to_one_broker_submission() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    repository.watchlist = ["005930", "000660"]
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 1
+    assert len(repository.orders) == 1
+
+
+async def test_live_cycle_wires_shutdown_state_into_risk_gate() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+        shutdown_requested=lambda: True,
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert "shutdown_requested" in (repository.orders[0].reason or "")
+
+
+async def test_live_cycle_rechecks_strategy_authority_before_dispatch() -> None:
+    repository = StrategyDisappearingRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    assert repository.orders == []
+    assert any(
+        event["message"] == "live_strategy_missing_during_cycle"
+        for event in repository.engine_events
+    )
 
 
 def _live_order(status: OrderStatus, created_at: datetime) -> Order:
@@ -692,8 +1114,21 @@ def _cycle(
     fundamentals: FundamentalsPort | None = None,
     news: NewsPort | None = None,
     feature_service: FeatureService | None = None,
+    portfolio_reader: PortfolioReadPort | None = None,
     live_system_order_count_scope_accepted: bool = True,
+    shutdown_requested: Callable[[], bool] | None = None,
 ) -> RunTradingCycle:
+    if (
+        repository.settings.mode == "live"
+        and repository.strategy_version is not None
+        and repository.strategy_version.status == "paper"
+    ):
+        repository.strategy_version = replace(
+            repository.strategy_version,
+            status="active",
+            approved_by=uuid4(),
+            approved_at=now_utc(),
+        )
     risk = RiskService()
     safe_broker = broker or CountingBroker()
     safe_market_data = market_data or KrxMock()
@@ -713,7 +1148,12 @@ def _cycle(
             safe_news,
             OpenAIMock(),
         ),
-        execution_service=ExecutionService(safe_broker, repository, risk),
+        execution_service=ExecutionService(
+            safe_broker,
+            repository,
+            risk,
+            shutdown_requested=shutdown_requested,
+        ),
         risk_service=risk,
         feature_service=feature_service
         or FeatureService(
@@ -722,5 +1162,10 @@ def _cycle(
             fundamentals_provider_name=fundamentals_provider_name,
             news_provider_name=news_provider_name,
         ),
+        portfolio_service=PortfolioService(
+            repository,
+            portfolio_reader or StaticPortfolioReader(),
+        ),
         live_system_order_count_scope_accepted=live_system_order_count_scope_accepted,
+        shutdown_requested=shutdown_requested,
     )

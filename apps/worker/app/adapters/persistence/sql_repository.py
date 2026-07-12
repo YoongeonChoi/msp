@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -54,7 +55,16 @@ class InMemoryRepository:
     async def load_enabled_watchlist(self) -> list[str]:
         return list(self.watchlist)
 
-    async def load_active_strategy_version(self) -> StrategyVersion | None:
+    async def load_active_strategy_version(
+        self,
+        required_status: str | None = None,
+    ) -> StrategyVersion | None:
+        if (
+            self.strategy_version is not None
+            and required_status is not None
+            and self.strategy_version.status != required_status
+        ):
+            return None
         return self.strategy_version
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None:
@@ -115,6 +125,27 @@ class InMemoryRepository:
             and start_utc <= _aware_utc(order.created_at) < end_utc
         )
 
+    async def has_recent_live_order_for_symbol(
+        self,
+        symbol: str,
+        since: datetime,
+    ) -> bool:
+        since_utc = _aware_utc(since)
+        cooldown_statuses = {
+            "sent",
+            "partial_filled",
+            "filled",
+            "canceled",
+            "unknown_requires_manual_check",
+        }
+        return any(
+            order.mode == "live"
+            and order.symbol == symbol
+            and order.status in cooldown_statuses
+            and _aware_utc(order.created_at) >= since_utc
+            for order in self.orders
+        )
+
     async def load_order_by_id(self, order_id: str) -> Order | None:
         return next((order for order in self.orders if str(order.id) == order_id), None)
 
@@ -125,21 +156,26 @@ class InMemoryRepository:
         reason: str | None,
         provider_payload_summary: dict[str, object] | None,
         provider_order_id: str | None = None,
-    ) -> None:
-        self.orders = [
-            replace(
+        expected_statuses: Collection[OrderStatus] | None = None,
+    ) -> bool:
+        for index, order in enumerate(self.orders):
+            if str(order.id) != order_id:
+                continue
+            if expected_statuses is not None and order.status not in expected_statuses:
+                return False
+            self.orders[index] = replace(
                 order,
                 status=status,
                 reason=reason,
                 provider_payload_summary=provider_payload_summary,
-                provider_order_id=provider_order_id
-                if provider_order_id is not None
-                else order.provider_order_id,
+                provider_order_id=(
+                    provider_order_id
+                    if provider_order_id is not None
+                    else order.provider_order_id
+                ),
             )
-            if str(order.id) == order_id
-            else order
-            for order in self.orders
-        ]
+            return True
+        return False
 
     async def record_heartbeat(self, status: str, details: dict[str, object]) -> None:
         self.heartbeats.append({"status": status, "details": details})

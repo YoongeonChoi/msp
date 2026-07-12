@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import ipaddress
-import json
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import SplitResult, unquote, urlsplit
-from urllib.request import Request, urlopen
 from uuid import UUID
+
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
+from app.infrastructure.retained_https import fetch_retained_https
 
 DRILL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{3,120}$")
 SYMBOL_RE = re.compile(r"^\d{6}$")
@@ -45,8 +47,6 @@ BLOCKED_ARTIFACT_URI_TERMS = (
     "localhost",
     "127.0.0.1",
     "file://",
-    "/tmp/",
-    "\\tmp\\",
     "example.com",
 )
 PRIVATE_RETAINED_DNS_SUFFIXES = (
@@ -200,10 +200,10 @@ def verify_provider_lifecycle_evidence_file(
     remote_timeout_seconds: int = REMOTE_ARTIFACT_TIMEOUT_SECONDS,
 ) -> ProviderLifecycleEvidenceSummary:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise EvidenceValidationError("evidence_file_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise EvidenceValidationError("evidence_json_invalid") from exc
     if not isinstance(payload, Mapping):
         raise EvidenceValidationError("evidence_root_must_be_object")
@@ -980,17 +980,24 @@ def _artifact_uri_is_github_blob_page(uri: str) -> bool:
 
 
 def _default_remote_artifact_fetcher(uri: str, timeout_seconds: int) -> bytes:
-    request = Request(
+    return fetch_retained_https(
         uri,
-        headers={"User-Agent": "kr-auto-trading-lab-live-readiness-verifier"},
+        timeout_seconds,
+        max_bytes=MAX_REMOTE_ARTIFACT_BYTES,
+        user_agent="kr-auto-trading-lab-live-readiness-verifier",
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return cast(bytes, response.read(MAX_REMOTE_ARTIFACT_BYTES + 1))
 
 
 def _contains_blocked_artifact_uri_term(uri: str) -> bool:
     lowered = uri.lower()
-    return any(term in lowered for term in BLOCKED_ARTIFACT_URI_TERMS)
+    decoded_segments = {
+        segment
+        for segment in re.split(r"[/\\\\]+", unquote(uri).casefold())
+        if segment
+    }
+    return "tmp" in decoded_segments or any(
+        term in lowered for term in BLOCKED_ARTIFACT_URI_TERMS
+    )
 
 
 def _operator_identities_match(left: str, right: str) -> bool:
@@ -1226,7 +1233,15 @@ def _require_number(
     if isinstance(value, bool) or not isinstance(value, int | float):
         errors.append(f"{path}.{key}_must_be_number")
         return None
-    return float(value)
+    try:
+        numeric_value = float(value)
+    except OverflowError:
+        errors.append(f"{path}.{key}_must_be_finite_number")
+        return None
+    if not math.isfinite(numeric_value):
+        errors.append(f"{path}.{key}_must_be_finite_number")
+        return None
+    return numeric_value
 
 
 def _require_timestamp(

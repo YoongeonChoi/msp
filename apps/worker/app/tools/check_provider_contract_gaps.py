@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +12,7 @@ from app.application.services.provider_gap_gate import (
     format_provider_gap_gate_final_line,
     verify_provider_gap_evidence,
 )
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
 from app.tools.verify_system_order_scope_evidence import (
     SystemOrderScopeEvidenceValidationError,
     verify_system_order_scope_evidence_file,
@@ -57,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     report = evaluate_provider_api_gaps(api_gaps_markdown)
     provider_gap_evidence_verified = False
     try:
-        provider_gap_evidence_payload = json.loads(
+        provider_gap_evidence_payload = loads_strict_json(
             args.provider_gap_evidence.read_text(encoding="utf-8")
         )
         if not isinstance(provider_gap_evidence_payload, dict):
@@ -69,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             cast(dict[str, object], provider_gap_evidence_payload),
             verify_remote_artifacts=args.verify_remote_provider_gap_artifacts,
         )
-    except (OSError, json.JSONDecodeError, ProviderGapEvidenceValidationError):
+    except (OSError, StrictJsonError, ValueError, ProviderGapEvidenceValidationError):
         provider_gap_evidence_verified = False
     else:
         provider_gap_evidence_verified = True

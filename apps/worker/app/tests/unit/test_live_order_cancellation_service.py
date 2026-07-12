@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from uuid import uuid4
 
@@ -23,10 +24,14 @@ class CancelBroker:
         timeout: bool = False,
         status_timeout: bool = False,
         status_result: BrokerOrderReconciliationStatus = "canceled",
+        cancel_original_order_id: str | None = None,
+        confirmation_order_id: str | None = None,
     ) -> None:
         self.timeout = timeout
         self.status_timeout = status_timeout
         self.status_result = status_result
+        self.cancel_original_order_id = cancel_original_order_id
+        self.confirmation_order_id = confirmation_order_id
         self.cancel_calls = 0
         self.status_calls = 0
         self.last_cancel_order_id: str | None = None
@@ -48,7 +53,7 @@ class CancelBroker:
         if self.status_timeout:
             raise ProviderTimeoutError("toss", "toss_read_timeout")
         return BrokerOrderStatusResult(
-            provider_order_id=provider_order_id,
+            provider_order_id=self.confirmation_order_id or provider_order_id,
             status=self.status_result,
             raw_summary={
                 "provider_order_id": provider_order_id,
@@ -62,7 +67,7 @@ class CancelBroker:
         if self.timeout:
             raise ProviderTimeoutError("toss", "toss_write_timeout")
         return BrokerCancelOrderResult(
-            original_provider_order_id=provider_order_id,
+            original_provider_order_id=self.cancel_original_order_id or provider_order_id,
             cancel_provider_order_id="cancel-provider-order-1",
             raw_summary={
                 "original_order_id": provider_order_id,
@@ -78,6 +83,27 @@ class CancelBroker:
             daily_loss_pct=0.0,
             daily_order_count=0,
             synced_at=now,
+        )
+
+
+class BlockingCancelBroker(CancelBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_started = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+
+    async def cancel_order(self, provider_order_id: str) -> BrokerCancelOrderResult:
+        self.cancel_calls += 1
+        self.last_cancel_order_id = provider_order_id
+        self.cancel_started.set()
+        await self.release_cancel.wait()
+        return BrokerCancelOrderResult(
+            original_provider_order_id=provider_order_id,
+            cancel_provider_order_id="cancel-provider-order-1",
+            raw_summary={
+                "original_order_id": provider_order_id,
+                "cancel_order_id": "cancel-provider-order-1",
+            },
         )
 
 
@@ -110,6 +136,36 @@ async def test_cancel_live_order_marks_order_canceled_with_audit_payload() -> No
         },
     }
     assert repository.engine_events[-1]["message"] == "live_order_cancel_confirmed"
+
+
+async def test_cancel_live_order_reserves_before_single_broker_call() -> None:
+    repository = InMemoryRepository(BotSettings())
+    order = _order(mode="live", status="sent", provider_order_id="provider-order-1")
+    repository.orders.append(order)
+    broker = BlockingCancelBroker()
+    service = LiveOrderCancellationService(broker, repository)
+
+    first_cancel = asyncio.create_task(service.cancel_live_order(str(order.id)))
+    await broker.cancel_started.wait()
+
+    try:
+        await service.cancel_live_order(str(order.id))
+    except KnownFailClosedError as exc:
+        assert exc.safe_message == "order_not_cancelable"
+    else:
+        raise AssertionError("Expected concurrent cancellation to fail closed")
+
+    assert broker.cancel_calls == 1
+    assert repository.orders[0].status == "unknown_requires_manual_check"
+    assert repository.orders[0].reason == "live_broker_cancel_result_pending"
+
+    broker.release_cancel.set()
+    result = await first_cancel
+
+    assert result.status == "canceled"
+    assert broker.cancel_calls == 1
+    final_status: str = repository.orders[0].status
+    assert final_status == "canceled"
 
 
 async def test_cancel_live_order_rejects_non_live_order_without_broker_call() -> None:
@@ -210,6 +266,35 @@ async def test_cancel_live_order_confirmation_timeout_requires_manual_check() ->
     assert repository.engine_events[-1]["message"] == (
         "live_order_cancel_confirmation_unknown_requires_manual_check"
     )
+
+
+async def test_cancel_live_order_rejects_mismatched_cancel_identity() -> None:
+    repository = InMemoryRepository(BotSettings())
+    order = _order(mode="live", status="sent", provider_order_id="provider-order-1")
+    repository.orders.append(order)
+    broker = CancelBroker(cancel_original_order_id="different-provider-order")
+
+    result = await LiveOrderCancellationService(broker, repository).cancel_live_order(
+        str(order.id)
+    )
+
+    assert result.status == "unknown_requires_manual_check"
+    assert broker.status_calls == 0
+    assert repository.orders[0].reason == "broker_cancel_identity_mismatch"
+
+
+async def test_cancel_live_order_rejects_mismatched_confirmation_identity() -> None:
+    repository = InMemoryRepository(BotSettings())
+    order = _order(mode="live", status="sent", provider_order_id="provider-order-1")
+    repository.orders.append(order)
+    broker = CancelBroker(confirmation_order_id="different-provider-order")
+
+    result = await LiveOrderCancellationService(broker, repository).cancel_live_order(
+        str(order.id)
+    )
+
+    assert result.status == "unknown_requires_manual_check"
+    assert repository.orders[0].reason == "broker_cancel_confirmation_identity_mismatch"
 
 
 def _order(

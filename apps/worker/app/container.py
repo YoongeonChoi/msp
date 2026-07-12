@@ -117,7 +117,12 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
         ai,
         market_data_provider_name=market_data_provider_name,
     )
-    execution_service = ExecutionService(broker, repository, risk_service)
+    execution_service = ExecutionService(
+        broker,
+        repository,
+        risk_service,
+        shutdown_requested=lambda: shutdown.requested,
+    )
     order_reconciliation_service = OrderReconciliationService(
         broker,
         repository,
@@ -144,6 +149,8 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
         portfolio_service=portfolio_service,
         alert_notifier=alert_notifier,
         live_system_order_count_scope_accepted=settings.live_system_order_count_scope_accepted,
+        shutdown_requested=lambda: shutdown.requested,
+        mock_providers=settings.mock_providers,
     )
     return Container(
         trading_loop=TradingLoop(settings, shutdown, run_cycle),

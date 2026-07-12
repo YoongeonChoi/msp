@@ -11,8 +11,8 @@ All live orders require every live policy to pass:
 - fresh valid quote
 - account sync successful and fresh
 - Toss and Supabase healthy
-- max position not exceeded
-- max sector not exceeded
+- projected position after a buy does not exceed the maximum
+- projected sector exposure after a buy does not exceed the maximum
 - daily loss below limit
 - daily order count below limit and verified
 - order amount within limit
@@ -23,17 +23,20 @@ All live orders require every live policy to pass:
 - no cooldown
 - no shutdown in progress
 
+For live cycles, time-sensitive settings, provider/calendar state, account,
+positions, active strategy approval, and quote inputs are refreshed after
+feature collection. The final `RiskService` evaluation uses only that refreshed
+snapshot; any failure or state change blocks before a broker call.
+
 Paper orders use a separate policy set:
 
 - bot enabled
 - valid settings
 - active strategy version present
-- market open known true
 - fresh valid quote
 - account sync successful and fresh
-- critical provider health good
-- max position not exceeded
-- max sector not exceeded
+- projected simulated position after a buy does not exceed the maximum
+- projected simulated sector exposure after a buy does not exceed the maximum
 - daily loss below limit
 - daily order count below limit
 - order amount within limit
@@ -43,7 +46,20 @@ Paper orders use a separate policy set:
 - volatility acceptable
 - no cooldown
 
-Paper policy excludes `mode_live` and `live_order_allowed` so safe paper trading can run with `mode='paper'` and `live_order_allowed=false`. It still blocks stale quotes, missing quotes, provider health failures, critical news risk, exceeded limits, missing strategy version, duplicate signals, and invalid settings.
+Paper policy excludes `mode_live`, `live_order_allowed`, `market_open`, and provider-health gates so
+safe paper trading can run with `mode='paper'` and `live_order_allowed=false` outside market hours or
+while a broker health probe is degraded. Missing quote/provider data can still prevent a decision from
+being built. Paper position, liquidity, and volatility inputs are explicit simulation assumptions and are
+stored in `feature_snapshot.raw.risk_evidence`; verified critical-news evidence is used when present.
+
+Live buy exposure evidence:
+
+- Holdings must be synchronized from the broker and account equity must be positive and fresh.
+- The worker checks current symbol/sector exposure plus the proposed buy amount.
+- Unknown target sector, any unclassified held sector, or missing position sync blocks the buy.
+- Critical-news, liquidity, and volatility inputs must be explicit booleans in the feature evidence.
+- Position/sector maximum and critical-news policies do not block `sell` or `hold` decisions because
+  they do not add exposure; the remaining live policies still apply.
 
 Paper duplicate order prevention:
 
@@ -58,12 +74,14 @@ Fail-closed matrix:
 | Missing setting | Block | Block |
 | Invalid setting | Block | Block |
 | Missing strategy version | Block | Block |
-| Unknown market calendar | Block | Block |
+| Unknown market calendar | Does not block paper by itself | Block |
 | Missing quote | Block | Block |
 | Stale quote | Block | Block |
-| Unverified daily order count | Block | Block |
+| Unverified daily order count | Uses simulated paper count | Block |
 | Supabase unavailable | Block | Block |
-| Toss unavailable | Block | Block |
+| Toss health probe degraded | Does not block paper by itself | Block |
+| Unknown position or sector exposure | Uses recorded paper assumptions | Block new buy |
+| Missing liquidity or volatility evidence | Uses recorded paper assumptions | Block new buy |
 | Critical news risk | Block new buy | Block new buy |
 | Duplicate signal | Block | Block |
 | OpenAI unavailable | Use cached news risk or block affected new buys | Use cached news risk or block affected new buys |

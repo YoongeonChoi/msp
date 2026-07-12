@@ -26,6 +26,8 @@ class BotSettings:
     enabled: bool = False
     mode: TradingMode = "paper"
     live_order_allowed: bool = False
+    deployment_lock: bool = False
+    deployment_target_sha: str | None = None
     max_order_amount_krw: int = 100_000
     max_daily_loss_pct: float = 0.02
     max_daily_order_count: int = 10

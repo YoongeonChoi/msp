@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Block committed env files
         shell: bash
         run: |
@@ -57,17 +57,7 @@ jobs:
           done
           test "$found" = "1"
       - name: Require RLS for public tables
-        shell: bash
-        run: |
-          set -euo pipefail
-          for table in $(rg '^create table public\.([a-z_]+)' -or '$1' supabase/migrations/0001_schema.sql); do
-            rg "alter table public\.${table} enable row level security" supabase/migrations/0002_rls.sql
-          done
-      - name: Block anon and public writes
-        shell: bash
-        run: |
-          set -euo pipefail
-          ! rg -i "create policy .* to (anon|public)|for (insert|update|all) to (anon|public)" supabase/migrations
+        run: python .github/scripts/repository_safety.py migrations
       - name: Block destructive migrations without rollback note
         shell: bash
         run: |

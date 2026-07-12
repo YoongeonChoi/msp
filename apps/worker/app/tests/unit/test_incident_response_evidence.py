@@ -186,6 +186,17 @@ def test_incident_response_evidence_rejects_non_ack_dry_run() -> None:
         )
 
 
+def test_incident_response_evidence_rejects_mock_transport() -> None:
+    with pytest.raises(
+        IncidentResponseEvidenceValidationError,
+        match="incident_response_evidence.transport_must_be_real",
+    ):
+        verify_incident_response_evidence(
+            incident_output=_ack_output().replace("transport=real", "transport=mock"),
+            incident_channel_evidence=_valid_channel_evidence(),
+        )
+
+
 def test_incident_response_evidence_rejects_non_final_output_lines() -> None:
     with pytest.raises(IncidentResponseEvidenceValidationError) as exc_info:
         verify_incident_response_evidence(
@@ -542,7 +553,8 @@ def test_incident_response_evidence_requires_exact_acknowledged_true() -> None:
 def _ack_output() -> str:
     return (
         "FINAL=PASS live_incident_response_drill delivered=4 max_latency_ms=17 "
-        "acknowledged=true ack_latency_ms=2300 drill_id=incident-drill-20260628-1\n"
+        "acknowledged=true ack_latency_ms=2300 drill_id=incident-drill-20260628-1 "
+        "transport=real\n"
     )
 
 

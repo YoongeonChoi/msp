@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from urllib.parse import parse_qs
 
@@ -13,7 +14,12 @@ from app.adapters.broker.toss_client import TossClient
 from app.adapters.broker.toss_models import TossCandleQuery
 from app.application.ports.broker_port import BrokerOrderRequest
 from app.config import Settings
-from app.domain.common.errors import ProviderAuthError, ProviderRateLimitError
+from app.domain.common.errors import (
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderSchemaError,
+    ProviderUnknownError,
+)
 from app.domain.common.json import JsonObject
 from app.tools.test_toss_readonly import _mask_identifier
 
@@ -220,6 +226,41 @@ async def test_toss_client_parses_position_response() -> None:
     assert account_headers == ["1", "1"]
 
 
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (
+            lambda payload: payload["result"]["items"][0].__setitem__("marketCountry", "US"),
+            "toss_position_scope_unsupported",
+        ),
+        (
+            lambda payload: payload["result"]["items"][0].__setitem__("lastPrice", "0"),
+            "toss_position_last_price_invalid",
+        ),
+        (
+            lambda payload: payload["result"]["items"][0]["marketValue"].__setitem__(
+                "amount", "7100000"
+            ),
+            "toss_position_market_value_mismatch",
+        ),
+        (
+            lambda payload: payload["result"].__setitem__("items", []),
+            "toss_positions_overview_mismatch",
+        ),
+    ],
+)
+async def test_toss_client_rejects_incomplete_or_unvalued_positions(
+    mutate: Callable[[JsonObject], None],
+    reason: str,
+) -> None:
+    payload = _holdings_payload()
+    mutate(payload)
+    client, _requests = _client_with_responses({"/api/v1/holdings": payload})
+
+    with pytest.raises(ProviderSchemaError, match=reason):
+        await client.get_positions(datetime(2026, 3, 25, 1, 0, tzinfo=UTC))
+
+
 async def test_toss_client_parses_buying_power_calendar_and_account_state() -> None:
     client, requests = _client_with_responses(
         {
@@ -355,6 +396,30 @@ async def test_toss_place_order_posts_official_limit_order_payload() -> None:
     }
 
 
+@pytest.mark.parametrize("client_order_id", [None, "different-live-key"])
+async def test_toss_place_order_rejects_unbound_create_response(
+    client_order_id: str | None,
+) -> None:
+    client, _requests = _client_with_responses(
+        {
+            "/api/v1/orders": {
+                "result": {"orderId": "order-1", "clientOrderId": client_order_id}
+            }
+        }
+    )
+    request = BrokerOrderRequest(
+        symbol="005930",
+        side="buy",
+        amount_krw=75_000,
+        idempotency_key="live-key-1",
+        quantity=1,
+        limit_price_krw=75_000,
+    )
+
+    with pytest.raises(ProviderUnknownError, match="toss_order_create_identity_mismatch"):
+        await client.place_order(request)
+
+
 async def test_toss_get_order_status_maps_official_status_enum() -> None:
     client, requests = _client_with_responses(
         {
@@ -389,6 +454,21 @@ async def test_toss_get_order_status_maps_official_status_enum() -> None:
         "/api/v1/orders/order-1",
         "/api/v1/orders/order-2",
     ]
+
+
+async def test_toss_get_order_status_rejects_mismatched_response_order_id() -> None:
+    client, _requests = _client_with_responses(
+        {
+            "/api/v1/orders/order-1": _order_payload(
+                order_id="different-order",
+                status="FILLED",
+                filled_quantity="1",
+            )
+        }
+    )
+
+    with pytest.raises(ProviderSchemaError, match="toss_order_status_identity_mismatch"):
+        await client.get_order_status("order-1")
 
 
 async def test_toss_cancel_order_posts_official_cancel_endpoint() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from urllib.parse import quote
 
@@ -15,7 +15,10 @@ from app.adapters.persistence.models import (
     order_to_row,
     position_to_row,
 )
-from app.adapters.persistence.supabase_row_parsing import strategy_version_from_row
+from app.adapters.persistence.supabase_row_parsing import (
+    bot_settings_from_row,
+    strategy_version_from_row,
+)
 from app.config import Settings
 from app.domain.common.json import JsonObject, json_object
 from app.domain.common.time import now_utc
@@ -52,32 +55,33 @@ class SupabaseRepository:
         response = await self.client.get(f"{self.base_url}/bot_settings?select=*&id=eq.singleton")
         response.raise_for_status()
         rows = response.json()
-        if not rows:
+        if not isinstance(rows, list):
+            raise ValueError("bot_settings_response_invalid")
+        if len(rows) == 0:
             return BotSettings()
-        row = rows[0]
-        return BotSettings(
-            enabled=bool(row.get("enabled", False)),
-            mode=row.get("mode", "paper"),
-            live_order_allowed=bool(row.get("live_order_allowed", False)),
-            max_order_amount_krw=int(row.get("max_order_amount_krw", 100_000)),
-            max_daily_loss_pct=float(row.get("max_daily_loss_pct", 0.02)),
-            max_daily_order_count=int(row.get("max_daily_order_count", 10)),
-            max_position_pct=float(row.get("max_position_pct", 0.10)),
-            max_sector_pct=float(row.get("max_sector_pct", 0.30)),
-            loop_interval_sec=int(row.get("loop_interval_sec", 30)),
-        )
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise ValueError("bot_settings_response_invalid")
+        return bot_settings_from_row(rows[0])
 
     async def load_enabled_watchlist(self) -> list[str]:
         response = await self.client.get(f"{self.base_url}/watchlist?select=symbol&enabled=eq.true")
         response.raise_for_status()
         return [str(row["symbol"]) for row in response.json()]
 
-    async def load_active_strategy_version(self) -> StrategyVersion | None:
+    async def load_active_strategy_version(
+        self,
+        required_status: str | None = None,
+    ) -> StrategyVersion | None:
+        status_filter = (
+            f"status=eq.{required_status}"
+            if required_status is not None
+            else "status=in.(paper,active)"
+        )
         queries = (
-            "version_name=eq.strategy_v1_weighted_factor&status=in.(paper,active)"
+            f"version_name=eq.strategy_v1_weighted_factor&{status_filter}"
             "&order=created_at.desc&limit=1",
-            "status=in.(paper,active)&order=created_at.desc&limit=1",
-            "version=eq.strategy_v1_weighted_factor&status=in.(paper,active)"
+            f"{status_filter}&order=created_at.desc&limit=1",
+            f"version=eq.strategy_v1_weighted_factor&{status_filter}"
             "&order=created_at.desc&limit=1",
         )
         for query in queries:
@@ -142,6 +146,22 @@ class SupabaseRepository:
         rows = await self._select_rows("orders", query)
         return len(rows)
 
+    async def has_recent_live_order_for_symbol(
+        self,
+        symbol: str,
+        since: datetime,
+    ) -> bool:
+        since_time = quote(since.astimezone(UTC).isoformat(), safe="")
+        encoded_symbol = quote(symbol, safe="")
+        query = (
+            "select=id&mode=eq.live"
+            f"&symbol=eq.{encoded_symbol}"
+            "&status=in.(sent,partial_filled,filled,canceled,unknown_requires_manual_check)"
+            f"&created_at=gte.{since_time}&limit=1"
+        )
+        rows = await self._select_rows("orders", query)
+        return bool(rows)
+
     async def load_order_by_id(self, order_id: str) -> Order | None:
         rows = await self._select_rows(
             "orders",
@@ -158,7 +178,8 @@ class SupabaseRepository:
         reason: str | None,
         provider_payload_summary: dict[str, object] | None,
         provider_order_id: str | None = None,
-    ) -> None:
+        expected_statuses: Collection[OrderStatus] | None = None,
+    ) -> bool:
         row: dict[str, object] = {
             "status": status,
             "reason": reason,
@@ -167,11 +188,18 @@ class SupabaseRepository:
         }
         if provider_order_id is not None:
             row["provider_order_id"] = provider_order_id
+        filters = f"id=eq.{quote(order_id, safe='')}"
+        if expected_statuses is not None:
+            statuses = ",".join(sorted(expected_statuses))
+            filters += f"&status=in.({statuses})"
         response = await self.client.patch(
-            f"{self.base_url}/orders?id=eq.{quote(order_id, safe='')}",
+            f"{self.base_url}/orders?{filters}",
             json=row,
+            headers=self.headers | {"prefer": "return=representation"},
         )
         response.raise_for_status()
+        rows = response.json()
+        return isinstance(rows, list) and len(rows) == 1
 
     async def record_heartbeat(self, status: str, details: dict[str, object]) -> None:
         await self._insert("worker_heartbeats", {"status": status, "details": details})

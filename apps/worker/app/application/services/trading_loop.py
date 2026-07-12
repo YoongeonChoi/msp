@@ -33,4 +33,6 @@ class TradingLoop:
                     exc.safe_message,
                     {"fail_closed": True, "loop_continues": True},
                 )
+            if self.shutdown.requested:
+                break
             await asyncio.sleep(self.settings.loop_interval_sec)

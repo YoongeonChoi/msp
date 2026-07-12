@@ -227,6 +227,8 @@ def _risk_input(now: datetime, signal: Signal, strategy_version_id: UUID) -> Ris
         cooldown_active=False,
         duplicate_order=False,
         strategy_version_id=strategy_version_id,
+        strategy_status="active",
+        strategy_approved=True,
     )
 
 

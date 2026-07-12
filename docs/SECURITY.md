@@ -39,12 +39,11 @@ Security workflow coverage:
 - Gitleaks-compatible secret scanning.
 - Built-in common secret pattern scanning for OpenAI, GitHub, Slack, AWS-style keys, private keys, and configured provider secret assignments.
 - Committed `.env` blocking, with `.env.example` as the only allowed env-shaped file.
-- `npm audit` advisory checks.
-- `pip-audit` advisory checks.
-- `bandit` advisory checks.
+- Blocking `npm audit`, `pip-audit`, and Bandit gates.
+- Third-party GitHub Actions pinned to immutable full commit SHAs.
 - Workflow policy guard for unsafe patterns.
 
-Secret scans must print only file paths, not matched secret values. CI must fail if workflow files reference production trading/API secrets such as `SUPABASE_SECRET_KEY`, `TOSS_CLIENT_SECRET`, `OPENAI_API_KEY`, `NAVER_CLIENT_SECRET`, `KRX_API_KEY`, `OPENDART_API_KEY`, or `ALERT_WEBHOOK_URL`.
+Secret scans must print only file paths, not matched secret values. CI must fail if either `.yml` or `.yaml` workflow files reference production trading/API secrets such as `SUPABASE_SECRET_KEY`, `TOSS_CLIENT_SECRET`, `OPENAI_API_KEY`, `NAVER_CLIENT_SECRET`, `KRX_API_KEY`, `OPENDART_API_KEY`, `ALERT_WEBHOOK_URL`, `RENDER_DEPLOY_HOOK_URL`, `SUPABASE_LIVE_REQUESTER_JWT`, or `SUPABASE_LIVE_REVIEWER_JWT`. The same centralized repository-safety command is used by CI and migration/security workflows.
 
 ## Secrets
 

@@ -7,6 +7,10 @@ class NewsCriticalPolicy:
     name = "news_critical"
 
     def evaluate(self, risk_input: RiskInput) -> PolicyResult:
-        if risk_input.signal.action == "buy" and risk_input.critical_news_risk:
+        if risk_input.signal.action != "buy":
+            return allow(self.name)
+        if risk_input.critical_news_risk is None:
+            return block(self.name, "critical_news_risk_unknown", severity="high")
+        if risk_input.critical_news_risk:
             return block(self.name, "critical_negative_news_risk")
         return allow(self.name)

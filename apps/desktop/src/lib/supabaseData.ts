@@ -376,8 +376,12 @@ export async function updateDraftStrategyJson(input: StrategyJsonPatch): Promise
     .from("strategy_versions")
     .update({ weights: input.weightsJson, params: input.paramsJson })
     .eq("id", input.id)
-    .in("status", ["draft", "proposed"]);
+    .eq("status", "draft")
+    .select("id");
   failOnError("strategy_versions", result.error);
+  if ((result.data ?? []).length !== 1) {
+    throw new CockpitDataError("strategy_versions", "저장할 draft 전략을 찾지 못했습니다.");
+  }
 }
 
 export async function reviewAiUpgradeCandidate(input: {

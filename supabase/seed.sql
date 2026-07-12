@@ -36,7 +36,7 @@ insert into public.strategy_versions (
 )
 values (
   'weighted_factor_v1_seed',
-  'active',
+  'paper',
   'WeightedFactorStrategyV1',
   '{"technical":0.35,"fundamental":0.25,"market_sector":0.15,"news_event":0.15,"portfolio":0.10}'::jsonb,
   '{"buy_threshold":0.68,"sell_threshold":0.25}'::jsonb

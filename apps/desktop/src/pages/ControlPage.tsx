@@ -152,7 +152,8 @@ export function ControlPage({
   const current = settings.data;
   const liveRows = liveCommands.data ?? [];
   const acceptedLiveCommand = freshAcceptedLiveCommand(liveRows);
-  const canActivateLive = confirmText === livePhrase && acceptedLiveCommand !== null;
+  const canActivateLive =
+    confirmText === livePhrase && acceptedLiveCommand !== null && !current.deploymentLock;
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_0.9fr]">
@@ -161,7 +162,7 @@ export function ControlPage({
         <div className="grid gap-3 sm:grid-cols-3">
           <button
             className={pageButtonClass("safe")}
-            disabled={updateMutation.isPending}
+            disabled={updateMutation.isPending || current.deploymentLock}
             onClick={() => {
               if (window.confirm("Paper Trading을 시작할까요? live_order_allowed=false가 유지됩니다.")) {
                 updateMutation.mutate({ enabled: true, mode: "paper", liveOrderAllowed: false });
@@ -175,8 +176,8 @@ export function ControlPage({
             className={pageButtonClass("warning")}
             disabled={updateMutation.isPending}
             onClick={() => {
-              if (window.confirm("거래 봇을 정지할까요? enabled=false로 변경되며 데이터 조회는 계속 가능합니다.")) {
-                updateMutation.mutate({ enabled: false });
+              if (window.confirm("거래 봇을 정지할까요? enabled=false, live_order_allowed=false로 변경되며 데이터 조회는 계속 가능합니다.")) {
+                updateMutation.mutate({ enabled: false, liveOrderAllowed: false });
               }
             }}
           >
@@ -199,6 +200,11 @@ export function ControlPage({
         {updateMutation.error ? (
           <p className="mt-3 text-sm text-red-700">bot_settings 변경에 실패했습니다.</p>
         ) : null}
+        {current.deploymentLock ? (
+          <p className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            배포 안전 잠금이 활성화되어 있습니다. 새 worker heartbeat 검증이 끝날 때까지 봇 시작과 Live 승인이 차단됩니다.
+          </p>
+        ) : null}
 
         <div className="mt-5 rounded-md border border-line p-4">
           <SectionTitle title="현재 상태" />
@@ -207,6 +213,18 @@ export function ControlPage({
           <KeyValue
             label="실주문 허용"
             value={<Pill tone={current?.liveOrderAllowed ? "danger" : "safe"}>{current?.liveOrderAllowed ? "예" : "아니오"}</Pill>}
+          />
+          <KeyValue
+            label="배포 안전 잠금"
+            value={
+              <Pill tone={current.deploymentLock ? "danger" : "safe"}>
+                {current.deploymentLock ? "잠김" : "해제"}
+              </Pill>
+            }
+          />
+          <KeyValue
+            label="배포 대상"
+            value={current.deploymentTargetSha?.slice(0, 12) ?? "-"}
           />
           <KeyValue label="최대 주문 금액" value={formatKrw(current?.maxOrderAmountKrw)} />
           <KeyValue label="최대 일 손실" value={formatRatio(current?.maxDailyLossPct)} />
@@ -270,7 +288,10 @@ export function ControlPage({
                 onChange={(value) => setLiveForm({ ...liveForm, expiresInMinutes: value })}
               />
             </div>
-            <button className={pageButtonClass("warning")} disabled={requestLiveMutation.isPending}>
+            <button
+              className={pageButtonClass("warning")}
+              disabled={requestLiveMutation.isPending || current.deploymentLock}
+            >
               <ShieldCheck size={16} aria-hidden="true" />
               Live 승인 요청
             </button>
@@ -289,6 +310,7 @@ export function ControlPage({
                 command={command}
                 currentUserId={currentUserId.data ?? null}
                 isReviewPending={reviewLiveMutation.isPending}
+                activationBlocked={current.deploymentLock}
                 onAccept={() => reviewLiveMutation.mutate({ id: command.id, status: "accepted" })}
                 onReject={() =>
                   reviewLiveMutation.mutate({
@@ -373,17 +395,19 @@ function LiveCommandCard({
   command,
   currentUserId,
   isReviewPending,
+  activationBlocked,
   onAccept,
   onReject
 }: {
   readonly command: ManualCommandRow;
   readonly currentUserId: string | null;
   readonly isReviewPending: boolean;
+  readonly activationBlocked: boolean;
   readonly onAccept: () => void;
   readonly onReject: () => void;
 }) {
   const isOwnRequest = currentUserId !== null && command.requestedBy === currentUserId;
-  const acceptDisabled = isReviewPending || isOwnRequest;
+  const acceptDisabled = isReviewPending || isOwnRequest || activationBlocked;
 
   return (
     <div className="rounded-md border border-red-200 bg-white p-3 text-sm">
@@ -462,7 +486,19 @@ function parseRiskForm(form: RiskForm) {
     !Number.isFinite(maxDailyLossPct) ||
     !Number.isFinite(maxDailyOrderCount) ||
     !Number.isFinite(maxPositionPct) ||
-    !Number.isFinite(maxSectorPct)
+    !Number.isFinite(maxSectorPct) ||
+    maxOrderAmountKrw <= 0 ||
+    maxOrderAmountKrw > 100000000 ||
+    !Number.isInteger(maxOrderAmountKrw) ||
+    maxDailyLossPct <= 0 ||
+    maxDailyLossPct > 0.2 ||
+    !Number.isInteger(maxDailyOrderCount) ||
+    maxDailyOrderCount < 1 ||
+    maxDailyOrderCount > 1000 ||
+    maxPositionPct <= 0 ||
+    maxPositionPct > 1 ||
+    maxSectorPct <= 0 ||
+    maxSectorPct > 1
   ) {
     return null;
   }

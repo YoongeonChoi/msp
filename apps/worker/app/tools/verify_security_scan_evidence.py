@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
+import re
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
-from urllib.request import Request, urlopen
 
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
+from app.infrastructure.retained_https import fetch_retained_https
 from app.tools.verify_live_readiness_evidence_bundle import (
     BundleValidationError,
     SecurityScanEvidenceSummary,
@@ -39,12 +41,12 @@ def verify_security_scan_evidence_file(
     remote_timeout_seconds: int = REMOTE_REPORT_TIMEOUT_SECONDS,
 ) -> SecurityScanEvidenceSummary:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise SecurityScanEvidenceValidationError(
             "security_scan_evidence_unreadable"
         ) from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise SecurityScanEvidenceValidationError(
             "security_scan_evidence_json_invalid"
         ) from exc
@@ -158,10 +160,25 @@ def _validate_security_scan_report_uri_repo_artifact(
 
     parts = urlsplit(report_uri)
     host = parts.hostname.rstrip(".").casefold() if parts.hostname else ""
-    if host not in {"github.com", "www.github.com"}:
+    if host not in {"github.com", "www.github.com", "raw.githubusercontent.com"}:
+        return
+
+    source_head = evidence.get("source_head")
+    if not isinstance(source_head, str):
+        return
+    _validate_github_report_binding(
+        host,
+        parts.path,
+        source_head=source_head,
+        repo_root=repo_root,
+        path=path,
+        errors=errors,
+    )
+    if errors:
         return
 
     repo_artifact_path = _github_report_uri_repo_path(
+        host,
         parts.path,
         repo_root=repo_root,
         path=path,
@@ -222,27 +239,76 @@ def _github_report_uri_is_blob_page(report_uri: str) -> bool:
 
 
 def _default_remote_report_fetcher(report_uri: str, timeout_seconds: int) -> bytes:
-    request = Request(
+    return fetch_retained_https(
         report_uri,
-        headers={"User-Agent": "kr-auto-trading-lab-live-readiness-verifier"},
+        timeout_seconds,
+        max_bytes=MAX_REMOTE_REPORT_BYTES,
+        user_agent="kr-auto-trading-lab-live-readiness-verifier",
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return cast(bytes, response.read(MAX_REMOTE_REPORT_BYTES + 1))
+
+
+def _validate_github_report_binding(
+    host: str,
+    uri_path: str,
+    *,
+    source_head: str,
+    repo_root: Path,
+    path: str,
+    errors: list[str],
+) -> None:
+    components = _github_report_components(host, uri_path)
+    if components is None:
+        errors.append(f"{path}.report_uri_github_artifact_must_reference_repo_blob")
+        return
+    owner, repository_name, revision, _artifact_segments = components
+    repository = _github_repository_slug(repo_root)
+    if repository is None:
+        errors.append(f"{path}.report_uri_github_repository_unverifiable")
+        return
+    if (owner.casefold(), repository_name.removesuffix(".git").casefold()) != repository:
+        errors.append(f"{path}.report_uri_github_repository_mismatch")
+    if revision != source_head:
+        errors.append(f"{path}.report_uri_github_revision_must_match_source_head")
+
+
+def _github_repository_slug(repo_root: Path) -> tuple[str, str] | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    remote = completed.stdout.strip()
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?",
+        remote,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return match.group(1).casefold(), match.group(2).casefold()
 
 
 def _github_report_uri_repo_path(
+    host: str,
     uri_path: str,
     *,
     repo_root: Path,
     path: str,
     errors: list[str],
 ) -> Path | None:
-    parts = [unquote(part) for part in uri_path.split("/") if part]
-    if len(parts) < 5 or parts[2] not in {"blob", "raw"}:
+    components = _github_report_components(host, uri_path)
+    if components is None:
         errors.append(f"{path}.report_uri_github_artifact_must_reference_repo_blob")
         return None
-
-    artifact_segments = parts[4:]
+    _owner, _repository_name, _revision, artifact_segments = components
     if _has_unsafe_repo_artifact_segments(artifact_segments):
         errors.append(f"{path}.report_uri_github_artifact_must_reference_repo_file")
         return None
@@ -260,6 +326,22 @@ def _github_report_uri_repo_path(
         errors.append(f"{path}.report_uri_github_artifact_unreadable")
         return None
     return repo_artifact
+
+
+def _github_report_components(
+    host: str,
+    uri_path: str,
+) -> tuple[str, str, str, list[str]] | None:
+    parts = [unquote(part) for part in uri_path.split("/") if part]
+    if host in {"github.com", "www.github.com"}:
+        if len(parts) < 5 or parts[2] not in {"blob", "raw"}:
+            return None
+        return parts[0], parts[1], parts[3], parts[4:]
+    if host == "raw.githubusercontent.com":
+        if len(parts) < 4:
+            return None
+        return parts[0], parts[1], parts[2], parts[3:]
+    return None
 
 
 def _has_unsafe_repo_artifact_segments(segments: Sequence[str]) -> bool:

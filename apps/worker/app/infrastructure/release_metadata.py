@@ -32,11 +32,19 @@ def worker_release_metadata(
 def worker_heartbeat_details(
     cycle_id: str,
     *,
+    deployment_lock: bool = False,
+    deployment_target_sha: str | None = None,
+    mock_providers: bool | None = None,
     env: Mapping[str, str] | None = None,
     metadata_path: Path = RELEASE_METADATA_PATH,
 ) -> dict[str, object]:
     details: dict[str, object] = {"cycle_id": cycle_id}
     details.update(worker_release_metadata(env=env, metadata_path=metadata_path))
+    details["deployment_lock"] = deployment_lock
+    if deployment_target_sha is not None:
+        details["deployment_target_sha"] = deployment_target_sha
+    if mock_providers is not None:
+        details["mock_providers"] = mock_providers
     return details
 
 

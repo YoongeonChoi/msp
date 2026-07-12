@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 
@@ -15,7 +16,10 @@ class RepositoryPort(Protocol):
 
     async def load_enabled_watchlist(self) -> list[str]: ...
 
-    async def load_active_strategy_version(self) -> StrategyVersion | None: ...
+    async def load_active_strategy_version(
+        self,
+        required_status: str | None = None,
+    ) -> StrategyVersion | None: ...
 
     async def persist_decision_snapshot(self, snapshot: DecisionSnapshot) -> None: ...
 
@@ -33,6 +37,12 @@ class RepositoryPort(Protocol):
         end: datetime,
     ) -> int: ...
 
+    async def has_recent_live_order_for_symbol(
+        self,
+        symbol: str,
+        since: datetime,
+    ) -> bool: ...
+
     async def load_order_by_id(self, order_id: str) -> Order | None: ...
 
     async def update_order_status(
@@ -42,7 +52,8 @@ class RepositoryPort(Protocol):
         reason: str | None,
         provider_payload_summary: dict[str, object] | None,
         provider_order_id: str | None = None,
-    ) -> None: ...
+        expected_statuses: Collection[OrderStatus] | None = None,
+    ) -> bool: ...
 
     async def record_heartbeat(self, status: str, details: dict[str, object]) -> None: ...
 

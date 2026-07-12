@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
-from xml.etree import ElementTree
+from xml.etree.ElementTree import Element, ParseError
 from zipfile import BadZipFile, ZipFile
 
 import httpx
+from defusedxml import ElementTree as DefusedElementTree
+from defusedxml.common import DefusedXmlException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.domain.common.errors import (
@@ -145,8 +147,8 @@ def parse_corp_code_zip(content: bytes) -> dict[str, OpenDartCorpCode]:
         raise ProviderSchemaError("opendart", "opendart_corp_code_xml_too_large")
     _reject_unsafe_xml_declarations(xml_bytes)
     try:
-        root = ElementTree.fromstring(xml_bytes)
-    except ElementTree.ParseError as exc:
+        root = DefusedElementTree.fromstring(xml_bytes)
+    except (DefusedXmlException, ParseError) as exc:
         raise ProviderSchemaError("opendart", "opendart_corp_code_xml_invalid") from exc
     corp_codes: dict[str, OpenDartCorpCode] = {}
     for entry_count, entry in enumerate(root.findall("list"), start=1):
@@ -223,7 +225,7 @@ def _normalize_account_name(value: str) -> str:
     return "".join(char for char in value if char.isalnum())
 
 
-def _xml_text(entry: ElementTree.Element, tag: str) -> str:
+def _xml_text(entry: Element, tag: str) -> str:
     child = entry.find(tag)
     return "" if child is None or child.text is None else child.text.strip()
 

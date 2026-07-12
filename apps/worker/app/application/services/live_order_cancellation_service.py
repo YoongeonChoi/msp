@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.application.ports.broker_port import BrokerPort
 from app.application.ports.repository_port import RepositoryPort
@@ -43,12 +43,65 @@ class LiveOrderCancellationService:
                 status="unknown_requires_manual_check",
                 reason="missing_provider_order_id_for_cancel",
                 provider_payload_summary=order.provider_payload_summary,
+                expected_statuses={order.status},
             )
             await self._record_rejection(order_id, "missing_provider_order_id_for_cancel", order)
             raise KnownFailClosedError("live_cancel", "missing_provider_order_id_for_cancel")
 
+        reserved = await self.repository.update_order_status(
+            order_id=str(order.id),
+            status="unknown_requires_manual_check",
+            reason="live_broker_cancel_result_pending",
+            provider_payload_summary=_cancel_payload(
+                order,
+                cancel_failure_reason="live_broker_cancel_result_pending",
+            ),
+            expected_statuses={order.status},
+        )
+        if not reserved:
+            current = await self.repository.load_order_by_id(str(order.id))
+            if current is None:
+                await self._record_rejection(order_id, "cancel_reservation_order_missing", order)
+                raise KnownFailClosedError(
+                    "live_cancel",
+                    "cancel_reservation_order_missing",
+                )
+            await self.repository.record_engine_event(
+                "warning",
+                "live_cancel",
+                "live_order_cancel_concurrent_transition_skipped",
+                {
+                    "order_id": str(order.id),
+                    "symbol": order.symbol,
+                    "observed_status": order.status,
+                    "current_status": current.status,
+                },
+            )
+            return LiveOrderCancellationResult(
+                str(current.id),
+                current.status,
+                "concurrent_order_status_change",
+            )
+        order = replace(
+            order,
+            status="unknown_requires_manual_check",
+            reason="live_broker_cancel_result_pending",
+        )
+        provider_order_id = order.provider_order_id
+        assert provider_order_id is not None
+        await self.repository.record_engine_event(
+            "info",
+            "live_cancel",
+            "live_order_cancel_result_pending",
+            {
+                "order_id": str(order.id),
+                "symbol": order.symbol,
+                "provider_order_id_present": True,
+            },
+        )
+
         try:
-            cancel_result = await self.broker.cancel_order(order.provider_order_id)
+            cancel_result = await self.broker.cancel_order(provider_order_id)
         except (ProviderTimeoutError, ProviderUnknownError) as exc:
             return await self._mark_unknown_requires_manual_check(
                 order,
@@ -65,8 +118,17 @@ class LiveOrderCancellationService:
             )
             raise
 
+        if cancel_result.original_provider_order_id != provider_order_id:
+            return await self._mark_unknown_requires_manual_check(
+                order,
+                reason="broker_cancel_identity_mismatch",
+                event_message="live_order_cancel_identity_mismatch",
+                cancel_summary=cancel_result.raw_summary,
+                cancel_failure_reason="broker_cancel_identity_mismatch",
+            )
+
         try:
-            confirmation = await self.broker.get_order_status(order.provider_order_id)
+            confirmation = await self.broker.get_order_status(provider_order_id)
         except (ProviderTimeoutError, ProviderUnknownError) as exc:
             return await self._mark_unknown_requires_manual_check(
                 order,
@@ -85,6 +147,16 @@ class LiveOrderCancellationService:
             )
             raise
 
+        if confirmation.provider_order_id != provider_order_id:
+            return await self._mark_unknown_requires_manual_check(
+                order,
+                reason="broker_cancel_confirmation_identity_mismatch",
+                event_message="live_order_cancel_confirmation_identity_mismatch",
+                cancel_summary=cancel_result.raw_summary,
+                confirmation_summary=confirmation.raw_summary,
+                confirmation_failure_reason="broker_cancel_confirmation_identity_mismatch",
+            )
+
         if confirmation.status != "canceled":
             reason = f"cancel_confirmation_status_{confirmation.status}"
             return await self._mark_unknown_requires_manual_check(
@@ -96,7 +168,7 @@ class LiveOrderCancellationService:
                 confirmation_failure_reason=reason,
             )
 
-        await self.repository.update_order_status(
+        updated = await self.repository.update_order_status(
             order_id=str(order.id),
             status="canceled",
             reason="operator_cancel_confirmed",
@@ -105,7 +177,27 @@ class LiveOrderCancellationService:
                 cancel_summary=cancel_result.raw_summary,
                 confirmation_summary=confirmation.raw_summary,
             ),
+            expected_statuses={order.status},
         )
+        if not updated:
+            current = await self.repository.load_order_by_id(str(order.id))
+            if current is not None:
+                await self.repository.record_engine_event(
+                    "warning",
+                    "live_cancel",
+                    "live_order_cancel_concurrent_transition_skipped",
+                    {
+                        "order_id": str(order.id),
+                        "symbol": order.symbol,
+                        "observed_status": order.status,
+                        "current_status": current.status,
+                    },
+                )
+                return LiveOrderCancellationResult(
+                    str(current.id),
+                    current.status,
+                    "concurrent_order_status_change",
+                )
         await self.repository.record_engine_event(
             "info",
             "live_cancel",
@@ -131,7 +223,7 @@ class LiveOrderCancellationService:
         cancel_failure_reason: str | None = None,
         confirmation_failure_reason: str | None = None,
     ) -> LiveOrderCancellationResult:
-        await self.repository.update_order_status(
+        updated = await self.repository.update_order_status(
             order_id=str(order.id),
             status="unknown_requires_manual_check",
             reason=reason,
@@ -142,7 +234,16 @@ class LiveOrderCancellationService:
                 cancel_failure_reason=cancel_failure_reason,
                 confirmation_failure_reason=confirmation_failure_reason,
             ),
+            expected_statuses={order.status},
         )
+        if not updated:
+            current = await self.repository.load_order_by_id(str(order.id))
+            if current is not None:
+                return LiveOrderCancellationResult(
+                    str(current.id),
+                    current.status,
+                    "concurrent_order_status_change",
+                )
         await self.repository.record_engine_event(
             "critical",
             "live_cancel",

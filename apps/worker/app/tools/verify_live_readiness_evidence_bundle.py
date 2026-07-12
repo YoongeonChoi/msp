@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import ipaddress
-import json
 import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
@@ -13,12 +12,13 @@ from pathlib import Path, PureWindowsPath
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import SplitResult, unquote, urlsplit
-from urllib.request import Request, urlopen
 
 from app.application.services.provider_gap_gate import (
     ProviderGapEvidenceValidationError,
     verify_provider_gap_evidence,
 )
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
+from app.infrastructure.retained_https import fetch_retained_https
 from app.tools.verify_provider_lifecycle_evidence import (
     EvidenceValidationError as ProviderLifecycleEvidenceValidationError,
 )
@@ -61,6 +61,7 @@ DOCUMENTED_PROVIDER_WARNING_GAP_IDS = frozenset(
 )
 PROVIDER_GAP_WARNING_ID_RE = re.compile(r"^[a-z0-9]+:[a-z0-9-]+:[a-z0-9-]+$")
 MAX_EVIDENCE_WINDOW_SECONDS = 24 * 60 * 60
+MAX_BUNDLE_AGE_SECONDS = 24 * 60 * 60
 MAX_FUTURE_EVIDENCE_SKEW_SECONDS = 5 * 60
 INCIDENT_EVIDENCE_BLOCKED_TERMS = (
     "sample",
@@ -83,8 +84,6 @@ SYSTEM_ORDER_SCOPE_ACCEPTANCE_OPERATOR_BLOCKED_TERMS = INCIDENT_ACK_OPERATOR_BLO
 SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS = INCIDENT_EVIDENCE_BLOCKED_TERMS + (
     "example.com",
     "file://",
-    "/tmp/",
-    "\\tmp\\",
 )
 SECURITY_SCAN_REPORT_BLOCKED_TERMS = SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS
 FEATURE_EVIDENCE_BLOCKED_TERMS = SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS + (
@@ -139,6 +138,7 @@ INCIDENT_FINAL_OUTPUT_METRIC_KEYS = {
     "acknowledged",
     "ack_latency_ms",
     "drill_id",
+    "transport",
 }
 HOSTED_SUPABASE_LIVE_READINESS_FINAL_OUTPUT_METRIC_KEYS = {
     "postgrest",
@@ -363,10 +363,10 @@ def verify_live_readiness_evidence_bundle_file(
     remote_feature_artifact_timeout_seconds: int = REMOTE_EVIDENCE_TIMEOUT_SECONDS,
 ) -> LiveReadinessEvidenceBundleSummary:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise BundleValidationError("bundle_file_unreadable") from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise BundleValidationError("bundle_json_invalid") from exc
     if not isinstance(payload, Mapping):
         raise BundleValidationError("bundle_root_must_be_object")
@@ -644,8 +644,11 @@ def verify_feature_evidence_remote_artifacts(
 
 def verify_live_readiness_evidence_bundle(
     payload: Mapping[str, object],
+    *,
+    current_time: datetime | None = None,
 ) -> LiveReadinessEvidenceBundleSummary:
     errors: list[str] = []
+    validation_time = current_time or _current_utc()
     _scan_for_sensitive_keys(payload, "bundle", errors)
     _reject_unknown_keys(payload, BUNDLE_KEYS, "bundle", errors)
 
@@ -660,6 +663,20 @@ def verify_live_readiness_evidence_bundle(
     reviewed_at = _require_timestamp(payload, "reviewed_at", "bundle", errors)
     _require_not_future(generated_at, "bundle.generated_at", errors)
     _require_not_future(reviewed_at, "bundle.reviewed_at", errors)
+    _require_not_older_than(
+        generated_at,
+        "bundle.generated_at",
+        MAX_BUNDLE_AGE_SECONDS,
+        errors,
+        current_time=validation_time,
+    )
+    _require_not_older_than(
+        reviewed_at,
+        "bundle.reviewed_at",
+        MAX_BUNDLE_AGE_SECONDS,
+        errors,
+        current_time=validation_time,
+    )
     if generated_at is not None and reviewed_at is not None and reviewed_at <= generated_at:
         errors.append("reviewed_at_must_be_after_generated_at")
     if (
@@ -1195,12 +1212,12 @@ def _retained_uri_is_github_blob_page(uri: str) -> bool:
 
 
 def _default_remote_evidence_fetcher(uri: str, timeout_seconds: int) -> bytes:
-    request = Request(
+    return fetch_retained_https(
         uri,
-        headers={"User-Agent": "kr-auto-trading-lab-live-readiness-verifier"},
+        timeout_seconds,
+        max_bytes=MAX_REMOTE_EVIDENCE_BYTES,
+        user_agent="kr-auto-trading-lab-live-readiness-verifier",
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return cast(bytes, response.read(MAX_REMOTE_EVIDENCE_BYTES + 1))
 
 
 def _canonical_retained_uri_key(value: str) -> str:
@@ -1256,6 +1273,9 @@ def _validate_incident_response_evidence(
     errors: list[str],
 ) -> None:
     _validate_incident_final_output_metrics(final_output, path, errors)
+    transport = _extract_str_metric(final_output, "transport")
+    if transport != "real":
+        errors.append(f"{path}.transport_must_be_real")
     _validate_incident_ack(final_output, path, errors)
     _validate_incident_response_metrics(final_output, path, errors)
     _validate_incident_channel_evidence(
@@ -2017,7 +2037,9 @@ def _contains_blocked_feature_provider_term(value: str) -> bool:
 
 def _contains_blocked_feature_evidence_term(value: str) -> bool:
     normalized = value.casefold()
-    return any(term in normalized for term in FEATURE_EVIDENCE_BLOCKED_TERMS)
+    return _contains_temporary_path_segment(value) or any(
+        term in normalized for term in FEATURE_EVIDENCE_BLOCKED_TERMS
+    )
 
 
 def _validate_incident_response_metrics(
@@ -2518,7 +2540,9 @@ def _validate_provider_lifecycle_environment_binding(
 
 def _contains_blocked_system_order_scope_evidence_term(value: str) -> bool:
     normalized = value.casefold()
-    return any(term in normalized for term in SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS)
+    return _contains_temporary_path_segment(value) or any(
+        term in normalized for term in SYSTEM_ORDER_SCOPE_EVIDENCE_BLOCKED_TERMS
+    )
 
 
 def _validate_security_scan(
@@ -2650,7 +2674,16 @@ def _validate_security_scan(
 
 def _contains_blocked_security_report_term(value: str) -> bool:
     normalized = value.casefold()
-    return any(term in normalized for term in SECURITY_SCAN_REPORT_BLOCKED_TERMS)
+    return _contains_temporary_path_segment(value) or any(
+        term in normalized for term in SECURITY_SCAN_REPORT_BLOCKED_TERMS
+    )
+
+
+def _contains_temporary_path_segment(value: str) -> bool:
+    decoded = unquote(value).casefold()
+    return "tmp" in {
+        segment for segment in re.split(r"[/\\\\]+", decoded) if segment
+    }
 
 
 def _is_markdown_report_path(value: str) -> bool:
@@ -3090,6 +3123,21 @@ def _require_not_future(value: datetime | None, path: str, errors: list[str]) ->
         seconds=MAX_FUTURE_EVIDENCE_SKEW_SECONDS
     ):
         errors.append(f"{path}_must_not_be_future")
+
+
+def _require_not_older_than(
+    value: datetime | None,
+    path: str,
+    max_age_seconds: int,
+    errors: list[str],
+    *,
+    current_time: datetime | None = None,
+) -> None:
+    if value is None:
+        return
+    now = current_time or _current_utc()
+    if (now - value.astimezone(UTC)).total_seconds() > max_age_seconds:
+        errors.append(f"{path}_must_not_be_older_than_{max_age_seconds}_seconds")
 
 
 def _current_utc() -> datetime:

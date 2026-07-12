@@ -73,6 +73,7 @@ def test_security_scan_evidence_cli_rejects_report_sha_mismatch(
 def test_security_scan_evidence_accepts_github_report_uri_repo_artifact(
     tmp_path: Path,
 ) -> None:
+    _init_github_origin(tmp_path)
     artifact = tmp_path / "security-artifacts" / "msp-20260628" / "report.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("# Codex Security report\n\nNo findings.\n", encoding="utf-8")
@@ -80,7 +81,7 @@ def test_security_scan_evidence_accepts_github_report_uri_repo_artifact(
         report_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
     )
     evidence["report_uri"] = (
-        "https://github.com/YoongeonChoi/msp/blob/main/"
+        f"https://github.com/YoongeonChoi/msp/blob/{'a' * 40}/"
         "security-artifacts/msp-20260628/report.md"
     )
 
@@ -90,9 +91,10 @@ def test_security_scan_evidence_accepts_github_report_uri_repo_artifact(
 def test_security_scan_evidence_rejects_missing_github_report_uri_repo_artifact(
     tmp_path: Path,
 ) -> None:
+    _init_github_origin(tmp_path)
     evidence = _valid_evidence()
     evidence["report_uri"] = (
-        "https://github.com/YoongeonChoi/msp/blob/main/"
+        f"https://github.com/YoongeonChoi/msp/blob/{'a' * 40}/"
         "security-artifacts/msp-20260628/report.md"
     )
 
@@ -107,12 +109,13 @@ def test_security_scan_evidence_rejects_missing_github_report_uri_repo_artifact(
 def test_security_scan_evidence_rejects_github_report_uri_repo_artifact_hash_mismatch(
     tmp_path: Path,
 ) -> None:
+    _init_github_origin(tmp_path)
     artifact = tmp_path / "security-artifacts" / "msp-20260628" / "report.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("# Codex Security report\n\nNo findings.\n", encoding="utf-8")
     evidence = _valid_evidence(report_sha256="f" * 64)
     evidence["report_uri"] = (
-        "https://github.com/YoongeonChoi/msp/blob/main/"
+        f"https://github.com/YoongeonChoi/msp/blob/{'a' * 40}/"
         "security-artifacts/msp-20260628/report.md"
     )
 
@@ -127,17 +130,98 @@ def test_security_scan_evidence_rejects_github_report_uri_repo_artifact_hash_mis
     assert "security-artifacts" not in reason
 
 
+@pytest.mark.parametrize(
+    ("report_uri", "expected_reason"),
+    [
+        (
+            f"https://github.com/unrelated/repository/blob/{'a' * 40}/report.md",
+            "report_uri_github_repository_mismatch",
+        ),
+        (
+            "https://github.com/YoongeonChoi/msp/blob/deadbeef/report.md",
+            "report_uri_github_revision_must_match_source_head",
+        ),
+    ],
+)
+def test_security_scan_evidence_binds_github_repository_and_revision(
+    tmp_path: Path,
+    report_uri: str,
+    expected_reason: str,
+) -> None:
+    _init_github_origin(tmp_path)
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+    evidence = _valid_evidence(
+        report_sha256=hashlib.sha256(report.read_bytes()).hexdigest()
+    )
+    evidence["report_uri"] = report_uri
+
+    with pytest.raises(SecurityScanEvidenceValidationError, match=expected_reason):
+        verify_security_scan_report_uri_repo_artifact(evidence, repo_root=tmp_path)
+
+
+def test_security_scan_evidence_accepts_raw_github_bytes_bound_to_source(
+    tmp_path: Path,
+) -> None:
+    _init_github_origin(tmp_path)
+    report = tmp_path / "security-artifacts" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# report\n", encoding="utf-8")
+    source_head = "a" * 40
+    evidence = _valid_evidence(
+        report_sha256=hashlib.sha256(report.read_bytes()).hexdigest()
+    )
+    evidence["source_head"] = source_head
+    evidence["report_uri"] = (
+        "https://raw.githubusercontent.com/YoongeonChoi/msp/"
+        f"{source_head}/security-artifacts/report.md"
+    )
+
+    verify_security_scan_report_uri_repo_artifact(evidence, repo_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("report_uri", "expected_reason"),
+    [
+        (
+            f"https://raw.githubusercontent.com/unrelated/repository/{'a' * 40}/report.md",
+            "report_uri_github_repository_mismatch",
+        ),
+        (
+            "https://raw.githubusercontent.com/YoongeonChoi/msp/deadbeef/report.md",
+            "report_uri_github_revision_must_match_source_head",
+        ),
+    ],
+)
+def test_security_scan_evidence_rejects_unbound_raw_github_bytes(
+    tmp_path: Path,
+    report_uri: str,
+    expected_reason: str,
+) -> None:
+    _init_github_origin(tmp_path)
+    report = tmp_path / "report.md"
+    report.write_text("# report\n", encoding="utf-8")
+    evidence = _valid_evidence(
+        report_sha256=hashlib.sha256(report.read_bytes()).hexdigest()
+    )
+    evidence["report_uri"] = report_uri
+
+    with pytest.raises(SecurityScanEvidenceValidationError, match=expected_reason):
+        verify_security_scan_report_uri_repo_artifact(evidence, repo_root=tmp_path)
+
+
 def test_security_scan_evidence_cli_rejects_unpublished_github_report_uri_artifact(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _init_github_origin(tmp_path)
     report_path, report_sha256 = _write_report(tmp_path)
     evidence = _valid_evidence(
         report_path=report_path,
         report_sha256=report_sha256,
     )
     evidence["report_uri"] = (
-        "https://github.com/YoongeonChoi/msp/blob/main/"
+        f"https://github.com/YoongeonChoi/msp/blob/{'a' * 40}/"
         "security-artifacts/msp-20260628/report.md"
     )
     evidence_path = tmp_path / "security-scan-summary.json"
@@ -622,6 +706,11 @@ def _write_report(tmp_path: Path) -> tuple[Path, str]:
     content = "# Codex Security report\n\nNo reportable findings.\n"
     path.write_text(content, encoding="utf-8")
     return Path(path.name), hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _init_github_origin(repo: Path) -> None:
+    _git(repo, "init")
+    _git(repo, "remote", "add", "origin", "https://github.com/YoongeonChoi/msp.git")
 
 
 def _git(repo: Path, *args: str) -> str:

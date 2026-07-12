@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app.adapters.news.naver_news_client import NaverNewsClient
-from app.domain.common.errors import ProviderAuthError, ProviderRateLimitError
+from app.domain.common.errors import ProviderAuthError, ProviderRateLimitError, ProviderSchemaError
 
 
 async def test_naver_news_client_uses_official_search_news_request_and_parses_items() -> None:
@@ -99,4 +99,87 @@ async def test_naver_news_client_maps_official_error_envelope_to_safe_code() -> 
         await client.get_recent("005930")
 
     assert exc_info.value.safe_message == "naver_SE99"
+    await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"pubDate": "not-a-provider-date"},
+        {"title": "x" * 501},
+    ],
+)
+async def test_naver_news_client_rejects_invalid_item_semantics(
+    mutation: dict[str, str],
+) -> None:
+    item = {
+        "title": "정상 제목",
+        "originallink": "https://news.example/article",
+        "link": "https://news.example/article",
+        "description": "정상 설명",
+        "pubDate": "Sun, 28 Jun 2026 09:30:00 +0900",
+    }
+    item.update(mutation)
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "lastBuildDate": "Sun, 28 Jun 2026 10:00:00 +0900",
+                    "total": 1,
+                    "start": 1,
+                    "display": 1,
+                    "items": [item],
+                },
+                request=request,
+            )
+        )
+    )
+    client = NaverNewsClient("client-id", "client-secret", http_client)
+
+    with pytest.raises(ProviderSchemaError, match="naver_news_schema_mismatch"):
+        await client.get_recent("005930")
+    await http_client.aclose()
+
+
+async def test_naver_news_client_rejects_more_than_requested_items() -> None:
+    item = {
+        "title": "정상 제목",
+        "originallink": "",
+        "link": "",
+        "description": "정상 설명",
+        "pubDate": "Sun, 28 Jun 2026 09:30:00 +0900",
+    }
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "lastBuildDate": "Sun, 28 Jun 2026 10:00:00 +0900",
+                    "total": 11,
+                    "start": 1,
+                    "display": 10,
+                    "items": [item] * 11,
+                },
+                request=request,
+            )
+        )
+    )
+    client = NaverNewsClient("client-id", "client-secret", http_client)
+
+    with pytest.raises(ProviderSchemaError, match="naver_news_schema_mismatch"):
+        await client.get_recent("005930")
+    await http_client.aclose()
+
+
+async def test_naver_news_client_bounds_decompressed_response_bytes() -> None:
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"x" * 256_001, request=request)
+        )
+    )
+    client = NaverNewsClient("client-id", "client-secret", http_client)
+
+    with pytest.raises(ProviderSchemaError, match="naver_news_response_too_large"):
+        await client.get_recent("005930")
     await http_client.aclose()

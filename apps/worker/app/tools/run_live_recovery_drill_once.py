@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime
 from uuid import uuid4
 
@@ -80,6 +81,14 @@ class RecoveryDrillBroker:
 async def main() -> None:
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    if repository.strategy_version is None:
+        raise RuntimeError("live_recovery_drill_strategy_fixture_missing")
+    repository.strategy_version = replace(
+        repository.strategy_version,
+        status="active",
+        approved_by=uuid4(),
+        approved_at=now_utc(),
     )
     broker = RecoveryDrillBroker(
         statuses={

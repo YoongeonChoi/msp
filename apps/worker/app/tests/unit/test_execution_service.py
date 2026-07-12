@@ -10,6 +10,7 @@ from app.application.ports.broker_port import (
 )
 from app.application.services.execution_service import ExecutionService
 from app.application.services.risk_service import RiskService
+from app.domain.common.errors import ProviderUnavailableError
 from app.domain.common.time import now_utc
 from app.domain.risk.value_objects import RiskInput
 from app.domain.trading.entities import AccountState, BotSettings, DecisionSnapshot, Quote, Signal
@@ -67,6 +68,12 @@ class PrePersistAssertingBroker(RecordingBroker):
         assert pending.reason == "live_broker_order_result_pending"
         assert pending.idempotency_key == request.idempotency_key
         return await super().place_order(request)
+
+
+class AmbiguousFailureBroker(RecordingBroker):
+    async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
+        self.place_order_calls += 1
+        raise ProviderUnavailableError("toss", "toss_write_request_failed")
 
 
 async def test_live_order_missing_decision_evidence_blocks_before_broker() -> None:
@@ -178,6 +185,124 @@ async def test_live_order_with_verified_inputs_records_provider_result() -> None
     assert repository.engine_events[-1]["message"] == "live_broker_order_result_recorded"
 
 
+async def test_duplicate_live_order_preserves_existing_unique_order() -> None:
+    now = now_utc()
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = RecordingBroker()
+    service = ExecutionService(broker, repository, RiskService())
+    strategy_version_id = uuid4()
+    signal = Signal(
+        symbol="005930",
+        action="buy",
+        final_score=0.8,
+        confidence=0.8,
+        order_amount_krw=100_000,
+        sector="technology",
+        reason_json={"score": 0.8},
+    )
+    decision = DecisionSnapshot.create(
+        cycle_id=uuid4(),
+        signal=signal,
+        strategy_version_id=strategy_version_id,
+        created_at=now,
+        feature_snapshot=_live_ready_feature_snapshot(),
+        risk_snapshot={"allowed": True},
+    )
+    risk_input = _risk_input(now, signal, strategy_version_id)
+
+    first_order, _ = await service.propose_live_order(decision, risk_input)
+    duplicate_order, _ = await service.propose_live_order(decision, risk_input)
+
+    assert first_order.status == "sent"
+    assert duplicate_order.status == "blocked"
+    assert duplicate_order.reason == "duplicate_idempotency_key"
+    assert broker.place_order_calls == 1
+    assert repository.orders == [first_order]
+    assert repository.engine_events[-1]["message"] == (
+        "live_order_blocked_duplicate_idempotency_key"
+    )
+    assert repository.engine_events[-1]["details"] == {
+        "symbol": "005930",
+        "existing_order_preserved": True,
+    }
+
+
+async def test_post_dispatch_provider_failure_remains_manual_check() -> None:
+    now = now_utc()
+    repository = InMemoryRepository(BotSettings(enabled=True, mode="live", live_order_allowed=True))
+    broker = AmbiguousFailureBroker()
+    service = ExecutionService(broker, repository, RiskService())
+    strategy_version_id = uuid4()
+    signal = Signal(
+        symbol="005930",
+        action="buy",
+        final_score=0.8,
+        confidence=0.8,
+        order_amount_krw=100_000,
+        sector="technology",
+        reason_json={"score": 0.8},
+    )
+    decision = DecisionSnapshot.create(
+        cycle_id=uuid4(),
+        signal=signal,
+        strategy_version_id=strategy_version_id,
+        created_at=now,
+        feature_snapshot=_live_ready_feature_snapshot(),
+        risk_snapshot={"allowed": True},
+    )
+
+    order, _risk_result = await service.propose_live_order(
+        decision, _risk_input(now, signal, strategy_version_id)
+    )
+
+    assert broker.place_order_calls == 1
+    assert order.status == "unknown_requires_manual_check"
+    assert repository.orders[0].status == "unknown_requires_manual_check"
+    assert repository.orders[0].reason == "toss_write_request_failed"
+
+
+async def test_shutdown_requested_after_pending_persist_blocks_broker_dispatch() -> None:
+    now = now_utc()
+    repository = InMemoryRepository(BotSettings(enabled=True, mode="live", live_order_allowed=True))
+    broker = RecordingBroker()
+    service = ExecutionService(
+        broker,
+        repository,
+        RiskService(),
+        shutdown_requested=lambda: True,
+    )
+    strategy_version_id = uuid4()
+    signal = Signal(
+        symbol="005930",
+        action="buy",
+        final_score=0.8,
+        confidence=0.8,
+        order_amount_krw=100_000,
+        sector="technology",
+        reason_json={"score": 0.8},
+    )
+    decision = DecisionSnapshot.create(
+        cycle_id=uuid4(),
+        signal=signal,
+        strategy_version_id=strategy_version_id,
+        created_at=now,
+        feature_snapshot=_live_ready_feature_snapshot(),
+        risk_snapshot={"allowed": True},
+    )
+
+    order, _risk_result = await service.propose_live_order(
+        decision,
+        _risk_input(now, signal, strategy_version_id),
+    )
+
+    assert broker.place_order_calls == 0
+    assert order.status == "failed"
+    assert order.reason == "shutdown_requested"
+    assert repository.orders[0].status == "failed"
+
+
 def _live_ready_feature_snapshot() -> dict[str, object]:
     return {
         "technical_score": 0.8,
@@ -212,4 +337,6 @@ def _risk_input(now: datetime, signal: Signal, strategy_version_id: UUID) -> Ris
         cooldown_active=False,
         duplicate_order=False,
         strategy_version_id=strategy_version_id,
+        strategy_status="active",
+        strategy_approved=True,
     )

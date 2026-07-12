@@ -193,14 +193,12 @@ def test_hosted_verifier_rejects_reused_publishable_and_secret_key(
             "https://project.supabase.co",
             "--publishable-key",
             "reused-secret-key",
-            "--secret-key",
-            "reused-secret-key",
-            "--requester-jwt",
-            "requester-jwt",
-            "--reviewer-jwt",
-            "reviewer-jwt",
         ],
-        environ={},
+        environ={
+            "SUPABASE_SECRET_KEY": "reused-secret-key",
+            "SUPABASE_LIVE_REQUESTER_JWT": "requester-jwt",
+            "SUPABASE_LIVE_REVIEWER_JWT": "reviewer-jwt",
+        },
     )
 
     output = capsys.readouterr().out
@@ -208,6 +206,19 @@ def test_hosted_verifier_rejects_reused_publishable_and_secret_key(
     assert "FINAL=FAIL hosted_supabase_live_readiness" in output
     assert "supabase_publishable_and_secret_keys_must_be_distinct" in output
     assert "reused-secret-key" not in output
+
+
+def test_hosted_verifier_rejects_secret_cli_values_without_echoing_them(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    verifier = _module()
+
+    with pytest.raises(SystemExit):
+        verifier._parse_args(["--secret-key=must-not-leak"])
+
+    output = capsys.readouterr().err
+    assert "--secret-key is forbidden" in output
+    assert "must-not-leak" not in output
 
 
 def test_hosted_verifier_rejects_non_positive_timeout() -> None:
@@ -250,6 +261,10 @@ def test_hosted_verifier_rejects_jwts_reusing_supabase_keys() -> None:
         ("https://example.com", "supabase_url_must_be_hosted_supabase_project"),
         ("https://user:pass@project.supabase.co", "supabase_url_must_not_include_credentials"),
         ("https://project.supabase.co/rest/v1", "supabase_url_must_not_include_path"),
+        (
+            "https://project.supabase.co:444",
+            "supabase_url_must_use_default_https_port",
+        ),
         (
             "https://project.supabase.co?apikey=secret",
             "supabase_url_must_not_include_query_or_fragment",

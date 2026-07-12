@@ -20,26 +20,27 @@ from app.domain.common.errors import (
 from app.domain.news_intel.entities import NewsClassification, NewsEvent
 
 NAVER_NEWS_SEARCH_URL = "https://openapi.naver.com/v1/search/news.json"
+MAX_NAVER_NEWS_RESPONSE_BYTES = 256_000
 
 
 class NaverNewsItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title: str
-    originallink: str = ""
-    link: str = ""
-    description: str
-    pubDate: str
+    title: str = Field(max_length=500)
+    originallink: str = Field(default="", max_length=2_048)
+    link: str = Field(default="", max_length=2_048)
+    description: str = Field(max_length=4_000)
+    pubDate: str = Field(max_length=128)
 
 
 class NaverNewsSearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    lastBuildDate: str
-    total: int
-    start: int
-    display: int
-    items: list[NaverNewsItem]
+    lastBuildDate: str = Field(max_length=128)
+    total: int = Field(ge=0)
+    start: int = Field(ge=1)
+    display: int = Field(ge=0, le=10)
+    items: list[NaverNewsItem] = Field(max_length=10)
 
 
 class NaverErrorEnvelope(BaseModel):
@@ -71,21 +72,24 @@ class NaverNewsClient:
         if not self.client_id or not self.client_secret:
             raise ProviderAuthError("naver", "naver_credentials_missing")
         try:
-            response = await self.client.get(
+            async with self.client.stream(
+                "GET",
                 NAVER_NEWS_SEARCH_URL,
                 headers=self.headers,
                 params={"query": symbol, "display": 10, "start": 1, "sort": "date"},
-            )
-            if response.is_error:
-                raise _provider_error_from_response(response)
-            payload = NaverNewsSearchResponse.model_validate_json(response.text)
+            ) as response:
+                body = await _read_bounded_body(response)
+                if response.is_error:
+                    raise _provider_error_from_response(response.status_code, body)
+                payload = NaverNewsSearchResponse.model_validate_json(body)
+                events = [_to_news_event(symbol, item) for item in payload.items]
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError("naver", "naver_timeout") from exc
         except httpx.HTTPError as exc:
             raise ProviderUnavailableError("naver", "naver_http_error") from exc
-        except ValidationError as exc:
+        except (ValidationError, ValueError, TypeError, OverflowError) as exc:
             raise ProviderSchemaError("naver", "naver_news_schema_mismatch") from exc
-        return [_to_news_event(symbol, item) for item in payload.items]
+        return events
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -123,9 +127,18 @@ def _parse_pub_date(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _provider_error_from_response(response: httpx.Response) -> ProviderError:
-    safe_code = _safe_error_code(response)
-    match response.status_code:
+async def _read_bounded_body(response: httpx.Response) -> bytes:
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > MAX_NAVER_NEWS_RESPONSE_BYTES:
+            raise ProviderSchemaError("naver", "naver_news_response_too_large")
+        body.extend(chunk)
+    return bytes(body)
+
+
+def _provider_error_from_response(status_code: int, body: bytes) -> ProviderError:
+    safe_code = _safe_error_code(status_code, body)
+    match status_code:
         case 400:
             return ProviderSchemaError("naver", safe_code)
         case 401 | 403:
@@ -138,9 +151,9 @@ def _provider_error_from_response(response: httpx.Response) -> ProviderError:
             return ProviderUnknownError("naver", safe_code)
 
 
-def _safe_error_code(response: httpx.Response) -> str:
+def _safe_error_code(status_code: int, body: bytes) -> str:
     try:
-        envelope = NaverErrorEnvelope.model_validate_json(response.text)
+        envelope = NaverErrorEnvelope.model_validate_json(body)
     except ValidationError:
-        return f"naver_http_{response.status_code}"
+        return f"naver_http_{status_code}"
     return f"naver_{envelope.errorCode}"

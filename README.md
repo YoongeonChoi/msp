@@ -14,6 +14,22 @@ Desktop Cockpit (Tauri + React)
 
 Desktop은 broker secret을 보관하지 않고 broker 주문 API를 직접 호출하지 않습니다. Worker만 execution path를 소유하며, 실주문 생성은 공식 Toss contract에 맞춘 guarded KRX `LIMIT` 주문 경로로만 제한됩니다.
 
+## Current Scope
+
+현재 구현은 상시 worker, Supabase control plane, 가중치 점수, paper 주문 기록, 계좌/포지션
+모니터링, backtest, 그리고 fail-closed live 경계를 제공하는 안전한 운영 MVP입니다.
+
+다음 기능은 아직 완성된 자동 운용 기능이 아닙니다.
+
+- 검증된 일봉 기반 technical feature의 자동 적재와 장기 데이터 cadence
+- paper 현금·보유수량이 체결에 따라 변하는 지속형 가상 계좌
+- 목표 비중, no-trade band, 현금 reserve, whole-share 수량, 수수료·세금·slippage를 함께
+  계산하는 runtime rebalance planner
+- outcome 갱신, backtest, 월간 연구, retention의 무인 스케줄
+
+따라서 현재 상태에서 `live_order_allowed`를 켜는 것이 아니라, 위 항목을 paper-first로
+검증하고 `docs/LIVE_READINESS_SCORECARD.md`의 외부 증거 gate를 모두 통과해야 합니다.
+
 ## Local Setup
 
 ```bash

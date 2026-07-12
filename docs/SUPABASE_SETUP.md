@@ -40,14 +40,30 @@ Supabase Auth/RLS session before treating it as a bot-stop issue.
 
 ## Migration Order
 
-Run migrations in this exact order:
+`supabase/README.md` is the canonical migration list. Before a new setup or a
+manual migration apply, confirm this section still matches that list and run
+every migration in this exact order:
 
 1. `0001_schema.sql`
 2. `0002_rls.sql`
 3. `0003_realtime.sql`
 4. `0004_retention.sql`
 5. `0005_schema_alignment.sql`
-6. `seed.sql`
+6. `0006_outcome_tracking.sql`
+7. `0007_backtest_runs.sql`
+8. `0008_backtest_runs_rls.sql`
+9. `0009_live_operations_hardening.sql`
+10. `0010_security_definer_hardening.sql`
+11. `0011_data_api_grants.sql`
+12. `0012_runtime_safety_invariants.sql`
+13. `0013_worker_deployment_lock.sql`
+14. `seed.sql`
+
+`0012_runtime_safety_invariants.sql`는 live 승인 소비와 strategy/runtime 수치
+불변식을 DB 경계에서 강제합니다. `0013_worker_deployment_lock.sql`는 service-role
+RPC만 배포 잠금을 변경할 수 있게 하고, 배포 target을 관찰한 fresh/healthy
+heartbeat 없이는 잠금을 해제하지 않습니다. 잠금 중에는 `enabled`와
+`live_order_allowed`가 모두 false여야 합니다.
 
 `0005_schema_alignment.sql` fixes known production drift:
 

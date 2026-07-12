@@ -148,6 +148,8 @@ def _findings(
         findings.append(_critical("duplicate_idempotency_key", "duplicate idempotency_key exists"))
     if heartbeat_age_seconds is None:
         findings.append(_critical("heartbeat_missing", "worker heartbeat is missing"))
+    elif heartbeat_age_seconds < 0:
+        findings.append(_critical("heartbeat_future", "worker heartbeat timestamp is future"))
     elif heartbeat_age_seconds > STALE_HEARTBEAT_SECONDS:
         findings.append(_critical("heartbeat_stale", "worker heartbeat is stale over 5 minutes"))
     if _operational_critical_event_count(recent_events) >= REPEATED_CRITICAL_EVENT_COUNT:

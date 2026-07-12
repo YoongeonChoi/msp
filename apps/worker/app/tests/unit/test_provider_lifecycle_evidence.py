@@ -33,6 +33,37 @@ def test_provider_lifecycle_evidence_passes_cli(
     ) in output
 
 
+def test_provider_lifecycle_evidence_rejects_non_standard_nan_amount(
+    tmp_path: Path,
+) -> None:
+    evidence = _valid_evidence()
+    order = cast(dict[str, object], evidence["created_order"])
+    order["amount_krw"] = float("nan")
+    path = tmp_path / "provider-lifecycle.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(EvidenceValidationError, match="evidence_json_invalid"):
+        verify_provider_lifecycle_evidence_file(path)
+
+
+def test_provider_lifecycle_mapping_rejects_non_finite_amount() -> None:
+    evidence = _valid_evidence()
+    order = cast(dict[str, object], evidence["created_order"])
+    order["amount_krw"] = float("nan")
+
+    with pytest.raises(EvidenceValidationError, match="amount_krw_must_be_finite_number"):
+        verify_provider_lifecycle_evidence(evidence)
+
+
+def test_provider_lifecycle_mapping_rejects_overflowing_amount() -> None:
+    evidence = _valid_evidence()
+    order = cast(dict[str, object], evidence["created_order"])
+    order["amount_krw"] = 10**10_000
+
+    with pytest.raises(EvidenceValidationError, match="amount_krw_must_be_finite_number"):
+        verify_provider_lifecycle_evidence(evidence)
+
+
 def test_provider_lifecycle_evidence_rejects_sensitive_keys_without_leaking_value(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -603,6 +634,21 @@ def test_provider_lifecycle_evidence_rejects_missing_or_weak_artifacts() -> None
     assert "evidence_artifacts[0].uri_must_not_be_mock_fixture_or_local" in reason
     assert "evidence_artifacts[0].sha256_must_be_64_hex" in reason
     assert "token=abc" not in reason
+
+
+def test_provider_lifecycle_evidence_rejects_temporary_path_artifact_uri() -> None:
+    evidence = _valid_evidence()
+    artifacts = cast(list[dict[str, object]], evidence["evidence_artifacts"])
+    artifacts[0]["uri"] = (
+        "https://evidence.kr-autotrading.net/tmp/provider-order-receipt.json"
+    )
+
+    with pytest.raises(EvidenceValidationError) as exc_info:
+        verify_provider_lifecycle_evidence(evidence)
+
+    reason = str(exc_info.value)
+    assert "evidence_artifacts[0].uri_must_not_be_mock_fixture_or_local" in reason
+    assert "/tmp/" not in reason
 
 
 def test_provider_lifecycle_evidence_rejects_non_https_artifact_uri() -> None:

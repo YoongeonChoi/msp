@@ -11,9 +11,19 @@ class Settings(BaseSettings):
     run_once: bool = Field(default=False, alias="RUN_ONCE")
     mock_providers: bool = Field(default=True, alias="MOCK_PROVIDERS")
     bot_default_mode: str = Field(default="paper", alias="BOT_DEFAULT_MODE")
-    loop_interval_sec: int = Field(default=30, alias="LOOP_INTERVAL_SEC")
-    heartbeat_interval_sec: int = Field(default=30, alias="HEARTBEAT_INTERVAL_SEC")
-    max_concurrent_api_calls: int = Field(default=5, alias="MAX_CONCURRENT_API_CALLS")
+    loop_interval_sec: int = Field(default=30, ge=5, le=3600, alias="LOOP_INTERVAL_SEC")
+    heartbeat_interval_sec: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        alias="HEARTBEAT_INTERVAL_SEC",
+    )
+    max_concurrent_api_calls: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        alias="MAX_CONCURRENT_API_CALLS",
+    )
     use_supabase_repository_for_mock: bool = Field(
         default=False, alias="USE_SUPABASE_REPOSITORY"
     )
@@ -29,18 +39,38 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
     alert_webhook_url: SecretStr | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
-    alert_webhook_timeout_sec: float = Field(default=5.0, alias="ALERT_WEBHOOK_TIMEOUT_SEC")
-    alert_drill_max_latency_ms: int = Field(default=2_000, alias="ALERT_DRILL_MAX_LATENCY_MS")
+    alert_webhook_timeout_sec: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        alias="ALERT_WEBHOOK_TIMEOUT_SEC",
+    )
+    alert_drill_max_latency_ms: int = Field(
+        default=2_000,
+        ge=1,
+        le=600_000,
+        alias="ALERT_DRILL_MAX_LATENCY_MS",
+    )
     live_system_order_count_scope_accepted: bool = Field(
         default=False, alias="LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED"
     )
     paper_health_db_warning_bytes: int = Field(
-        default=450_000_000, alias="PAPER_HEALTH_DB_WARNING_BYTES"
+        default=450_000_000,
+        ge=1,
+        alias="PAPER_HEALTH_DB_WARNING_BYTES",
     )
     outcome_tracking_decision_limit: int = Field(
-        default=500, alias="OUTCOME_TRACKING_DECISION_LIMIT"
+        default=500,
+        ge=1,
+        le=100_000,
+        alias="OUTCOME_TRACKING_DECISION_LIMIT",
     )
-    outcome_tracking_price_limit: int = Field(default=5000, alias="OUTCOME_TRACKING_PRICE_LIMIT")
+    outcome_tracking_price_limit: int = Field(
+        default=5000,
+        ge=1,
+        le=1_000_000,
+        alias="OUTCOME_TRACKING_PRICE_LIMIT",
+    )
 
     def use_supabase_repository(self) -> bool:
         return bool(

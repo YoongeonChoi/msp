@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +19,30 @@ from app.tools.verify_live_readiness_evidence_bundle import (
     verify_live_readiness_evidence_bundle,
     verify_live_readiness_evidence_bundle_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _freeze_bundle_validation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.tools.verify_live_readiness_evidence_bundle._current_utc",
+        lambda: datetime(2026, 6, 28, 1, 20, tzinfo=UTC),
+    )
+
+
+def test_live_readiness_evidence_bundle_file_rejects_duplicate_object_names(
+    tmp_path: Path,
+) -> None:
+    path = _write_evidence(tmp_path, _valid_bundle())
+    raw = path.read_text(encoding="utf-8")
+    raw = raw.replace(
+        '"environment": "staging"',
+        '"environment": {"password": "discarded"}, "environment": "staging"',
+        1,
+    )
+    path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(BundleValidationError, match="bundle_json_invalid"):
+        verify_live_readiness_evidence_bundle_file(path)
 
 
 def test_live_readiness_evidence_bundle_passes_cli(
@@ -906,6 +931,23 @@ def test_live_readiness_evidence_bundle_rejects_future_bundle_timestamps() -> No
     reason = str(exc_info.value)
     assert "bundle.generated_at_must_not_be_future" in reason
     assert "bundle.reviewed_at_must_not_be_future" in reason
+
+
+def test_live_readiness_evidence_bundle_rejects_expired_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = _valid_bundle()
+    monkeypatch.setattr(
+        "app.tools.verify_live_readiness_evidence_bundle._current_utc",
+        lambda: datetime(2026, 7, 12, 1, 20, tzinfo=UTC),
+    )
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert "bundle.generated_at_must_not_be_older_than_86400_seconds" in reason
+    assert "bundle.reviewed_at_must_not_be_older_than_86400_seconds" in reason
     assert "2099" not in reason
 
 
@@ -1699,6 +1741,30 @@ def test_live_readiness_evidence_bundle_rejects_weak_scope_acceptance_evidence()
     assert "token=abc" not in reason
 
 
+def test_live_readiness_evidence_bundle_rejects_temporary_path_evidence() -> None:
+    bundle = _valid_bundle()
+    acceptance = cast(dict[str, object], bundle["system_order_scope_acceptance"])
+    acceptance["evidence_uri"] = (
+        "https://evidence.kr-autotrading.net/tmp/system-order-scope.md"
+    )
+    security_scan = cast(dict[str, object], bundle["security_scan"])
+    security_scan["report_uri"] = (
+        "https://evidence.kr-autotrading.net/tmp/security-report.md"
+    )
+    feature_evidence = cast(dict[str, object], bundle["feature_evidence"])
+    artifacts = cast(list[dict[str, object]], feature_evidence["feature_artifacts"])
+    artifacts[0]["uri"] = "https://evidence.kr-autotrading.net/tmp/feature-export.json"
+
+    with pytest.raises(BundleValidationError) as exc_info:
+        verify_live_readiness_evidence_bundle(bundle)
+
+    reason = str(exc_info.value)
+    assert "system_order_scope_acceptance.evidence_uri_must_not_be_mock_or_fixture" in reason
+    assert "security_scan.report_uri_must_not_be_mock_fixture_or_local" in reason
+    assert "feature_evidence.feature_artifacts[0].uri_must_not_be_mock_fixture_or_local" in reason
+    assert "/tmp/" not in reason
+
+
 def test_live_readiness_evidence_bundle_rejects_non_https_scope_evidence_uri() -> None:
     bundle = _valid_bundle()
     acceptance = cast(dict[str, object], bundle["system_order_scope_acceptance"])
@@ -2381,7 +2447,7 @@ def _valid_bundle() -> dict[str, object]:
                     "final_output": (
                         "FINAL=PASS live_incident_response_drill delivered=4 "
                         "max_latency_ms=17 acknowledged=true ack_latency_ms=2300 "
-                        "drill_id=incident-drill-20260628-1"
+                        "drill_id=incident-drill-20260628-1 transport=real"
                     ),
                     "channel_evidence": {
                         "captured_at": "2026-06-28T01:04:20Z",

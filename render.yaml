@@ -6,12 +6,14 @@ services:
     plan: starter
     branch: main
     rootDir: apps/worker
-    buildCommand: python -m app.tools.write_release_metadata && pip install -r requirements.txt
+    buildCommand: python -m app.tools.write_release_metadata && python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
     startCommand: python -m app.main
     autoDeployTrigger: "off"
     numInstances: 1
     maxShutdownDelaySeconds: 120
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.13
       - key: ENV
         value: production
       - key: MOCK_PROVIDERS

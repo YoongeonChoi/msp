@@ -16,6 +16,10 @@ import httpx
 from _hosted_env import HostedEnvFileError, merge_env_files
 
 EXPECTED_DENIED_STATUSES = {400, 401, 403}
+ACTIVE_WORKER_HEARTBEAT_MAX_AGE_SECONDS = 120
+MAX_FUTURE_HEARTBEAT_SKEW_SECONDS = 5
+WORKER_ISOLATION_LOOKBACK_SECONDS = 3720
+MAX_WORKER_HEARTBEAT_ROWS = 1000
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +30,10 @@ class HostedLiveEnableConfig:
     requester_jwt: str
     reviewer_jwt: str
     timeout_sec: float
+    staging_project_ref: str
+    production_project_ref: str
+    verification_target: str
+    confirmation_project_ref: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +54,10 @@ def main(
 ) -> int:
     args = _parse_args(argv)
     try:
-        env = merge_env_files(args.env_file, environ or os.environ)
+        env = merge_env_files(
+            args.env_file,
+            environ if environ is not None else os.environ,
+        )
     except HostedEnvFileError as exc:
         print("FINAL=FAIL hosted_live_enable_flow")
         print(str(exc))
@@ -76,6 +87,11 @@ def run_checks(
 ) -> HostedLiveEnableResult:
     _validate_config(config)
     supabase_url = _normalize_url(config.supabase_url)
+    _assert_fresh_mock_worker_isolation(
+        client,
+        supabase_url,
+        config.secret_key,
+    )
     requester_id = _get_user_id(
         client,
         supabase_url,
@@ -148,7 +164,23 @@ def run_checks(
             config.reviewer_jwt,
         )
     finally:
-        _force_live_disabled(client, supabase_url, config.secret_key, raise_on_error=False)
+        cleanup_errors: list[Exception] = []
+        try:
+            _force_live_disabled(client, supabase_url, config.secret_key)
+        except Exception as exc:
+            cleanup_errors.append(exc)
+        if command_id:
+            try:
+                _delete_incomplete_verifier_command(
+                    client,
+                    supabase_url,
+                    config.secret_key,
+                    command_id,
+                )
+            except Exception as exc:
+                cleanup_errors.append(exc)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
     return HostedLiveEnableResult(
         requester_admin_ok=True,
@@ -185,10 +217,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--url", default=None, help="Supabase project URL")
     parser.add_argument("--publishable-key", default=None, help="Supabase publishable/anon key")
     parser.add_argument(
-        "--secret-key", default=None, help="Supabase worker secret/service role key"
+        "--confirm-staging-project",
+        default=None,
+        help="Type the exact staging project ref to authorize this destructive drill.",
     )
-    parser.add_argument("--requester-jwt", default=None, help="Requester admin user access token")
-    parser.add_argument("--reviewer-jwt", default=None, help="Reviewer admin user access token")
+    _reject_secret_cli_options(
+        argv,
+        parser,
+        {"--secret-key", "--requester-jwt", "--reviewer-jwt"},
+    )
     parser.add_argument("--timeout-sec", type=float, default=10.0)
     parser.add_argument(
         "--env-file",
@@ -197,7 +234,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=[],
         help=(
             "Optional local .env file to merge before process env. "
-            "Process env and explicit CLI args take precedence."
+            "Process env and non-secret explicit CLI args take precedence."
         ),
     )
     return parser.parse_args(argv)
@@ -214,15 +251,22 @@ def _config_from_env(
         or env.get("VITE_SUPABASE_PUBLISHABLE_KEY")
         or env.get("SUPABASE_ANON_KEY")
     )
-    secret_key = args.secret_key or env.get("SUPABASE_SECRET_KEY")
-    requester_jwt = args.requester_jwt or env.get("SUPABASE_LIVE_REQUESTER_JWT")
-    reviewer_jwt = args.reviewer_jwt or env.get("SUPABASE_LIVE_REVIEWER_JWT")
+    secret_key = env.get("SUPABASE_SECRET_KEY")
+    requester_jwt = env.get("SUPABASE_LIVE_REQUESTER_JWT")
+    reviewer_jwt = env.get("SUPABASE_LIVE_REVIEWER_JWT")
+    staging_project_ref = env.get("SUPABASE_STAGING_PROJECT_REF")
+    production_project_ref = env.get("SUPABASE_PRODUCTION_PROJECT_REF")
+    verification_target = env.get("SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET")
     values = {
         "SUPABASE_URL": url,
         "SUPABASE_PUBLISHABLE_KEY": publishable_key,
         "SUPABASE_SECRET_KEY": secret_key,
         "SUPABASE_LIVE_REQUESTER_JWT": requester_jwt,
         "SUPABASE_LIVE_REVIEWER_JWT": reviewer_jwt,
+        "SUPABASE_STAGING_PROJECT_REF": staging_project_ref,
+        "SUPABASE_PRODUCTION_PROJECT_REF": production_project_ref,
+        "SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET": verification_target,
+        "--confirm-staging-project": args.confirm_staging_project,
     }
     missing = [name for name, value in values.items() if not value]
     if missing:
@@ -235,9 +279,30 @@ def _config_from_env(
             requester_jwt=str(requester_jwt),
             reviewer_jwt=str(reviewer_jwt),
             timeout_sec=float(args.timeout_sec),
+            staging_project_ref=str(staging_project_ref),
+            production_project_ref=str(production_project_ref),
+            verification_target=str(verification_target),
+            confirmation_project_ref=str(args.confirm_staging_project),
         ),
         [],
     )
+
+
+def _reject_secret_cli_options(
+    argv: list[str] | None,
+    parser: argparse.ArgumentParser,
+    forbidden_options: set[str],
+) -> None:
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    env_names = {
+        "--secret-key": "SUPABASE_SECRET_KEY",
+        "--requester-jwt": "SUPABASE_LIVE_REQUESTER_JWT",
+        "--reviewer-jwt": "SUPABASE_LIVE_REVIEWER_JWT",
+    }
+    for token in raw_args:
+        option = token.partition("=")[0]
+        if option in forbidden_options:
+            parser.error(f"{option} is forbidden; use {env_names[option]} or --env-file")
 
 
 def _validate_config(config: HostedLiveEnableConfig) -> None:
@@ -251,6 +316,85 @@ def _validate_config(config: HostedLiveEnableConfig) -> None:
         raise RuntimeError("requester_jwt_must_not_reuse_supabase_key")
     if config.reviewer_jwt in {config.publishable_key, config.secret_key}:
         raise RuntimeError("reviewer_jwt_must_not_reuse_supabase_key")
+    if config.verification_target != "staging":
+        raise RuntimeError("hosted_live_enable_verification_target_must_be_staging")
+    if not re.fullmatch(r"[a-z0-9-]{3,63}", config.staging_project_ref):
+        raise RuntimeError("staging_project_ref_invalid")
+    if not re.fullmatch(r"[a-z0-9-]{3,63}", config.production_project_ref):
+        raise RuntimeError("production_project_ref_invalid")
+    if config.staging_project_ref == config.production_project_ref:
+        raise RuntimeError("staging_and_production_project_refs_must_differ")
+    project_ref = _project_ref(config.supabase_url)
+    if project_ref == config.production_project_ref:
+        raise RuntimeError("production_project_mutation_forbidden")
+    if project_ref != config.staging_project_ref:
+        raise RuntimeError("supabase_url_must_match_staging_project_ref")
+    if config.confirmation_project_ref != config.staging_project_ref:
+        raise RuntimeError("staging_project_confirmation_mismatch")
+
+
+def _assert_fresh_mock_worker_isolation(
+    client: httpx.Client,
+    supabase_url: str,
+    secret_key: str,
+) -> None:
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(seconds=WORKER_ISOLATION_LOOKBACK_SECONDS)
+    response = client.get(
+        f"{supabase_url}/rest/v1/worker_heartbeats",
+        headers=_headers(secret_key, secret_key),
+        params={
+            "select": "status,created_at,details",
+            "created_at": f"gt.{cutoff.isoformat()}",
+            "order": "created_at.desc",
+            "limit": str(MAX_WORKER_HEARTBEAT_ROWS),
+        },
+    )
+    _expect_status(response, 200, "worker_preflight_failed")
+    rows = response.json()
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or len(rows) >= MAX_WORKER_HEARTBEAT_ROWS
+    ):
+        raise RuntimeError("worker_preflight_response_invalid")
+
+    parsed_rows: list[tuple[datetime, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("worker_preflight_response_invalid")
+        created_at = row.get("created_at")
+        details = row.get("details")
+        status = row.get("status")
+        if (
+            not isinstance(created_at, str)
+            or not isinstance(details, dict)
+            or not isinstance(status, str)
+        ):
+            raise RuntimeError("worker_preflight_response_invalid")
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise RuntimeError("worker_preflight_timestamp_invalid") from exc
+        if parsed_created_at.tzinfo is None:
+            raise RuntimeError("worker_preflight_timestamp_invalid")
+        normalized_created_at = parsed_created_at.astimezone(UTC)
+        age_seconds = (now - normalized_created_at).total_seconds()
+        if age_seconds < -MAX_FUTURE_HEARTBEAT_SKEW_SECONDS:
+            raise RuntimeError("worker_preflight_timestamp_future")
+        if age_seconds > WORKER_ISOLATION_LOOKBACK_SECONDS:
+            raise RuntimeError("worker_preflight_response_invalid")
+        if details.get("mock_providers") is not True:
+            raise RuntimeError("hosted_worker_must_be_fresh_mock_only")
+        parsed_rows.append((normalized_created_at, status))
+
+    latest_created_at, latest_status = max(parsed_rows, key=lambda item: item[0])
+    latest_age_seconds = (now - latest_created_at).total_seconds()
+    if (
+        latest_status != "ok"
+        or latest_age_seconds > ACTIVE_WORKER_HEARTBEAT_MAX_AGE_SECONDS
+    ):
+        raise RuntimeError("hosted_worker_must_be_fresh_mock_only")
 
 
 def _get_user_id(
@@ -297,17 +441,29 @@ def _force_live_disabled(
     client: httpx.Client,
     supabase_url: str,
     secret_key: str,
-    *,
-    raise_on_error: bool = True,
 ) -> None:
     response = client.patch(
         f"{supabase_url}/rest/v1/bot_settings",
-        headers=_headers(secret_key, secret_key),
-        params={"id": "eq.singleton"},
+        headers=_headers(secret_key, secret_key, prefer="return=representation"),
+        params={
+            "id": "eq.singleton",
+            "select": "id,enabled,mode,live_order_allowed",
+        },
         json={"enabled": False, "mode": "paper", "live_order_allowed": False},
     )
-    if raise_on_error:
-        _expect_allowed_status(response, {200, 204}, "disable_live_failed")
+    _expect_status(response, 200, "disable_live_failed")
+    rows = response.json()
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError("disable_live_unexpected_response")
+    row = rows[0]
+    if (
+        not isinstance(row, dict)
+        or row.get("id") != "singleton"
+        or row.get("enabled") is not False
+        or row.get("mode") != "paper"
+        or row.get("live_order_allowed") is not False
+    ):
+        raise RuntimeError("disable_live_invalid_row")
 
 
 def _assert_no_unapplied_live_enable(
@@ -329,7 +485,9 @@ def _assert_no_unapplied_live_enable(
     )
     _expect_status(response, 200, "preexisting_live_enable_check_failed")
     rows = response.json()
-    if isinstance(rows, list) and rows:
+    if not isinstance(rows, list):
+        raise RuntimeError("preexisting_live_enable_check_invalid_response")
+    if rows:
         raise RuntimeError("preexisting_unapplied_live_enable_command")
 
 
@@ -487,6 +645,68 @@ def _expect_command_applied_once(
         raise RuntimeError("live_enable_applied_check_invalid_row")
 
 
+def _delete_incomplete_verifier_command(
+    client: httpx.Client,
+    supabase_url: str,
+    secret_key: str,
+    command_id: str,
+) -> None:
+    response = client.get(
+        f"{supabase_url}/rest/v1/manual_commands",
+        headers=_headers(secret_key, secret_key),
+        params={
+            "select": "id,command_type,status,payload",
+            "id": f"eq.{command_id}",
+        },
+    )
+    _expect_status(response, 200, "verifier_command_cleanup_read_failed")
+    rows = response.json()
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError("verifier_command_cleanup_read_unexpected_response")
+    row = rows[0]
+    if not _is_verifier_command_row(row, command_id):
+        raise RuntimeError("verifier_command_cleanup_identity_mismatch")
+    status = row.get("status")
+    if status == "applied":
+        return
+    if status not in {"pending", "accepted", "rejected"}:
+        raise RuntimeError("verifier_command_cleanup_status_invalid")
+
+    response = client.delete(
+        f"{supabase_url}/rest/v1/manual_commands",
+        headers=_headers(secret_key, secret_key, prefer="return=representation"),
+        params={
+            "id": f"eq.{command_id}",
+            "status": f"eq.{status}",
+            "select": "id,command_type,status,payload",
+        },
+    )
+    _expect_status(response, 200, "verifier_command_cleanup_delete_failed")
+    deleted_rows = response.json()
+    if (
+        not isinstance(deleted_rows, list)
+        or len(deleted_rows) != 1
+        or not _is_verifier_command_row(deleted_rows[0], command_id)
+        or deleted_rows[0].get("status") != status
+    ):
+        raise RuntimeError("verifier_command_cleanup_delete_unexpected_response")
+
+
+def _is_verifier_command_row(row: object, command_id: str) -> bool:
+    if not isinstance(row, dict):
+        return False
+    payload = row.get("payload")
+    return (
+        row.get("id") == command_id
+        and row.get("command_type") == "request_live_enable"
+        and isinstance(payload, dict)
+        and payload.get("provider_contract_version")
+        == "hosted-live-enable-flow-verifier"
+        and payload.get("risk_report_id") == "hosted-live-enable-flow-verifier"
+        and payload.get("release_version") == "hosted-live-enable-flow-verifier"
+    )
+
+
 def _expect_second_activation_denied(
     client: httpx.Client,
     supabase_url: str,
@@ -519,11 +739,6 @@ def _expect_status(response: httpx.Response, status_code: int, label: str) -> No
         raise RuntimeError(f"{label} status={response.status_code}")
 
 
-def _expect_allowed_status(response: httpx.Response, statuses: set[int], label: str) -> None:
-    if response.status_code not in statuses:
-        raise RuntimeError(f"{label} status={response.status_code}")
-
-
 def _normalize_url(value: str) -> str:
     parsed = urlparse(value.rstrip("/"))
     if parsed.scheme != "https":
@@ -536,8 +751,22 @@ def _normalize_url(value: str) -> str:
         raise RuntimeError("supabase_url_must_not_include_query_or_fragment")
     if parsed.path not in {"", "/"}:
         raise RuntimeError("supabase_url_must_not_include_path")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("supabase_url_port_invalid") from exc
+    if port not in {None, 443}:
+        raise RuntimeError("supabase_url_must_use_default_https_port")
     _reject_non_hosted_hostname(parsed.hostname)
     return parsed.geturl().rstrip("/")
+
+
+def _project_ref(value: str) -> str:
+    normalized_url = _normalize_url(value)
+    hostname = urlparse(normalized_url).hostname
+    if hostname is None:
+        raise RuntimeError("supabase_url_missing_host")
+    return hostname.split(".", maxsplit=1)[0]
 
 
 def _reject_non_hosted_hostname(hostname: str) -> None:

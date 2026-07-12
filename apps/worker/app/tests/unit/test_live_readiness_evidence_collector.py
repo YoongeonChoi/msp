@@ -1790,7 +1790,8 @@ def _config(
     incident_output = tmp_path / "incident-output.txt"
     incident_output.write_text(
         "FINAL=PASS live_incident_response_drill delivered=4 max_latency_ms=17 "
-        "acknowledged=true ack_latency_ms=2300 drill_id=incident-drill-20260628-1\n",
+        "acknowledged=true ack_latency_ms=2300 drill_id=incident-drill-20260628-1 "
+        "transport=real\n",
         encoding="utf-8",
     )
     return CollectorConfig(

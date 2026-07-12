@@ -76,8 +76,10 @@ def test_heartbeat_details_include_cycle_and_release(tmp_path: Path) -> None:
         "cycle-1",
         env={"GIT_COMMIT_SHA": "1234567890abcdef"},
         metadata_path=tmp_path / "missing.json",
+        mock_providers=True,
     )
 
     assert details["cycle_id"] == "cycle-1"
     assert details["release_sha"] == "1234567890abcdef"
     assert details["release_source"] == "GIT_COMMIT_SHA"
+    assert details["mock_providers"] is True

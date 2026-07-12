@@ -75,6 +75,9 @@ class FeatureService:
         fundamentals = await self._load_fundamentals(symbol, raw, unready_reasons)
         news_events = await self._load_news(symbol, raw, unready_reasons)
         market_sector = await self._load_market_sector(symbol, raw, unready_reasons)
+        critical_news_risk = _critical_news_risk(news_events)
+        if critical_news_risk is not None:
+            raw["critical_news_risk"] = critical_news_risk
 
         technical_score = 0.70 if quote.price_krw > 0 else 0.0
         fundamental_score = _fundamental_score(fundamentals)
@@ -259,6 +262,14 @@ def _news_score(events: list[NewsEvent]) -> float:
     if not events:
         return 0.0
     return _average([_news_event_score(event) for event in events], default=0.0)
+
+
+def _critical_news_risk(events: list[NewsEvent]) -> bool | None:
+    if any(event.classification.risk_level == "critical" for event in events):
+        return True
+    if not events or any(event.classification.risk_level == "unknown" for event in events):
+        return None
+    return False
 
 
 def _market_sector_score(evidence: MarketSectorEvidence | None) -> float:

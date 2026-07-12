@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
+from app.domain.common.strict_json import StrictJsonError, loads_strict_json
 from app.tools.verify_live_readiness_evidence_bundle import (
     REMOTE_EVIDENCE_TIMEOUT_SECONDS,
     BundleValidationError,
@@ -43,12 +43,12 @@ def verify_system_order_scope_evidence_file(
     remote_timeout_seconds: int = REMOTE_EVIDENCE_TIMEOUT_SECONDS,
 ) -> SystemOrderScopeEvidenceSummary:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = loads_strict_json(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise SystemOrderScopeEvidenceValidationError(
             "system_order_scope_evidence_unreadable"
         ) from exc
-    except json.JSONDecodeError as exc:
+    except (StrictJsonError, ValueError) as exc:
         raise SystemOrderScopeEvidenceValidationError(
             "system_order_scope_evidence_json_invalid"
         ) from exc
