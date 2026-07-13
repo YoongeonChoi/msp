@@ -6,7 +6,9 @@ export const orderStatusSchema = z.enum([
   "paper",
   "blocked",
   "sent",
+  "partial_filled",
   "filled",
+  "canceled",
   "rejected",
   "failed",
   "unknown_requires_manual_check"
