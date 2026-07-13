@@ -12,7 +12,19 @@ def _sql() -> str:
 
 def _created_public_tables() -> set[str]:
     tables: set[str] = set()
-    pattern = re.compile(r"create table(?: if not exists)? public\.([a-z_]+)\s*\(")
+    pattern = re.compile(
+        r"create table(?: if not exists)? public\.([a-z_][a-z0-9_]*)\s*\(",
+    )
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        tables.update(pattern.findall(path.read_text(encoding="utf-8").lower()))
+    return tables
+
+
+def _rls_enabled_public_tables() -> set[str]:
+    tables: set[str] = set()
+    pattern = re.compile(
+        r"alter table public\.([a-z_][a-z0-9_]*)\s+enable row level security",
+    )
     for path in sorted(MIGRATIONS.glob("*.sql")):
         tables.update(pattern.findall(path.read_text(encoding="utf-8").lower()))
     return tables
@@ -69,6 +81,10 @@ def test_authenticated_select_grants_cover_every_public_table() -> None:
     assert "to anon" not in sql
     assert "grant create on schema public" not in sql
     assert "grant usage on schema public to authenticated, service_role" in sql
+
+
+def test_every_public_table_has_rls_enabled() -> None:
+    assert _rls_enabled_public_tables() == _created_public_tables()
 
 
 def test_authenticated_write_grants_match_existing_rls_write_policies() -> None:
