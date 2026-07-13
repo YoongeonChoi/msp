@@ -160,6 +160,8 @@ class RunTradingCycle:
                 )
                 continue
             features = await self._features_for_mode(settings.mode, symbol, quote)
+            if settings.mode == "paper":
+                risk_now = now_utc()
             live_feature_order_proposal_ready = True
             if (
                 settings.mode == "live"

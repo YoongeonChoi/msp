@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+import app.application.use_cases.run_trading_cycle as run_trading_cycle_module
 from app.adapters.ai.openai_mock import OpenAIMock
 from app.adapters.broker.toss_mock import TossMock
 from app.adapters.fundamentals.opendart_mock import OpenDartMock
@@ -490,6 +491,27 @@ async def test_stale_quote_blocks_paper_order() -> None:
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
     assert "stale_quote" in repository.orders[0].reason
+
+
+async def test_paper_cycle_refreshes_risk_time_after_quote_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_started_at = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
+    quote_created_at = cycle_started_at + timedelta(microseconds=500)
+    risk_evaluated_at = cycle_started_at + timedelta(seconds=1)
+    timestamps = iter((cycle_started_at, risk_evaluated_at))
+    monkeypatch.setattr(run_trading_cycle_module, "now_utc", lambda: next(timestamps))
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    )
+    market_data = QuoteOverrideMarketData(
+        {"005930": Quote(symbol="005930", price_krw=75_000, as_of=quote_created_at)}
+    )
+
+    await _cycle(repository, market_data=market_data).execute()
+
+    assert repository.orders[0].status == "paper"
+    assert repository.decisions[0].risk_snapshot["allowed"] is True
 
 
 async def test_missing_strategy_blocks_paper_order() -> None:
