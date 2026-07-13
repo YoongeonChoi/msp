@@ -9,7 +9,7 @@ import { useAdminAccess } from "../lib/useAdminAccess";
 import { AuthRequiredBlock } from "../components/AuthRequiredState";
 import { EmptyState, ErrorState, LoadingState, pageButtonClass, Panel, Pill, SectionTitle } from "../components/ui";
 
-interface WatchlistForm {
+export interface WatchlistForm {
   readonly symbol: string;
   readonly name: string;
   readonly market: string;
@@ -211,8 +211,20 @@ function TextInput({
   );
 }
 
-function parseWatchlistForm(form: WatchlistForm): WatchlistInput | null {
+export function parseWatchlistForm(form: WatchlistForm): WatchlistInput | null {
   if (!/^[0-9]{6}$/.test(form.symbol) || form.market !== "KR") {
+    return null;
+  }
+  const targetBuyKrw = optionalInteger(form.targetBuyKrw);
+  const targetSellKrw = optionalInteger(form.targetSellKrw);
+  const stopLossPct = optionalPercent(form.stopLossPct);
+  const maxPositionPct = optionalPercent(form.maxPositionPct);
+  if (
+    targetBuyKrw === undefined ||
+    targetSellKrw === undefined ||
+    stopLossPct === undefined ||
+    maxPositionPct === undefined
+  ) {
     return null;
   }
   return {
@@ -221,10 +233,10 @@ function parseWatchlistForm(form: WatchlistForm): WatchlistInput | null {
     market: form.market,
     sector: form.sector.trim() || "unknown",
     enabled: form.enabled,
-    targetBuyKrw: optionalInteger(form.targetBuyKrw),
-    targetSellKrw: optionalInteger(form.targetSellKrw),
-    stopLossPct: optionalPercent(form.stopLossPct),
-    maxPositionPct: optionalPercent(form.maxPositionPct),
+    targetBuyKrw,
+    targetSellKrw,
+    stopLossPct,
+    maxPositionPct,
     notes: form.notes.trim() || null
   };
 }
@@ -244,18 +256,18 @@ function formFromItem(item: WatchlistItem): WatchlistForm {
   };
 }
 
-function optionalInteger(value: string): number | null {
+function optionalInteger(value: string): number | null | undefined {
   if (value.trim() === "") {
     return null;
   }
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+  return Number.isFinite(parsed) && Number.isInteger(parsed) ? parsed : undefined;
 }
 
-function optionalPercent(value: string): number | null {
+function optionalPercent(value: string): number | null | undefined {
   if (value.trim() === "") {
     return null;
   }
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed / 100 : null;
+  return Number.isFinite(parsed) ? parsed / 100 : undefined;
 }

@@ -7,3 +7,4 @@ import "./decisionSnapshotSchemaCompatibility.test";
 import "./strategyWeights.test";
 import "./strategyLabRender.test";
 import "./strategyDraftMutation.test";
+import "./watchlistValidation.test";
