@@ -8,4 +8,6 @@ import "./strategyWeights.test";
 import "./strategyLabRender.test";
 import "./strategyDraftMutation.test";
 import "./watchlistValidation.test";
+import "./dataMutationGuards.test";
 import "./sharedSchemas.test";
+import "./layoutAuthorization.test";

@@ -56,6 +56,9 @@ for (const [label, element, seeds] of authRequiredCases) {
   const markup = renderWithSeededQueries(element, seeds);
   assert.match(markup, /데이터 접근 권한 필요/, `${label} should show auth-required state`);
   assert.match(markup, /Settings에서 admin 계정으로 로그인/, `${label} should point to Settings login`);
+  if (label === "watchlist") {
+    assert.match(markup, /<button[^>]*disabled=""[^>]*>.*저장.*<\/button>/, "watchlist save must require admin role");
+  }
 }
 
 const settingsMarkup = renderWithSeededQueries(<SettingsPage />, [[["bot_settings"], null]]);

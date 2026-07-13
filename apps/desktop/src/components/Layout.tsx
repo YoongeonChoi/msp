@@ -162,12 +162,17 @@ function StatusBar() {
               emergencyStop.mutate();
             }
           }}
-          disabled={emergencyStop.isPending}
+          disabled={emergencyStop.isPending || !adminAccess.isAdmin || !currentSettings}
         >
           <CircleStop size={16} aria-hidden="true" />
           Emergency Stop
         </button>
       </div>
+      {emergencyStop.error ? (
+        <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+          Emergency Stop 저장에 실패했습니다. Supabase 연결과 admin 권한을 확인하세요.
+        </div>
+      ) : null}
       {currentSettings?.liveOrderAllowed ? (
         <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800">
           위험 배너: live_order_allowed=true 상태입니다. Paper Trading 검증 중에는 즉시 Emergency Stop을 권장합니다.

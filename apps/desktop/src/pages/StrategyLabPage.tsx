@@ -159,6 +159,8 @@ export function StrategyLabPage() {
         isLoading={candidates.isLoading}
         isError={candidates.isError}
         isPending={candidateMutation.isPending}
+        reviewError={candidateMutation.error}
+        canReview={adminAccess.isAdmin}
         onReview={(candidate, status) => {
           const statusLabel = status === "approved_for_paper" ? "Paper 검증 승인" : "거절";
           if (
@@ -558,12 +560,16 @@ function AiCandidatesSection({
   isLoading,
   isError,
   isPending,
+  reviewError,
+  canReview,
   onReview
 }: {
   readonly candidates: readonly AiUpgradeCandidateRow[];
   readonly isLoading: boolean;
   readonly isError: boolean;
   readonly isPending: boolean;
+  readonly reviewError: Error | null;
+  readonly canReview: boolean;
   readonly onReview: (candidate: AiUpgradeCandidateRow, status: "approved_for_paper" | "rejected") => void;
 }) {
   return (
@@ -575,6 +581,7 @@ function AiCandidatesSection({
       {isError ? (
         <ErrorState message="ai_upgrade_candidates를 읽지 못했습니다." />
       ) : null}
+      {reviewError ? <p className="mb-3 text-sm text-red-700">AI 후보 검토 저장에 실패했습니다.</p> : null}
       {!isLoading && !isError && candidates.length === 0 ? (
         <EmptyState title="AI 후보 없음" detail="generate_monthly_ai_candidate 실행 후 proposed 후보가 표시됩니다." />
       ) : null}
@@ -617,7 +624,7 @@ function AiCandidatesSection({
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className={pageButtonClass("safe")}
-                  disabled={isPending || !reviewableCandidateStatuses.has(candidate.status)}
+                  disabled={!canReview || isPending || !reviewableCandidateStatuses.has(candidate.status)}
                   onClick={() => onReview(candidate, "approved_for_paper")}
                 >
                   <CheckCircle2 size={16} aria-hidden="true" />
@@ -625,7 +632,7 @@ function AiCandidatesSection({
                 </button>
                 <button
                   className={pageButtonClass("warning")}
-                  disabled={isPending || candidate.status === "rejected"}
+                  disabled={!canReview || isPending || candidate.status === "rejected"}
                   onClick={() => onReview(candidate, "rejected")}
                 >
                   <XCircle size={16} aria-hidden="true" />

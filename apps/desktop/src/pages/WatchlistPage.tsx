@@ -47,6 +47,7 @@ export function WatchlistPage() {
       return queryClient.invalidateQueries({ queryKey: ["watchlist"] });
     }
   });
+  const canWrite = adminAccess.isAdmin;
 
   if (watchlist.isLoading) {
     return <LoadingState label="관심종목을 불러오는 중" />;
@@ -99,10 +100,11 @@ export function WatchlistPage() {
               className="mt-1 min-h-20 w-full rounded-md border border-line px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
             />
           </label>
-          <button className={pageButtonClass("neutral")} disabled={mutation.isPending}>
+          <button className={pageButtonClass("neutral")} disabled={!canWrite || mutation.isPending}>
             <Save size={16} aria-hidden="true" />
             저장
           </button>
+          {mutation.error ? <p className="text-sm text-red-700">watchlist 저장에 실패했습니다.</p> : null}
         </form>
       </Panel>
 

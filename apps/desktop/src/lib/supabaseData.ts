@@ -213,8 +213,11 @@ export async function upsertWatchlistItem(input: WatchlistInput): Promise<void> 
     notes: input.notes,
     updated_at: new Date().toISOString()
   };
-  const result = await client.from("watchlist").upsert(payload, { onConflict: "symbol,market" });
+  const result = await client.from("watchlist").upsert(payload, { onConflict: "symbol,market" }).select("id");
   failOnError("watchlist", result.error);
+  if ((result.data ?? []).length !== 1) {
+    throw new CockpitDataError("watchlist", "저장할 관심종목을 찾지 못했습니다.");
+  }
 }
 
 export async function fetchPositions(): Promise<PositionRow[]> {
@@ -392,8 +395,12 @@ export async function reviewAiUpgradeCandidate(input: {
   const result = await client
     .from("ai_upgrade_candidates")
     .update({ status: input.status, reviewed_at: new Date().toISOString() })
-    .eq("id", input.id);
+    .eq("id", input.id)
+    .select("id");
   failOnError("ai_upgrade_candidates", result.error);
+  if ((result.data ?? []).length !== 1) {
+    throw new CockpitDataError("ai_upgrade_candidates", "검토할 AI 후보를 찾지 못했습니다.");
+  }
 }
 
 export async function updateBotSettings(patch: BotSettingsPatch): Promise<void> {
@@ -409,8 +416,11 @@ export async function updateBotSettings(patch: BotSettingsPatch): Promise<void> 
     ...(patch.maxSectorPct !== undefined ? { max_sector_pct: patch.maxSectorPct } : {}),
     updated_at: new Date().toISOString()
   };
-  const result = await client.from("bot_settings").update(payload).eq("id", "singleton");
+  const result = await client.from("bot_settings").update(payload).eq("id", "singleton").select("id");
   failOnError("bot_settings", result.error);
+  if ((result.data ?? []).length !== 1) {
+    throw new CockpitDataError("bot_settings", "변경할 bot_settings를 찾지 못했습니다.");
+  }
 }
 
 export async function fetchAuthRole(): Promise<AuthRoleState> {

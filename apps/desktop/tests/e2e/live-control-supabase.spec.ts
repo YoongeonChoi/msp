@@ -205,7 +205,7 @@ async function handleRestRequest(
           ? { ...row, status: "applied", applied_at: new Date().toISOString() }
           : row
       )));
-      await fulfillJson(route, []);
+      await fulfillJson(route, [{ id: "singleton" }]);
       return;
     }
   }
