@@ -82,7 +82,12 @@ def run_checks(
 ) -> HostedVerificationResult:
     _validate_config(config)
     supabase_url = _normalize_url(config.supabase_url)
-    _check_postgrest_root(client, supabase_url, config.publishable_key)
+    _check_postgrest_root(
+        client,
+        supabase_url,
+        config.publishable_key,
+        config.secret_key,
+    )
     denied = 0
     denied += _expect_rpc_denied(
         client, supabase_url, config.publishable_key, "database_size_bytes", {}
@@ -272,10 +277,30 @@ def _validate_config(config: HostedSupabaseConfig) -> None:
         raise RuntimeError("reviewer_jwt_must_not_reuse_supabase_key")
 
 
-def _check_postgrest_root(client: httpx.Client, supabase_url: str, key: str) -> None:
-    response = client.get(f"{supabase_url}/rest/v1/", headers=_headers(key))
-    if response.status_code != 200:
-        raise RuntimeError(f"postgrest_root_failed status={response.status_code}")
+def _check_postgrest_root(
+    client: httpx.Client,
+    supabase_url: str,
+    publishable_key: str,
+    secret_key: str,
+) -> None:
+    publishable_response = client.get(
+        f"{supabase_url}/rest/v1/",
+        headers=_headers(publishable_key),
+    )
+    if publishable_response.status_code not in EXPECTED_DENIED_STATUSES:
+        raise RuntimeError(
+            "postgrest_root_publishable_not_denied "
+            f"status={publishable_response.status_code}"
+        )
+
+    secret_response = client.get(
+        f"{supabase_url}/rest/v1/",
+        headers=_headers(secret_key),
+    )
+    if secret_response.status_code != 200:
+        raise RuntimeError(
+            f"postgrest_root_secret_failed status={secret_response.status_code}"
+        )
 
 
 def _expect_rpc_denied(
@@ -390,11 +415,19 @@ def _expect_authenticated_admin_role_read(
 
 
 def _headers(key: str, *, bearer: str | None = None) -> dict[str, str]:
-    return {
+    headers = {
         "apikey": key,
-        "Authorization": f"Bearer {bearer or key}",
         "Content-Type": "application/json",
     }
+    if bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
+    elif not _is_new_api_key(key):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _is_new_api_key(key: str) -> bool:
+    return key.startswith(("sb_publishable_", "sb_secret_"))
 
 
 def _check_realtime_handshake(config: HostedSupabaseConfig) -> bool:

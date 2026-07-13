@@ -12,6 +12,7 @@ import httpx
 
 from app.config import load_settings
 from app.domain.common.json import JsonObject, JsonValue, json_object
+from app.infrastructure.supabase_headers import supabase_api_headers
 
 GIT_SHA_RE = r"[A-Fa-f0-9]{12,64}"
 DEFAULT_MAX_HEARTBEAT_AGE_SECONDS = 300
@@ -94,11 +95,7 @@ def fetch_latest_worker_heartbeat(
     client: httpx.Client | None = None,
 ) -> JsonObject | None:
     base_url = supabase_url.rstrip("/") + "/rest/v1"
-    headers = {
-        "apikey": supabase_secret_key,
-        "authorization": "Bearer " + supabase_secret_key,
-        "accept": "application/json",
-    }
+    headers = supabase_api_headers(supabase_secret_key) | {"accept": "application/json"}
     close_client = client is None
     http_client = client or httpx.Client(timeout=10.0)
     try:

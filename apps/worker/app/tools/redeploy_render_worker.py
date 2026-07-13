@@ -17,6 +17,7 @@ import httpx
 
 from app.config import load_settings
 from app.domain.common.json import JsonObject
+from app.infrastructure.supabase_headers import supabase_api_headers
 from app.tools.trigger_render_deploy_hook import (
     RENDER_DEPLOY_HOOK_ENV,
     RenderDeployHookError,
@@ -603,11 +604,8 @@ def _deployment_lock_rpc(
     try:
         response = http_client.post(
             f"{base_url}/rest/v1/rpc/{rpc_name}",
-            headers={
-                "apikey": supabase_secret_key,
-                "authorization": "Bearer " + supabase_secret_key,
-                "content-type": "application/json",
-            },
+            headers=supabase_api_headers(supabase_secret_key)
+            | {"content-type": "application/json"},
             json=payload,
         )
     except httpx.HTTPError as exc:

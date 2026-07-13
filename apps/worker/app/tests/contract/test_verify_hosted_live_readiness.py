@@ -134,6 +134,8 @@ def test_hosted_verifier_checks_rpc_grants_without_printing_secrets() -> None:
             return httpx.Response(403, json={"message": "permission denied"})
         assert authorization == f"Bearer {key}"
         if request.url.path == "/rest/v1/":
+            if key == "publishable-test-key":
+                return httpx.Response(403, json={"message": "Access to schema is forbidden"})
             return httpx.Response(200, json={"swagger": "2.0"})
         if request.url.path == "/rest/v1/bot_settings":
             if key == "publishable-test-key":
@@ -176,10 +178,68 @@ def test_hosted_verifier_checks_rpc_grants_without_printing_secrets() -> None:
     assert "reviewer-jwt" not in output
     assert ("POST", "/rest/v1/rpc/database_size_bytes", "publishable-test-key") in seen
     assert ("POST", "/rest/v1/rpc/run_retention_cleanup", "secret-test-key") in seen
+    assert ("GET", "/rest/v1/", "publishable-test-key") in seen
+    assert ("GET", "/rest/v1/", "secret-test-key") in seen
     assert ("GET", "/rest/v1/bot_settings", "publishable-test-key") in seen
     assert ("GET", "/rest/v1/bot_settings", "secret-test-key") in seen
     assert ("GET", "/auth/v1/user", "publishable-test-key") in seen
     assert ("GET", "/rest/v1/user_roles", "publishable-test-key") in seen
+
+
+def test_hosted_verifier_requires_openapi_denial_for_publishable_key() -> None:
+    verifier = _module()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"swagger": "2.0"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RuntimeError, match="postgrest_root_publishable_not_denied"),
+    ):
+        verifier._check_postgrest_root(
+            client,
+            "https://project.supabase.co",
+            "publishable-test-key",
+            "secret-test-key",
+        )
+
+
+def test_hosted_verifier_requires_openapi_access_for_secret_key() -> None:
+    verifier = _module()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        key = request.headers["apikey"]
+        if key == "publishable-test-key":
+            return httpx.Response(403, json={"message": "Access to schema is forbidden"})
+        return httpx.Response(403, json={"message": "secret denied"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(RuntimeError, match="postgrest_root_secret_failed"),
+    ):
+        verifier._check_postgrest_root(
+            client,
+            "https://project.supabase.co",
+            "publishable-test-key",
+            "secret-test-key",
+        )
+
+
+def test_hosted_verifier_does_not_send_new_api_keys_as_bearer_tokens() -> None:
+    verifier = _module()
+
+    publishable_headers = verifier._headers("sb_publishable_test-key")
+    secret_headers = verifier._headers("sb_secret_test-key")
+    authenticated_headers = verifier._headers(
+        "sb_publishable_test-key",
+        bearer="user-jwt",
+    )
+    legacy_headers = verifier._headers("legacy.jwt.key")
+
+    assert "Authorization" not in publishable_headers
+    assert "Authorization" not in secret_headers
+    assert authenticated_headers["Authorization"] == "Bearer user-jwt"
+    assert legacy_headers["Authorization"] == "Bearer legacy.jwt.key"
 
 
 def test_hosted_verifier_rejects_reused_publishable_and_secret_key(

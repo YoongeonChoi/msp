@@ -348,6 +348,21 @@ def test_hosted_live_enable_verifier_rejects_secret_cli_values_without_echoing_t
     assert "must-not-leak" not in output
 
 
+def test_hosted_live_enable_verifier_does_not_send_new_api_keys_as_bearer_tokens() -> None:
+    verifier = _module()
+
+    secret_headers = verifier._headers("sb_secret_test-key", "sb_secret_test-key")
+    authenticated_headers = verifier._headers(
+        "sb_publishable_test-key",
+        "user-jwt",
+    )
+    legacy_headers = verifier._headers("legacy.jwt.key", "legacy.jwt.key")
+
+    assert "Authorization" not in secret_headers
+    assert authenticated_headers["Authorization"] == "Bearer user-jwt"
+    assert legacy_headers["Authorization"] == "Bearer legacy.jwt.key"
+
+
 def test_hosted_live_enable_verifier_rejects_user_jwt_reusing_service_key() -> None:
     verifier = _module()
     config = verifier.HostedLiveEnableConfig(

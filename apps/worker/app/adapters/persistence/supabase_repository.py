@@ -27,6 +27,7 @@ from app.domain.risk.entities import RiskResult
 from app.domain.strategy.entities import StrategyVersion
 from app.domain.strategy.research import AIUpgradeCandidate, MonthlyResearchRows, MonthPeriod
 from app.domain.trading.entities import BotSettings, DecisionSnapshot, Order, OrderStatus
+from app.infrastructure.supabase_headers import supabase_api_headers
 
 PAPER_STRATEGY_VERSION = "strategy_v1_weighted_factor"
 
@@ -37,9 +38,8 @@ class SupabaseRepository:
             raise ValueError("Supabase repository requires SUPABASE_URL and SUPABASE_SECRET_KEY")
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1"
         self.forced_settings = forced_settings
-        self.headers = {
-            "apikey": settings.supabase_secret_key.get_secret_value(),
-            "authorization": "Bearer " + settings.supabase_secret_key.get_secret_value(),
+        secret = settings.supabase_secret_key.get_secret_value()
+        self.headers = supabase_api_headers(secret) | {
             "content-type": "application/json",
             "prefer": "return=minimal",
         }

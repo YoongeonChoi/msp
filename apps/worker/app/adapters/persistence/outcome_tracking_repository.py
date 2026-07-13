@@ -7,6 +7,7 @@ import httpx
 from app.application.ports.outcome_tracking_port import OutcomeTrackingRows
 from app.config import Settings
 from app.domain.common.json import JsonObject, JsonValue, json_object
+from app.infrastructure.supabase_headers import supabase_api_headers
 
 
 class SupabaseOutcomeTrackingRepository:
@@ -15,9 +16,7 @@ class SupabaseOutcomeTrackingRepository:
             raise ValueError("Outcome tracking requires SUPABASE_URL and SUPABASE_SECRET_KEY")
         secret = settings.supabase_secret_key.get_secret_value()
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1"
-        self.headers = {
-            "apikey": secret,
-            "authorization": "Bearer " + secret,
+        self.headers = supabase_api_headers(secret) | {
             "content-type": "application/json",
             "prefer": "return=minimal",
         }

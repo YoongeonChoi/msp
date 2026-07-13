@@ -8,6 +8,7 @@ import httpx
 from app.application.ports.backtest_port import BacktestRows
 from app.config import Settings
 from app.domain.common.json import JsonObject, json_object
+from app.infrastructure.supabase_headers import supabase_api_headers
 
 
 class SupabaseBacktestRepository:
@@ -16,9 +17,7 @@ class SupabaseBacktestRepository:
             raise ValueError("Backtest requires SUPABASE_URL and SUPABASE_SECRET_KEY")
         secret = settings.supabase_secret_key.get_secret_value()
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1"
-        self.headers = {
-            "apikey": secret,
-            "authorization": "Bearer " + secret,
+        self.headers = supabase_api_headers(secret) | {
             "content-type": "application/json",
             "prefer": "return=minimal",
         }

@@ -63,11 +63,15 @@ worker heartbeat가 확인될 때까지 잠금을 유지합니다. 배포 완료
 
 `verify_hosted_live_readiness.py`는 실제 hosted/staging Supabase project에 대해
 `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` 또는 `VITE_SUPABASE_PUBLISHABLE_KEY`,
-`SUPABASE_SECRET_KEY`가 설정된 경우에만 실행됩니다. 이 verifier는 PostgREST root,
+`SUPABASE_SECRET_KEY`, `SUPABASE_LIVE_REQUESTER_JWT`,
+`SUPABASE_LIVE_REVIEWER_JWT`가 설정된 경우에만 실행됩니다. 이 verifier는
+PostgREST root의 publishable-key 접근 거부와 secret-key 접근 성공,
 publishable/anon key의 destructive/read RPC denial, secret/service role key의 RPC
 success path, publishable/anon key의 `bot_settings` Data API denial,
 secret/service role key의 `bot_settings` Data API select, Realtime WebSocket
 handshake를 확인하고 secret 값을 출력하지 않습니다.
+`sb_publishable_`/`sb_secret_` key는 `apikey` header에만 보내고, user session 또는
+legacy JWT key만 `Authorization: Bearer`로 전송합니다.
 `SUPABASE_URL`은 path/query/fragment/credentials가 없는 공식
 `https://<project_ref>.supabase.co` project origin이어야 하며,
 local/test/private IP/self-hosted/custom mock host는 live-readiness evidence로 인정하지 않습니다.

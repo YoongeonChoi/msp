@@ -726,12 +726,17 @@ def _expect_second_activation_denied(
 def _headers(key: str, bearer: str, *, prefer: str | None = None) -> dict[str, str]:
     headers = {
         "apikey": key,
-        "Authorization": f"Bearer {bearer}",
         "Content-Type": "application/json",
     }
+    if bearer != key or not _is_new_api_key(key):
+        headers["Authorization"] = f"Bearer {bearer}"
     if prefer is not None:
         headers["Prefer"] = prefer
     return headers
+
+
+def _is_new_api_key(key: str) -> bool:
+    return key.startswith(("sb_publishable_", "sb_secret_"))
 
 
 def _expect_status(response: httpx.Response, status_code: int, label: str) -> None:
