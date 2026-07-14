@@ -28,7 +28,14 @@ const authRequiredCases: Array<readonly [string, React.ReactElement, Array<reado
   ["signals", <SignalsPage />, [[["decision_snapshots", "recent"], []]]],
   ["fundamentals", <FundamentalsPage />, [[["fundamentals_quarterly"], []]]],
   ["news", <NewsPage />, [[["news_events"], []]]],
-  ["logs", <LogsPage />, [[["engine_events"], []]]],
+  [
+    "logs",
+    <LogsPage />,
+    [
+      [["engine_events"], []],
+      [["audit_logs", "recent"], []]
+    ]
+  ],
   ["watchlist", <WatchlistPage />, [[["watchlist"], []]]],
   [
     "strategy",

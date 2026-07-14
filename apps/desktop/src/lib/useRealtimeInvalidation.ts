@@ -1,5 +1,9 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  queryKeyPrefixesForRealtimeTable,
+  realtimeTables
+} from "./realtimeInvalidation";
 import { supabase } from "./supabaseClient";
 
 type ViteRealtimeEnv = {
@@ -8,15 +12,6 @@ type ViteRealtimeEnv = {
 
 const env = (import.meta as ImportMeta & { readonly env?: ViteRealtimeEnv }).env ?? {};
 const realtimeDisabled = env.VITE_SUPABASE_REALTIME_DISABLED === "true";
-
-const realtimeTables = [
-  "bot_settings",
-  "worker_heartbeats",
-  "api_health",
-  "orders",
-  "decision_snapshots",
-  "engine_events"
-];
 
 export function useRealtimeInvalidation(): void {
   const queryClient = useQueryClient();
@@ -29,7 +24,9 @@ export function useRealtimeInvalidation(): void {
     const channel = client.channel("desktop-paper-cockpit");
     for (const table of realtimeTables) {
       channel.on("postgres_changes", { event: "*", schema: "public", table }, () => {
-        void queryClient.invalidateQueries();
+        for (const queryKey of queryKeyPrefixesForRealtimeTable(table)) {
+          void queryClient.invalidateQueries({ queryKey });
+        }
       });
     }
     void channel.subscribe();

@@ -5,6 +5,7 @@ import {
   fetchBotSettings,
   fetchEngineEvents,
   fetchLatestHeartbeat,
+  fetchManualCheckOrderCount,
   fetchTodayDecisions,
   fetchTodayOrders
 } from "../lib/supabaseData";
@@ -28,6 +29,12 @@ export function DashboardPage() {
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
   const decisions = useQuery({ queryKey: ["decision_snapshots", "today"], queryFn: fetchTodayDecisions, refetchInterval: 60_000 });
   const orders = useQuery({ queryKey: ["orders", "today"], queryFn: fetchTodayOrders, refetchInterval: 60_000 });
+  const manualCheckCountQuery = useQuery({
+    queryKey: ["orders", "manual_check", "count"],
+    queryFn: fetchManualCheckOrderCount,
+    enabled: adminAccess.isAdmin,
+    refetchInterval: adminAccess.isAdmin ? 30_000 : false
+  });
   const events = useQuery({ queryKey: ["engine_events"], queryFn: () => fetchEngineEvents(20), refetchInterval: 60_000 });
 
   if (settings.error || heartbeat.error || apiHealth.error) {
@@ -39,6 +46,7 @@ export function DashboardPage() {
   const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const decisionCounts = countBy(decisions.data ?? [], (item) => item.action);
   const orderCounts = countBy(orders.data ?? [], (item) => item.status);
+  const manualCheckCount = adminAccess.isAdmin ? manualCheckCountQuery.data ?? 0 : 0;
   const warningEvents =
     events.data?.filter((event) => ["warning", "error", "critical"].includes(event.level)).slice(0, 8) ?? [];
 
@@ -53,7 +61,7 @@ export function DashboardPage() {
         </Panel>
       ) : null}
 
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <Metric
           title="거래 봇"
           value={formatBotStatus(settings.data, dataAccessLimited)}
@@ -78,7 +86,47 @@ export function DashboardPage() {
           detail={settings.data?.mode ?? (dataAccessLimited ? "admin 필요" : "paper")}
           tone={settings.data ? (settings.data.liveOrderAllowed ? "danger" : "safe") : "warning"}
         />
+        <Metric
+          title="수동 확인 주문"
+          value={
+            !adminAccess.isKnown
+              ? "권한 확인 중"
+              : dataAccessLimited
+              ? "권한 필요"
+              : manualCheckCountQuery.isLoading
+                ? "조회 중"
+              : manualCheckCountQuery.error
+                ? "조회 오류"
+                : `${manualCheckCount}건`
+          }
+          detail="미해결"
+          tone={
+            !adminAccess.isKnown || dataAccessLimited || manualCheckCountQuery.isLoading
+              ? "warning"
+              : manualCheckCountQuery.error || manualCheckCount > 0
+                ? "danger"
+                : "safe"
+          }
+        />
       </div>
+
+      {manualCheckCount > 0 ? (
+        <Panel className="border-red-200 bg-red-50">
+          <div className="flex items-center gap-2 text-sm font-semibold text-red-900" role="alert">
+            <AlertTriangle size={16} aria-hidden="true" />
+            자동으로 해소할 수 없는 주문 {manualCheckCount}건이 남아 있습니다. 주문 화면의 안전 큐에서 확인하세요.
+          </div>
+        </Panel>
+      ) : null}
+
+      {manualCheckCountQuery.error && !dataAccessLimited ? (
+        <Panel className="border-red-200 bg-red-50">
+          <div className="flex items-center gap-2 text-sm font-semibold text-red-900" role="alert">
+            <AlertTriangle size={16} aria-hidden="true" />
+            수동 확인 필요 주문을 조회하지 못했습니다. Supabase 연결과 admin 권한을 확인하세요.
+          </div>
+        </Panel>
+      ) : null}
 
       {heartbeatStale ? (
         <Panel className="border-amber-200 bg-amber-50">

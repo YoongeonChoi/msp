@@ -11,3 +11,7 @@ import "./watchlistValidation.test";
 import "./dataMutationGuards.test";
 import "./sharedSchemas.test";
 import "./layoutAuthorization.test";
+import "./orderSafetyQueue.test";
+import "./auditLogRender.test";
+import "./authSessionCache.test";
+import "./realtimeInvalidation.test";

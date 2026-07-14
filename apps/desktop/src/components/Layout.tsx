@@ -4,6 +4,7 @@ import {
   fetchApiHealth,
   fetchBotSettings,
   fetchLatestHeartbeat,
+  fetchManualCheckOrderCount,
   fetchTodayDecisions,
   fetchTodayOrders,
   updateBotSettings
@@ -120,6 +121,12 @@ function StatusBar() {
   const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
   const todayDecisions = useQuery({ queryKey: ["decision_snapshots", "today"], queryFn: fetchTodayDecisions, refetchInterval: 60_000 });
   const todayOrders = useQuery({ queryKey: ["orders", "today"], queryFn: fetchTodayOrders, refetchInterval: 60_000 });
+  const manualCheckCountQuery = useQuery({
+    queryKey: ["orders", "manual_check", "count"],
+    queryFn: fetchManualCheckOrderCount,
+    enabled: adminAccess.isAdmin,
+    refetchInterval: adminAccess.isAdmin ? 30_000 : false
+  });
 
   const emergencyStop = useMutation({
     mutationFn: () => updateBotSettings({ enabled: false, liveOrderAllowed: false }),
@@ -132,6 +139,22 @@ function StatusBar() {
   const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
   const healthyCount = apiHealth.data?.filter((item) => item.healthy).length ?? 0;
   const unhealthyCount = apiHealth.data ? apiHealth.data.length - healthyCount : 0;
+  const manualCheckCount = adminAccess.isAdmin ? manualCheckCountQuery.data ?? 0 : 0;
+  const manualCheckLabel = !adminAccess.isKnown
+    ? "권한 확인 중"
+    : dataAccessLimited
+      ? "권한 필요"
+      : manualCheckCountQuery.isLoading
+        ? "조회 중"
+        : manualCheckCountQuery.error
+          ? "조회 오류"
+          : `${manualCheckCount}건`;
+  const manualCheckTone =
+    !adminAccess.isKnown || dataAccessLimited || manualCheckCountQuery.isLoading
+      ? "warning"
+      : manualCheckCountQuery.error || manualCheckCount > 0
+        ? "danger"
+        : "safe";
   const paperOrders =
     todayOrders.data?.filter((order) => ["paper", "proposed", "blocked"].includes(order.status)).length ?? 0;
 
@@ -155,6 +178,9 @@ function StatusBar() {
         </Pill>
         <Pill tone="neutral">오늘 decision: {todayDecisions.data?.length ?? 0}</Pill>
         <Pill tone="neutral">오늘 paper/proposed/blocked: {paperOrders}</Pill>
+        <Pill tone={manualCheckTone}>
+          수동 확인 주문: {manualCheckLabel}
+        </Pill>
         <button
           className={`${pageButtonClass("danger")} ml-auto`}
           onClick={() => {

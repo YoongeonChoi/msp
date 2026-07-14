@@ -137,6 +137,15 @@ export interface EngineEventRow {
   readonly createdAt: string | null;
 }
 
+export interface AuditLogRow {
+  readonly id: string;
+  readonly action: string;
+  readonly targetTable: string;
+  readonly targetId: string | null;
+  readonly changedFields: readonly string[];
+  readonly createdAt: string | null;
+}
+
 export interface StrategyVersionRow {
   readonly id: string;
   readonly version: string;
@@ -374,6 +383,18 @@ export function mapEngineEvent(value: unknown): EngineEventRow {
     component: stringValue(row.component),
     message: stringValue(row.message),
     details: row.details,
+    createdAt: nullableString(row.created_at)
+  };
+}
+
+export function mapAuditLog(value: unknown): AuditLogRow {
+  const row = recordValue(value);
+  return {
+    id: stringValue(row.id),
+    action: stringValue(row.action, "unknown"),
+    targetTable: stringValue(row.target_table, "unknown"),
+    targetId: nullableString(row.target_id),
+    changedFields: stringArray(row.changed_fields),
     createdAt: nullableString(row.created_at)
   };
 }

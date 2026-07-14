@@ -2,6 +2,7 @@ import { hasSupabaseConfig, supabase } from "./supabaseClient";
 import { isRecord, startOfKstTodayIso, stringValue } from "./formatters";
 import {
   mapApiHealth,
+  mapAuditLog,
   mapAiUpgradeCandidate,
   mapBacktestRun,
   mapBotSettings,
@@ -20,6 +21,7 @@ import {
 import type {
   AiUpgradeCandidateRow,
   ApiHealth,
+  AuditLogRow,
   BacktestRunRow,
   BotSettings,
   DecisionSnapshot,
@@ -191,6 +193,36 @@ export async function fetchRecentOrders(limit = 80): Promise<OrderRow[]> {
   return (result.data ?? []).map(mapOrder);
 }
 
+export async function fetchManualCheckOrderCount(): Promise<number> {
+  const client = requireClient();
+  const result = await client
+    .from("orders")
+    .select("id", { count: "exact", head: true })
+    .eq("mode", "live")
+    .eq("status", "unknown_requires_manual_check");
+  failOnError("orders", result.error);
+  if (result.count === null) {
+    throw new Error("orders_exact_count_missing");
+  }
+  return result.count;
+}
+
+export async function fetchOrdersRequiringManualCheck(page = 0, limit = 25): Promise<OrderRow[]> {
+  const client = requireClient();
+  const normalizedPage = Math.max(0, Math.trunc(page));
+  const normalizedLimit = Math.min(100, Math.max(1, Math.trunc(limit)));
+  const rangeStart = normalizedPage * normalizedLimit;
+  const result = await client
+    .from("orders")
+    .select("id,symbol,side,mode,status,amount_krw,idempotency_key,reason,created_at")
+    .eq("mode", "live")
+    .eq("status", "unknown_requires_manual_check")
+    .order("created_at", { ascending: false })
+    .range(rangeStart, rangeStart + normalizedLimit - 1);
+  failOnError("orders", result.error);
+  return (result.data ?? []).map(mapOrder);
+}
+
 export async function fetchWatchlist(): Promise<WatchlistItem[]> {
   const client = requireClient();
   const result = await client.from("watchlist").select("*").order("symbol", { ascending: true });
@@ -254,6 +286,13 @@ export async function fetchEngineEvents(limit = 50): Promise<EngineEventRow[]> {
     .limit(limit);
   failOnError("engine_events", result.error);
   return (result.data ?? []).map(mapEngineEvent);
+}
+
+export async function fetchAuditLogs(limit = 100): Promise<AuditLogRow[]> {
+  const client = requireClient();
+  const result = await client.rpc("get_audit_log_summaries", { row_limit: limit });
+  failOnError("get_audit_log_summaries", result.error);
+  return (result.data ?? []).map(mapAuditLog);
 }
 
 export async function fetchStrategyVersions(limit = 20): Promise<StrategyVersionRow[]> {

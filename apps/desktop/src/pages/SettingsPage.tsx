@@ -3,6 +3,7 @@ import { LogIn, LogOut } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchAuthRole, fetchBotSettings, isSupabaseReady, signInWithPassword, signOut } from "../lib/supabaseData";
 import { formatKst } from "../lib/formatters";
+import { resetQueryCacheAfterSignOut } from "../lib/authSessionCache";
 import { ErrorState, KeyValue, LoadingState, pageButtonClass, Panel, Pill, SectionTitle } from "../components/ui";
 
 const appVersion = "0.1.0-mvp";
@@ -22,8 +23,8 @@ export function SettingsPage() {
   });
   const logout = useMutation({
     mutationFn: signOut,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries();
+    onSuccess: () => {
+      resetQueryCacheAfterSignOut(queryClient);
     }
   });
 
