@@ -29,6 +29,7 @@ Jobs:
   - `npm ci`
   - `npm run desktop:lint`
   - `npm run desktop:typecheck`
+  - `npm run desktop:test`
   - `npm run desktop:build`
 - Migrations
   - migration filename/order check

@@ -57,6 +57,8 @@ jobs:
         run: npm run desktop:lint
       - name: Typecheck
         run: npm run desktop:typecheck
+      - name: Test
+        run: npm run desktop:test
       - name: Build
         run: npm run desktop:build
 
