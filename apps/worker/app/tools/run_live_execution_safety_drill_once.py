@@ -221,6 +221,7 @@ def _risk_input(now: datetime, signal: Signal, strategy_version_id: UUID) -> Ris
         market_open=True,
         existing_position_pct=0.0,
         sector_position_pct=0.0,
+        available_position_quantity=10,
         critical_news_risk=False,
         liquidity_ok=True,
         volatility_ok=True,

@@ -66,15 +66,17 @@ class AccountStateBroker(SuccessfulBroker):
         self,
         daily_order_count_verified: bool,
         daily_order_count: int = 0,
+        cash_krw: int = 5_000_000,
     ) -> None:
         super().__init__()
         self.daily_order_count_verified = daily_order_count_verified
         self.daily_order_count = daily_order_count
+        self.cash_krw = cash_krw
 
     async def get_account_state(self, now: datetime) -> AccountState:
         return AccountState(
             synced=True,
-            cash_krw=5_000_000,
+            cash_krw=self.cash_krw,
             equity_krw=12_000_000,
             daily_loss_pct=0.0,
             daily_order_count=self.daily_order_count,
@@ -353,6 +355,9 @@ async def test_paper_enabled_creates_paper_order_only() -> None:
     assert len(repository.orders) == 1
     assert repository.orders[0].mode == "paper"
     assert repository.orders[0].status == "paper"
+    assert repository.orders[0].amount_krw == 100_000
+    assert repository.orders[0].price_krw == 75_000
+    assert repository.orders[0].quantity == 1
     assert repository.orders[0].idempotency_key
     assert repository.decisions[0].signal.reason_json
     assert repository.decisions[0].feature_snapshot
@@ -363,6 +368,7 @@ async def test_paper_enabled_creates_paper_order_only() -> None:
     assert "news_event_score" in repository.decisions[0].feature_snapshot
     assert "portfolio_score" in repository.decisions[0].feature_snapshot
     assert "final_score" in repository.decisions[0].feature_snapshot
+    assert repository.decisions[0].feature_snapshot["price_at_decision"] == 75_000
     raw = repository.decisions[0].feature_snapshot["raw"]
     assert isinstance(raw, dict)
     assert raw["risk_evidence"] == {
@@ -370,6 +376,7 @@ async def test_paper_enabled_creates_paper_order_only() -> None:
         "sector": None,
         "existing_position_pct": 0.0,
         "sector_position_pct": 0.0,
+        "available_position_quantity": None,
         "critical_news_risk": False,
         "liquidity_ok": True,
         "volatility_ok": True,
@@ -857,6 +864,53 @@ async def test_live_cycle_blocks_projected_position_over_limit_before_broker() -
     risk_evidence = raw["risk_evidence"]
     assert isinstance(risk_evidence, dict)
     assert risk_evidence["existing_position_pct"] == pytest.approx(0.096)
+
+
+async def test_live_cycle_blocks_buy_when_cash_buying_power_is_insufficient() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    broker = AccountStateBroker(
+        daily_order_count_verified=True,
+        cash_krw=74_999,
+    )
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+    )
+
+    await cycle.execute()
+
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert "insufficient_cash_buying_power" in (repository.orders[0].reason or "")
+
+
+async def test_live_cycle_blocks_sell_when_synced_position_quantity_is_insufficient() -> None:
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    )
+    assert repository.strategy_version is not None
+    repository.strategy_version = replace(
+        repository.strategy_version,
+        buy_threshold=0.99,
+        sell_threshold=0.90,
+    )
+    broker = AccountStateBroker(daily_order_count_verified=True)
+    cycle = _cycle(
+        repository,
+        broker=broker,
+        feature_service=LiveReadyFeatureService(),
+        portfolio_reader=StaticPortfolioReader([]),
+    )
+
+    await cycle.execute()
+
+    assert repository.decisions[0].signal.action == "sell"
+    assert broker.place_order_calls == 0
+    assert repository.orders[0].status == "blocked"
+    assert "insufficient_sell_position_quantity" in (repository.orders[0].reason or "")
 
 
 async def test_live_cycle_blocks_when_position_sync_fails_before_broker() -> None:

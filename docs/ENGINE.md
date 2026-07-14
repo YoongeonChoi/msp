@@ -24,7 +24,7 @@ Cycle:
     positions, strategy approval, and quote evidence after feature collection.
 11. Score with `WeightedFactorStrategyV1` using DB `weights` and `params`.
 12. Evaluate paper or live risk gates before order creation.
-13. Persist decision snapshot with component scores, feature snapshot, and risk snapshot.
+13. Persist decision snapshot with component scores, `price_at_decision`, feature snapshot, and risk snapshot.
 14. In paper mode, create only `paper` or `blocked` orders.
 15. In live mode, run final risk gates and block unless all pass.
 
@@ -33,6 +33,11 @@ Paper trading:
 - Disabled bot mode keeps observation and decision snapshots available while preventing order creation.
 - Paper mode never calls `BrokerPort.place_order`.
 - Paper orders require an idempotency key, strategy explanation, feature snapshot, and risk snapshot.
+- Paper and live buys require enough mode-specific account cash for the calculated whole-share
+  limit-order notional. Live sells require enough synchronized quantity for the calculated order
+  quantity; paper sells do not reuse live holdings while a separate paper position ledger is absent.
+- Allowed paper orders persist the shared whole-share `quantity` and decision `price_krw`. Outcome
+  tracking prioritizes those execution details over legacy snapshot/order price fields.
 - Duplicate paper signals for the same symbol/action/strategy in the same hourly cooldown bucket are blocked, not sent again.
 - Paper order statuses must stay within `paper`, `proposed`, or `blocked`; the current worker creates `paper` and `blocked` only.
 
@@ -67,6 +72,8 @@ Live trading:
 - Live buy risk uses synchronized holdings and account equity to check the projected symbol and sector
   exposure after the proposed order. Missing position sync, unknown held-position sectors, or unverified
   target-sector evidence blocks before any broker call.
+- The same pure whole-share quantity calculation is used by risk evaluation and broker request creation;
+  insufficient cash, unknown sell inventory, or insufficient sell quantity blocks before broker dispatch.
 - Critical-news, liquidity, and volatility gates accept only explicit feature evidence in live mode;
   missing evidence remains fail-closed.
 - Toss broker-wide or externally placed daily order history remains unverified because

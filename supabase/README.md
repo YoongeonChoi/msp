@@ -15,7 +15,9 @@ SQL migration 순서:
 11. `0011_data_api_grants.sql`
 12. `0012_runtime_safety_invariants.sql`
 13. `0013_worker_deployment_lock.sql`
-14. `seed.sql`
+14. `0014_desktop_audit_summary.sql`
+15. `0015_paper_order_execution_details.sql`
+16. `seed.sql`
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -53,6 +55,14 @@ position 정수 범위, strategy 승인·승격·불변 조건을 DB에서 강�
 `live_order_allowed=false`를 원자적으로 적용하고, target SHA를 관찰한 fresh/healthy
 worker heartbeat가 확인될 때까지 잠금을 유지합니다. 배포 완료 뒤 live를 다시
 요청하려면 `deployment_completed_at` 이후의 새 승인이 필요합니다.
+`0014_desktop_audit_summary.sql`은 desktop authenticated role의 원본
+`audit_logs` 조회 권한을 제거하고, admin 확인 뒤 변경 필드명만 반환하는 제한된 RPC를
+노출합니다. actor UUID와 before/after snapshot 값은 desktop Data API 응답에 포함되지
+않습니다.
+`0015_paper_order_execution_details.sql`은 기존 주문과 호환되는 nullable
+`quantity`/`price_krw`를 추가하고, 값이 존재할 때 양수만 허용합니다. paper 주문은
+공유 정수 수량 계산 결과를 이 필드에 저장하며 live 주문도 broker dispatch 전에 같은
+실행 수량과 limit price를 기록합니다.
 
 `verify_live_enable_migration.py`는 Docker daemon이 실행 중인 환경에서 임시
 `postgres:16-alpine` 컨테이너를 만들고, Supabase `auth.uid()`/Realtime 최소 stub,

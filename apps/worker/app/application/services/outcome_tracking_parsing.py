@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, date, datetime
+from math import isfinite
 
 from app.application.services.outcome_tracking_models import (
     DecisionForOutcome,
@@ -20,7 +21,7 @@ PRICE_AT_DECISION_KEYS = (
     "close",
 )
 CLOSE_PRICE_KEYS = ("close_price", "close", "price_krw", "current_price_krw", "price")
-ORDER_PRICE_KEYS = ("price", "paper_price_krw", "price_krw", "filled_price_krw")
+ORDER_PRICE_KEYS = ("price_krw", "paper_price_krw", "price", "filled_price_krw")
 ORDER_QUANTITY_KEYS = ("quantity", "paper_quantity", "filled_quantity")
 
 
@@ -28,13 +29,18 @@ def parse_decision(row: JsonObject) -> DecisionForOutcome:
     feature_snapshot = json_object_value(row.get("feature_snapshot")) or json_object_value(
         row.get("feature_snapshot_json")
     )
+    raw_snapshot = json_object_value(feature_snapshot.get("raw"))
+    price_at_decision = number_from(feature_snapshot, PRICE_AT_DECISION_KEYS)
+    if price_at_decision is None:
+        price_at_decision = number_from(raw_snapshot, PRICE_AT_DECISION_KEYS)
+    price_at_decision = positive_price(price_at_decision)
     action = string_value(row.get("action"))
     return DecisionForOutcome(
         decision_id=string_value(row.get("id")),
         symbol=string_value(row.get("symbol")),
         side=trade_side(action),
         decided_at=datetime_value(row.get("decided_at")) or datetime_value(row.get("created_at")),
-        price_at_decision=number_from(feature_snapshot, PRICE_AT_DECISION_KEYS),
+        price_at_decision=price_at_decision,
         feature_snapshot=feature_snapshot,
     )
 
@@ -62,11 +68,11 @@ def group_prices(rows: list[JsonObject]) -> dict[str, list[PricePoint]]:
 
 def parse_price_point(row: JsonObject) -> PricePoint | None:
     trade_date = date_value(row.get("trade_date"))
-    close_price = number_from(row, CLOSE_PRICE_KEYS)
+    close_price = positive_price(number_from(row, CLOSE_PRICE_KEYS))
     raw_snapshot = json_object_value(row.get("raw_snapshot"))
     if close_price is None:
-        close_price = number_from(raw_snapshot, CLOSE_PRICE_KEYS)
-    if trade_date is None or close_price is None or close_price <= 0:
+        close_price = positive_price(number_from(raw_snapshot, CLOSE_PRICE_KEYS))
+    if trade_date is None or close_price is None:
         return None
     return PricePoint(
         symbol=string_value(row.get("symbol")),
@@ -95,7 +101,7 @@ def parse_order(row: JsonObject) -> PaperOrderForOutcome | None:
         order_id=string_value(row.get("id")),
         decision_id=decision_id,
         status=status,
-        price=number_from(row, ORDER_PRICE_KEYS),
+        price=positive_price(number_from(row, ORDER_PRICE_KEYS)),
         quantity=number_from(row, ORDER_QUANTITY_KEYS),
         amount_krw=number_value(row.get("amount_krw")),
     )
@@ -113,13 +119,21 @@ def number_value(value: JsonValue | None) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int | float):
-        return float(value)
+        numeric = float(value)
+        return numeric if isfinite(numeric) else None
     if isinstance(value, str):
         try:
-            return float(value)
+            numeric = float(value)
         except ValueError:
             return None
+        return numeric if isfinite(numeric) else None
     return None
+
+
+def positive_price(value: float | None) -> float | None:
+    if value is None or not isfinite(value) or value <= 0:
+        return None
+    return value
 
 
 def string_value(value: JsonValue | None) -> str:

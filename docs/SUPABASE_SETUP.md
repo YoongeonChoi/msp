@@ -57,13 +57,20 @@ every migration in this exact order:
 11. `0011_data_api_grants.sql`
 12. `0012_runtime_safety_invariants.sql`
 13. `0013_worker_deployment_lock.sql`
-14. `seed.sql`
+14. `0014_desktop_audit_summary.sql`
+15. `0015_paper_order_execution_details.sql`
+16. `seed.sql`
 
 `0012_runtime_safety_invariants.sql`는 live 승인 소비와 strategy/runtime 수치
 불변식을 DB 경계에서 강제합니다. `0013_worker_deployment_lock.sql`는 service-role
 RPC만 배포 잠금을 변경할 수 있게 하고, 배포 target을 관찰한 fresh/healthy
 heartbeat 없이는 잠금을 해제하지 않습니다. 잠금 중에는 `enabled`와
 `live_order_allowed`가 모두 false여야 합니다.
+`0014_desktop_audit_summary.sql`은 desktop에서 원본 감사 snapshot을 읽지 못하게 하고,
+admin 전용 `get_audit_log_summaries` RPC로 변경된 필드명만 제공합니다.
+`0015_paper_order_execution_details.sql`은 paper/live 실행에 사용한 정수 `quantity`와
+`price_krw`를 orders에 기록합니다. 두 컬럼은 기존 행 호환을 위해 nullable이며 값이
+있을 때는 양수 제약을 적용합니다.
 
 `0005_schema_alignment.sql` fixes known production drift:
 

@@ -14,6 +14,12 @@ Unit:
 - max daily order count blocks
 - max daily loss blocks
 - max order amount blocks
+- insufficient cash buying power blocks paper and live buys
+- unknown or insufficient synchronized position quantity blocks live sells
+- paper sells do not reuse live synchronized holdings while no paper position ledger exists
+- whole-share quantity calculation is shared by risk and execution
+- paper orders persist whole-share quantity and decision price for outcome calculation
+- outcome price parsing rejects non-positive, NaN, and infinite values
 - critical negative news blocks paper buys
 - missing strategy version blocks order
 - invalid settings block order
@@ -44,10 +50,14 @@ Integration with mocks:
 - duplicate paper signal in cooldown window is blocked
 - stale quote creates a blocked paper order
 - decision snapshot includes component scores and final score
+- decision snapshot stores top-level `price_at_decision`, and outcome parsing accepts legacy
+  `feature_snapshot.raw.quote_price_krw`
+- paper outcomes prioritize persisted `orders.price_krw` and `orders.quantity`
 - strategy DB params can change paper action without code changes
 - missing strategy creates no decision or order
 - live mode blocked by default
 - `live_order_allowed=false` prevents broker calls
+- insufficient live cash or sell inventory persists a blocked reason without a broker call
 - Supabase/Toss health failure blocks order creation
 - provider-backed live quote/fundamental/news evidence still blocks before the
   broker when market/sector evidence is missing

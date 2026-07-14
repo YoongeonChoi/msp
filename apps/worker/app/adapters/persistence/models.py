@@ -38,6 +38,8 @@ def order_to_row(order: Order, risk_result: RiskResult | None = None) -> JsonObj
         "mode": order.mode,
         "status": order.status,
         "amount_krw": order.amount_krw,
+        "quantity": order.quantity,
+        "price_krw": order.price_krw,
         "idempotency_key": order.idempotency_key,
         "provider_order_id": order.provider_order_id,
         "reason": order.reason,
@@ -138,6 +140,8 @@ def order_from_row(row: Mapping[str, object]) -> Order:
         mode=cast(TradingMode, _string_value(row, "mode", "paper")),
         status=cast(OrderStatus, _string_value(row, "status", "unknown_requires_manual_check")),
         amount_krw=_int_value(row, "amount_krw", 0),
+        quantity=_optional_positive_int_value(row, "quantity"),
+        price_krw=_optional_positive_int_value(row, "price_krw"),
         idempotency_key=_string_value(row, "idempotency_key"),
         provider_order_id=_optional_string_value(row, "provider_order_id"),
         reason=_optional_string_value(row, "reason"),
@@ -212,6 +216,11 @@ def _int_value(row: Mapping[str, object], key: str, default: int) -> int:
                 return default
         case _:
             return default
+
+
+def _optional_positive_int_value(row: Mapping[str, object], key: str) -> int | None:
+    value = _int_value(row, key, 0)
+    return value if value > 0 else None
 
 
 def _datetime_value(row: Mapping[str, object], key: str) -> datetime:

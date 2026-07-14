@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -74,6 +75,93 @@ class AmbiguousFailureBroker(RecordingBroker):
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
         self.place_order_calls += 1
         raise ProviderUnavailableError("toss", "toss_write_request_failed")
+
+
+async def test_paper_order_persists_shared_whole_share_execution_details() -> None:
+    now = now_utc()
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    )
+    broker = RecordingBroker()
+    service = ExecutionService(broker, repository, RiskService())
+    strategy_version_id = uuid4()
+    signal = Signal(
+        symbol="005930",
+        action="buy",
+        final_score=0.8,
+        confidence=0.8,
+        order_amount_krw=100_000,
+        sector="technology",
+        reason_json={"score": 0.8},
+    )
+    decision = DecisionSnapshot.create(
+        cycle_id=uuid4(),
+        signal=signal,
+        strategy_version_id=strategy_version_id,
+        created_at=now,
+        feature_snapshot={"price_at_decision": 75_000},
+        risk_snapshot={"allowed": True},
+    )
+    risk_input = replace(
+        _risk_input(now, signal, strategy_version_id),
+        settings=BotSettings(enabled=True, mode="paper", live_order_allowed=False),
+        strategy_status="paper",
+        strategy_approved=False,
+    )
+    risk_result = RiskService().evaluate_paper_order(risk_input)
+
+    order = await service.create_paper_order(decision, risk_result, "paper-order-key")
+
+    assert risk_result.allowed is True
+    assert order is not None
+    assert order.status == "paper"
+    assert order.amount_krw == 100_000
+    assert order.price_krw == 75_000
+    assert order.quantity == 1
+    assert order.provider_payload_summary is None
+    assert repository.orders == [order]
+    assert broker.place_order_calls == 0
+
+
+async def test_paper_order_blocks_when_decision_price_is_not_valid() -> None:
+    now = now_utc()
+    repository = InMemoryRepository(
+        BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    )
+    service = ExecutionService(RecordingBroker(), repository, RiskService())
+    strategy_version_id = uuid4()
+    signal = Signal(
+        symbol="005930",
+        action="buy",
+        final_score=0.8,
+        confidence=0.8,
+        order_amount_krw=100_000,
+        sector="technology",
+        reason_json={"score": 0.8},
+    )
+    decision = DecisionSnapshot.create(
+        cycle_id=uuid4(),
+        signal=signal,
+        strategy_version_id=strategy_version_id,
+        created_at=now,
+        feature_snapshot={"technical_score": 0.8},
+        risk_snapshot={"allowed": True},
+    )
+    risk_input = replace(
+        _risk_input(now, signal, strategy_version_id),
+        settings=BotSettings(enabled=True, mode="paper", live_order_allowed=False),
+        strategy_status="paper",
+        strategy_approved=False,
+    )
+    risk_result = RiskService().evaluate_paper_order(risk_input)
+
+    order = await service.create_paper_order(decision, risk_result, "paper-order-key")
+
+    assert order is not None
+    assert order.status == "blocked"
+    assert order.reason == "invalid_paper_execution_price"
+    assert order.price_krw is None
+    assert order.quantity is None
 
 
 async def test_live_order_missing_decision_evidence_blocks_before_broker() -> None:
@@ -181,6 +269,8 @@ async def test_live_order_with_verified_inputs_records_provider_result() -> None
     assert broker.place_order_calls == 1
     assert order.status == "sent"
     assert order.provider_order_id == "recording-broker-order"
+    assert order.price_krw == 75_000
+    assert order.quantity == 1
     assert repository.orders == [order]
     assert repository.engine_events[-1]["message"] == "live_broker_order_result_recorded"
 
@@ -331,6 +421,7 @@ def _risk_input(now: datetime, signal: Signal, strategy_version_id: UUID) -> Ris
         market_open=True,
         existing_position_pct=0.0,
         sector_position_pct=0.0,
+        available_position_quantity=10,
         critical_news_risk=False,
         liquidity_ok=True,
         volatility_ok=True,

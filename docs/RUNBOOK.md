@@ -170,7 +170,7 @@ limit 50;
 
 Hosted Supabase readiness gate:
 
-1. After applying migrations through `0013_worker_deployment_lock.sql` to a hosted
+1. After applying migrations through `0015_paper_order_execution_details.sql` to a hosted
    Supabase staging project, set these variables only in the worker/operator shell:
 
 ```bash
@@ -1276,7 +1276,7 @@ select
 ```
 
 4. Use `supabase/README.md` as the canonical migration list and run every
-   pending migration in order through `0013_worker_deployment_lock.sql`; do not skip
+   pending migration in order through `0015_paper_order_execution_details.sql`; do not skip
    any intermediate migration.
 5. Verify the singleton:
 

@@ -16,6 +16,8 @@ All live orders require every live policy to pass:
 - daily loss below limit
 - daily order count below limit and verified
 - order amount within limit
+- cash buying power covers the calculated whole-share buy notional
+- synchronized position quantity covers the calculated sell quantity
 - unique idempotency key
 - no critical negative news risk for buys
 - liquidity sufficient
@@ -40,6 +42,7 @@ Paper orders use a separate policy set:
 - daily loss below limit
 - daily order count below limit
 - order amount within limit
+- simulated account cash covers the calculated whole-share buy notional
 - no duplicate signal in cooldown window
 - no critical negative news risk for buys
 - liquidity sufficient
@@ -51,6 +54,10 @@ safe paper trading can run with `mode='paper'` and `live_order_allowed=false` ou
 while a broker health probe is degraded. Missing quote/provider data can still prevent a decision from
 being built. Paper position, liquidity, and volatility inputs are explicit simulation assumptions and are
 stored in `feature_snapshot.raw.risk_evidence`; verified critical-news evidence is used when present.
+Paper sell decisions do not reuse broker-synchronized holdings as simulated inventory. The current
+paper engine has no persisted paper position ledger, so it records the simulated order quantity and
+decision price but does not claim inventory enforcement. This limitation applies only to paper mode;
+live sells still fail closed on unknown or insufficient synchronized holdings.
 
 Live buy exposure evidence:
 
@@ -81,6 +88,8 @@ Fail-closed matrix:
 | Supabase unavailable | Block | Block |
 | Toss health probe degraded | Does not block paper by itself | Block |
 | Unknown position or sector exposure | Uses recorded paper assumptions | Block new buy |
+| Insufficient cash buying power | Block | Block |
+| Unknown or insufficient sell quantity | Not enforced until a paper position ledger exists | Block |
 | Missing liquidity or volatility evidence | Uses recorded paper assumptions | Block new buy |
 | Critical news risk | Block new buy | Block new buy |
 | Duplicate signal | Block | Block |

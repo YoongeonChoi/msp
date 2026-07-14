@@ -36,6 +36,7 @@ def _risk_input(settings: BotSettings | None = None) -> RiskInput:
         market_open=True,
         existing_position_pct=0.0,
         sector_position_pct=0.0,
+        available_position_quantity=10,
         critical_news_risk=False,
         liquidity_ok=True,
         volatility_ok=True,
@@ -62,6 +63,69 @@ def test_live_order_requires_all_gates() -> None:
 
     assert result.allowed is True
     assert result.reasons == []
+
+
+def test_insufficient_cash_buying_power_blocks_live_buy() -> None:
+    settings = BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    risk_input = _risk_input(settings)
+    assert risk_input.account_state is not None
+    account = replace(risk_input.account_state, cash_krw=74_999)
+
+    result = RiskService().evaluate_live_order(
+        replace(risk_input, account_state=account)
+    )
+
+    assert result.allowed is False
+    assert "insufficient_cash_buying_power" in result.reasons
+
+
+def test_insufficient_cash_buying_power_blocks_paper_buy() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    risk_input = _risk_input(settings)
+    assert risk_input.account_state is not None
+    account = replace(risk_input.account_state, cash_krw=74_999)
+
+    result = RiskService().evaluate_paper_order(
+        replace(risk_input, account_state=account)
+    )
+
+    assert result.allowed is False
+    assert "insufficient_cash_buying_power" in result.reasons
+
+
+def test_insufficient_position_quantity_blocks_live_sell() -> None:
+    settings = BotSettings(enabled=True, mode="live", live_order_allowed=True)
+    risk_input = _risk_input(settings)
+    sell_signal = replace(risk_input.signal, action="sell")
+
+    result = RiskService().evaluate_live_order(
+        replace(
+            risk_input,
+            signal=sell_signal,
+            available_position_quantity=0,
+        )
+    )
+
+    assert result.allowed is False
+    assert "insufficient_sell_position_quantity" in result.reasons
+
+
+def test_paper_sell_does_not_reuse_live_position_quantity() -> None:
+    settings = BotSettings(enabled=True, mode="paper", live_order_allowed=False)
+    risk_input = _risk_input(settings)
+    sell_signal = replace(risk_input.signal, action="sell")
+
+    result = RiskService().evaluate_paper_order(
+        replace(
+            risk_input,
+            signal=sell_signal,
+            available_position_quantity=None,
+        )
+    )
+
+    assert result.allowed is True
+    assert "sell_position_quantity_unknown" not in result.reasons
+    assert all(item.policy != "sell_quantity" for item in result.policy_results)
 
 
 def test_live_order_requires_active_approved_strategy() -> None:

@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from app.application.ports.outcome_tracking_port import OutcomeTrackingRows
+from app.application.services.outcome_tracking_parsing import (
+    parse_decision,
+    parse_order,
+    parse_price_point,
+)
 from app.application.services.outcome_tracking_service import OutcomeTrackingService
 from app.domain.common.json import JsonObject
 
@@ -87,6 +94,105 @@ async def test_skips_decision_without_price_at_decision() -> None:
     assert summary.skipped_count == 1
     assert outcome["outcome_status"] == "skipped"
     assert outcome["reason"] == "missing_price_at_decision"
+
+
+async def test_reads_legacy_price_from_raw_feature_snapshot() -> None:
+    repository = FakeOutcomeRepository(
+        rows=OutcomeTrackingRows(
+            decisions=[
+                _decision(
+                    "decision-1",
+                    action="buy",
+                    feature_snapshot={"raw": {"quote_price_krw": 100}},
+                )
+            ],
+            orders=[],
+            features_daily=_future_prices([101, 102, 103]),
+            existing_outcomes=[],
+        )
+    )
+
+    summary = await OutcomeTrackingService(repository).update_once(NOW)
+
+    outcome = repository.outcomes_by_decision["decision-1"]
+    assert summary.skipped_count == 0
+    assert outcome["price_at_decision"] == 100.0
+    assert outcome["outcome_status"] == "partial"
+
+
+async def test_paper_execution_price_and_quantity_take_priority_for_outcome() -> None:
+    repository = FakeOutcomeRepository(
+        rows=OutcomeTrackingRows(
+            decisions=[
+                _decision(
+                    "decision-1",
+                    action="buy",
+                    feature_snapshot={"price_at_decision": 100_000},
+                )
+            ],
+            orders=[
+                {
+                    "id": "order-1",
+                    "decision_id": "decision-1",
+                    "symbol": "005930",
+                    "side": "buy",
+                    "status": "paper",
+                    "amount_krw": 100_000,
+                    "quantity": 1,
+                    "price_krw": 75_000,
+                    "price": 70_000,
+                    "created_at": "2026-01-02T00:00:00+00:00",
+                }
+            ],
+            features_daily=_future_prices([80_000] * 20),
+            existing_outcomes=[],
+        )
+    )
+
+    await OutcomeTrackingService(repository).update_once(NOW)
+
+    outcome = repository.outcomes_by_decision["decision-1"]
+    assert outcome["price_at_decision"] == 75_000.0
+    assert outcome["return_20d"] == 0.066667
+    assert outcome["realized_pnl_krw"] == 5_000
+
+
+@pytest.mark.parametrize(
+    "invalid_price",
+    [0, -1, float("nan"), float("inf"), float("-inf"), "NaN", "Infinity"],
+)
+def test_outcome_parsing_rejects_non_positive_or_non_finite_prices(
+    invalid_price: int | float | str,
+) -> None:
+    decision = parse_decision(
+        _decision(
+            "decision-invalid-price",
+            action="buy",
+            feature_snapshot={"price_at_decision": invalid_price},
+        )
+    )
+    price_point = parse_price_point(
+        {
+            "symbol": "005930",
+            "trade_date": "2026-01-03",
+            "close_price": invalid_price,
+        }
+    )
+    order = parse_order(
+        {
+            "id": "order-invalid-price",
+            "decision_id": "decision-invalid-price",
+            "status": "paper",
+            "price_krw": invalid_price,
+            "quantity": 1,
+            "amount_krw": 100_000,
+        }
+    )
+
+    assert decision.price_at_decision is None
+    assert price_point is None
+    assert order is not None
+    assert order.price is None
 
 
 async def test_hold_and_blocked_actions_are_skipped() -> None:

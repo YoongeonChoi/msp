@@ -31,12 +31,17 @@ def calculate_outcome(
         return skipped(decision, linked_order, "non_trade_action", calculated_at)
     if decision.decided_at is None:
         return skipped(decision, linked_order, "missing_decided_at", calculated_at)
-    if decision.price_at_decision is None or decision.price_at_decision <= 0:
+    entry_price = (
+        linked_order.price
+        if linked_order is not None and linked_order.price is not None
+        else decision.price_at_decision
+    )
+    if entry_price is None or entry_price <= 0:
         return skipped(decision, linked_order, "missing_price_at_decision", calculated_at)
 
     future_prices = prices_after(prices_by_symbol.get(decision.symbol, []), decision.decided_at)
     returns = [
-        signed_return(decision.side, decision.price_at_decision, point.close_price)
+        signed_return(decision.side, entry_price, point.close_price)
         for point in future_prices[:20]
     ]
     status, reason = status_for_future_prices(future_prices)
@@ -44,27 +49,27 @@ def calculate_outcome(
         decision_id=decision.decision_id,
         order_id=linked_order.order_id if linked_order is not None else None,
         symbol=decision.symbol,
-        price_at_decision=decision.price_at_decision,
+        price_at_decision=entry_price,
         return_1d=return_at(returns, 1),
         return_5d=return_at(returns, 5),
         return_20d=return_at(returns, 20),
         max_drawdown_20d=max_drawdown(returns),
         hit_target=hit_threshold(
             decision.side,
-            decision.price_at_decision,
+            entry_price,
             future_prices[:20],
             decision.feature_snapshot,
             target=True,
         ),
         hit_stop=hit_threshold(
             decision.side,
-            decision.price_at_decision,
+            entry_price,
             future_prices[:20],
             decision.feature_snapshot,
             target=False,
         ),
         realized_pnl_krw=realized_pnl(
-            decision.side, decision.price_at_decision, linked_order, future_prices
+            decision.side, entry_price, linked_order, future_prices
         ),
         status=status,
         reason=reason,

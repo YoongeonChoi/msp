@@ -46,6 +46,7 @@ class CycleRiskEvidence:
     sector: str | None
     existing_position_pct: float | None
     sector_position_pct: float | None
+    available_position_quantity: int | None
     critical_news_risk: bool | None
     liquidity_ok: bool | None
     volatility_ok: bool | None
@@ -254,6 +255,7 @@ class RunTradingCycle:
                 market_open=risk_market_open,
                 existing_position_pct=risk_evidence.existing_position_pct,
                 sector_position_pct=risk_evidence.sector_position_pct,
+                available_position_quantity=risk_evidence.available_position_quantity,
                 critical_news_risk=risk_evidence.critical_news_risk,
                 liquidity_ok=risk_evidence.liquidity_ok,
                 volatility_ok=risk_evidence.volatility_ok,
@@ -286,7 +288,7 @@ class RunTradingCycle:
                 signal=signal,
                 strategy_version_id=risk_strategy_version.id,
                 created_at=risk_now,
-                feature_snapshot=feature_snapshot_from_signal(features, signal),
+                feature_snapshot=feature_snapshot_from_signal(features, signal, quote),
                 risk_snapshot=risk_result.to_dict(),
             )
             await self.repository.persist_decision_snapshot(snapshot)
@@ -454,6 +456,7 @@ def paper_signal_idempotency_key(
 def feature_snapshot_from_signal(
     features: FeatureVector,
     signal: Signal,
+    quote: Quote,
 ) -> dict[str, object]:
     return {
         "technical_score": features.technical_score,
@@ -462,6 +465,7 @@ def feature_snapshot_from_signal(
         "news_event_score": features.news_event_score,
         "portfolio_score": features.portfolio_score,
         "final_score": signal.final_score,
+        "price_at_decision": quote.price_krw,
         "raw": features.raw,
     }
 
@@ -485,6 +489,7 @@ def cycle_risk_evidence(
             sector=sector,
             existing_position_pct=0.0,
             sector_position_pct=0.0,
+            available_position_quantity=None,
             critical_news_risk=critical_news_risk,
             liquidity_ok=True,
             volatility_ok=True,
@@ -503,6 +508,7 @@ def cycle_risk_evidence(
         sector=sector,
         existing_position_pct=position_pct,
         sector_position_pct=sector_pct,
+        available_position_quantity=position_quantity(symbol, positions),
         critical_news_risk=bool_feature_evidence(features.raw, "critical_news_risk"),
         liquidity_ok=bool_feature_evidence(features.raw, "liquidity_ok"),
         volatility_ok=bool_feature_evidence(features.raw, "volatility_ok"),
@@ -522,6 +528,7 @@ def with_risk_evidence(
         "sector": evidence.sector,
         "existing_position_pct": evidence.existing_position_pct,
         "sector_position_pct": evidence.sector_position_pct,
+        "available_position_quantity": evidence.available_position_quantity,
         "critical_news_risk": evidence.critical_news_risk,
         "liquidity_ok": evidence.liquidity_ok,
         "volatility_ok": evidence.volatility_ok,
@@ -565,6 +572,15 @@ def position_exposure_pct(
     if any(value < 0 for value in values):
         return None
     return sum(values) / account.equity_krw
+
+
+def position_quantity(symbol: str, positions: list[Position] | None) -> int | None:
+    if positions is None:
+        return None
+    quantities = [position.quantity for position in positions if position.symbol == symbol]
+    if any(quantity < 0 for quantity in quantities):
+        return None
+    return sum(quantities)
 
 
 def sector_exposure_pct(

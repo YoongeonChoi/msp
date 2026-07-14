@@ -110,5 +110,7 @@ class Order:
     idempotency_key: str
     reason: str | None
     created_at: datetime
+    quantity: int | None = None
+    price_krw: int | None = None
     provider_order_id: str | None = None
     provider_payload_summary: dict[str, Any] | None = None

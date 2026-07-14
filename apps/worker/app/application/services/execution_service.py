@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from math import isfinite
 from typing import Literal, assert_never
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from app.domain.common.errors import (
 from app.domain.risk.entities import RiskResult
 from app.domain.risk.value_objects import RiskInput
 from app.domain.trading.entities import DecisionSnapshot, Order
+from app.domain.trading.order_calculations import calculate_order_quantity
 from app.infrastructure.idempotency import build_idempotency_key
 
 
@@ -68,6 +70,18 @@ class ExecutionService:
         if not decision.risk_snapshot:
             reason = "missing_risk_snapshot"
             status = "blocked"
+        paper_price_krw: int | None = None
+        paper_quantity: int | None = None
+        if status == "paper":
+            paper_price_krw = _paper_decision_price(decision)
+            paper_quantity = (
+                calculate_order_quantity(decision.signal.order_amount_krw, paper_price_krw)
+                if paper_price_krw is not None
+                else None
+            )
+            if paper_price_krw is None or paper_quantity is None:
+                reason = "invalid_paper_execution_price"
+                status = "blocked"
         order = Order(
             id=uuid4(),
             decision_id=decision.id,
@@ -79,6 +93,8 @@ class ExecutionService:
             idempotency_key=key,
             reason=reason,
             created_at=decision.created_at,
+            quantity=paper_quantity,
+            price_krw=paper_price_krw,
         )
         await self.repository.persist_order(order, risk_result)
         if order.status == "blocked":
@@ -180,13 +196,19 @@ class ExecutionService:
             )
             return blocked, final_risk
         broker_dispatch_started = False
+        quantity: int | None = None
+        price_krw: int | None = None
         try:
             if risk_input.quote is None:
                 raise KnownFailClosedError("execution", "live_order_missing_quote")
             if risk_input.quote.price_krw <= 0:
                 raise KnownFailClosedError("execution", "live_order_invalid_quote_price")
-            quantity = proposed.amount_krw // risk_input.quote.price_krw
-            if quantity <= 0:
+            price_krw = risk_input.quote.price_krw
+            quantity = calculate_order_quantity(
+                proposed.amount_krw,
+                price_krw,
+            )
+            if quantity is None:
                 raise KnownFailClosedError("execution", "live_order_amount_below_quote_price")
             pending = Order(
                 id=proposed.id,
@@ -199,6 +221,8 @@ class ExecutionService:
                 idempotency_key=proposed.idempotency_key,
                 reason="live_broker_order_result_pending",
                 created_at=proposed.created_at,
+                quantity=quantity,
+                price_krw=price_krw,
             )
             await self.repository.persist_order(pending, final_risk)
             if self.shutdown_requested():
@@ -211,7 +235,7 @@ class ExecutionService:
                     amount_krw=proposed.amount_krw,
                     idempotency_key=proposed.idempotency_key,
                     quantity=quantity,
-                    limit_price_krw=risk_input.quote.price_krw,
+                    limit_price_krw=price_krw,
                 )
             )
         except KnownFailClosedError as exc:
@@ -232,6 +256,8 @@ class ExecutionService:
                 idempotency_key=proposed.idempotency_key,
                 reason=exc.safe_message,
                 created_at=proposed.created_at,
+                quantity=quantity,
+                price_krw=price_krw,
             )
             if await self.repository.idempotency_key_exists(failed.idempotency_key):
                 updated = await self.repository.update_order_status(
@@ -270,6 +296,8 @@ class ExecutionService:
             idempotency_key=proposed.idempotency_key,
             reason=None,
             created_at=proposed.created_at,
+            quantity=quantity,
+            price_krw=price_krw,
             provider_order_id=broker_result.provider_order_id,
             provider_payload_summary=broker_result.raw_summary,
         )
@@ -306,6 +334,16 @@ class ExecutionService:
             },
         )
         return sent, final_risk
+
+
+def _paper_decision_price(decision: DecisionSnapshot) -> int | None:
+    value = decision.feature_snapshot.get("price_at_decision")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    numeric = float(value)
+    if not isfinite(numeric) or numeric <= 0 or not numeric.is_integer():
+        return None
+    return int(numeric)
 
 
 def _live_decision_evidence_reasons(decision: DecisionSnapshot) -> list[str]:

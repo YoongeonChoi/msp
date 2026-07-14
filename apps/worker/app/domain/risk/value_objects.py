@@ -19,6 +19,7 @@ class RiskInput:
     market_open: bool | None
     existing_position_pct: float | None
     sector_position_pct: float | None
+    available_position_quantity: int | None
     critical_news_risk: bool | None
     liquidity_ok: bool | None
     volatility_ok: bool | None
