@@ -19,21 +19,57 @@ PROTECTED_SECRET_NAMES = (
 )
 
 _SQL_COMMENT_PATTERN = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
-_PUBLIC_TABLE_PATTERN = re.compile(
+_EXPOSED_TABLE_PATTERN = re.compile(
     r"\bcreate\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?"
-    r'(?:public|"public")\s*\.\s*"?([a-z_][a-z0-9_]*)"?',
+    r'(?P<schema>public|api|"public"|"api")\s*\.\s*'
+    r'"?(?P<table>[a-z_][a-z0-9_]*)"?',
     re.IGNORECASE,
 )
 _RLS_PATTERN = re.compile(
     r"\balter\s+table\s+(?:if\s+exists\s+)?"
-    r'(?:public|"public")\s*\.\s*"?([a-z_][a-z0-9_]*)"?'
+    r'(?P<schema>public|api|"public"|"api")\s*\.\s*'
+    r'"?(?P<table>[a-z_][a-z0-9_]*)"?'
     r"\s+enable\s+row\s+level\s+security",
     re.IGNORECASE,
 )
 _RLS_DISABLE_PATTERN = re.compile(
     r"\balter\s+table\s+(?:if\s+exists\s+)?"
-    r'(?:public|"public")\s*\.\s*"?([a-z_][a-z0-9_]*)"?'
+    r'(?P<schema>public|api|"public"|"api")\s*\.\s*'
+    r'"?(?P<table>[a-z_][a-z0-9_]*)"?'
     r"\s+disable\s+row\s+level\s+security",
+    re.IGNORECASE,
+)
+_API_VIEW_PATTERN = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?view\s+"
+    r'(?:api|"api")\s*\.\s*"?([a-z_][a-z0-9_]*)"?'
+    r"(?P<options>.*?)\bas\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_WORKER_API_FUNCTION_PATTERN = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?function\s+"
+    r'(?:worker_api|"worker_api")\s*\.\s*"?([a-z_][a-z0-9_]*)"?',
+    re.IGNORECASE,
+)
+_EXPOSED_FUNCTION_PATTERN = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?function\s+"
+    r'(?P<schema>api|worker_api|"api"|"worker_api")\s*\.\s*'
+    r'"?(?P<name>[a-z_][a-z0-9_]*)"?',
+    re.IGNORECASE,
+)
+_PRIVATE_FUNCTION_PATTERN = re.compile(
+    r"\bcreate\s+(?:or\s+replace\s+)?function\s+"
+    r'(?:private|"private")\s*\.\s*'
+    r'"?(?P<name>[a-z_][a-z0-9_]*)"?',
+    re.IGNORECASE,
+)
+_FUNCTION_BODY_START_PATTERN = re.compile(
+    r"\bas\s+\$(?:[a-z_][a-z0-9_]*)?\$",
+    re.IGNORECASE,
+)
+_WORKER_API_UNSAFE_EXECUTE_GRANT_PATTERN = re.compile(
+    r"\bgrant\s+execute\s+on\s+function\s+"
+    r'(?:worker_api|"worker_api")\s*\.\s*[^;]*?'
+    r"\bto\s+(?:anon|authenticated|public)\b",
     re.IGNORECASE,
 )
 _POLICY_PATTERN = re.compile(r"\bcreate\s+policy\b.*?;", re.IGNORECASE | re.DOTALL)
@@ -47,6 +83,68 @@ _WORKFLOW_ACTION_PATTERN = re.compile(
 )
 _FULL_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
+RENDER_NO_LIVE_ENV = {
+    "BOT_DEFAULT_MODE": "paper",
+    "TOSS_CREDENTIAL_SCOPE": "read_only",
+    "TOSS_ORDER_CAPABLE_CREDENTIALS": "false",
+    "LIVE_ORDER_EXECUTION_ENABLED": "false",
+    "TOSS_ORDER_ENDPOINT_ENABLED": "false",
+    # V2 hosted rollout needs separate approval; Production Live remains forbidden.
+    "EXECUTION_V2_ENABLED": "false",
+    "EXECUTION_V2_WORKER_API_ENABLED": "false",
+    "EXECUTION_V2_PAPER_RESUME_INPUT_ENABLED": "false",
+    "EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED": "false",
+}
+
+WORKER_API_ALLOWLIST = frozenset(
+    {
+        "acquire_worker_lease",
+        "renew_worker_lease",
+        "release_worker_lease",
+        "record_worker_heartbeat",
+        "reserve_order_intent",
+        "mark_dispatch_started",
+        "record_execution_observation",
+        "claim_delivery_outbox",
+        "claim_cash_settlement_batch",
+        "complete_outbox_delivery",
+        "complete_cash_settlement",
+        "fail_outbox_delivery",
+        "fail_cash_settlement_attempt",
+        "acknowledge_operation_command",
+        "claim_execution_reconciliation_batch",
+        "complete_execution_reconciliation",
+        "expire_paper_intent_remainder",
+        "fail_reserved_intent_pre_dispatch",
+        "load_paper_execution_checkpoint",
+        "claim_operation_command_batch",
+        "capture_qualification_snapshot_v1",
+        "register_qualification_run_v1",
+        "get_dead_man_snapshot_v1",
+        "list_due_cash_settlement_accounts",
+        "ingest_paper_bar_fixture_v1",
+        "enqueue_paper_execution_candidate_v1",
+        "claim_paper_execution_v1",
+        "load_claimed_paper_execution_bundle_v1",
+        "complete_paper_execution_source_v1",
+        "list_unknown_resolution_v2",
+        "claim_unknown_resolution_v2",
+        "apply_unknown_resolution_v2",
+    }
+)
+
+
+def _qualified_objects(
+    pattern: re.Pattern[str], sql: str
+) -> set[tuple[str, str]]:
+    return {
+        (
+            match.group("schema").strip('"').casefold(),
+            match.group("table").casefold(),
+        )
+        for match in pattern.finditer(sql)
+    }
+
 
 def check_migration_safety(repo_root: Path) -> list[str]:
     migration_dir = repo_root / "supabase" / "migrations"
@@ -56,22 +154,79 @@ def check_migration_safety(repo_root: Path) -> list[str]:
 
     sql = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     normalized = _SQL_COMMENT_PATTERN.sub(" ", sql)
-    public_tables = set(_PUBLIC_TABLE_PATTERN.findall(normalized))
-    rls_tables = set(_RLS_PATTERN.findall(normalized))
+    exposed_tables = _qualified_objects(_EXPOSED_TABLE_PATTERN, normalized)
+    rls_tables = _qualified_objects(_RLS_PATTERN, normalized)
     findings = [
-        f"public table missing RLS: {table}"
-        for table in sorted(public_tables - rls_tables)
+        f"exposed table missing RLS: {schema}.{table}"
+        for schema, table in sorted(exposed_tables - rls_tables)
     ]
     findings.extend(
-        f"public table disables RLS: {table}"
-        for table in sorted(set(_RLS_DISABLE_PATTERN.findall(normalized)))
+        f"exposed table disables RLS: {schema}.{table}"
+        for schema, table in sorted(
+            _qualified_objects(_RLS_DISABLE_PATTERN, normalized)
+        )
     )
+
+    for match in _API_VIEW_PATTERN.finditer(normalized):
+        options = " ".join(match.group("options").casefold().split())
+        if re.search(r"\bsecurity_invoker\s*=\s*true\b", options) is None:
+            findings.append(f"api view missing security_invoker=true: {match.group(1)}")
+
+    for match, header in _function_headers(_EXPOSED_FUNCTION_PATTERN, normalized):
+        schema = match.group("schema").strip('"').casefold()
+        name = match.group("name").casefold()
+        if re.search(r"\bsecurity\s+invoker\b", header, re.IGNORECASE) is None:
+            findings.append(
+                f"exposed function missing explicit SECURITY INVOKER: {schema}.{name}"
+            )
+        if re.search(r"\bsecurity\s+definer\b", header, re.IGNORECASE):
+            findings.append(f"exposed function uses SECURITY DEFINER: {schema}.{name}")
+
+    for match, header in _function_headers(_PRIVATE_FUNCTION_PATTERN, normalized):
+        if re.search(r"\bsecurity\s+definer\b", header, re.IGNORECASE) and re.search(
+            r"\bset\s+search_path\s*=\s*''", header, re.IGNORECASE
+        ) is None:
+            findings.append(
+                "private SECURITY DEFINER missing empty search_path: "
+                f"private.{match.group('name').casefold()}"
+            )
+
+    worker_functions = {
+        name.casefold() for name in _WORKER_API_FUNCTION_PATTERN.findall(normalized)
+    }
+    findings.extend(
+        f"worker_api function outside allowlist: {name}"
+        for name in sorted(worker_functions - WORKER_API_ALLOWLIST)
+    )
+    if _WORKER_API_UNSAFE_EXECUTE_GRANT_PATTERN.search(normalized):
+        findings.append("worker_api EXECUTE granted to desktop/public role")
 
     for statement in _POLICY_PATTERN.findall(normalized):
         if _policy_grants_anon_or_public_write(statement):
             compact = " ".join(statement.split())[:160]
             findings.append(f"anon/public write-capable policy: {compact}")
     return findings
+
+
+def _function_headers(
+    pattern: re.Pattern[str], sql: str
+) -> list[tuple[re.Match[str], str]]:
+    """Return declarations up to the dollar-quoted function body."""
+
+    headers: list[tuple[re.Match[str], str]] = []
+    next_function_pattern = re.compile(
+        r"\bcreate\s+(?:or\s+replace\s+)?function\b", re.IGNORECASE
+    )
+    for match in pattern.finditer(sql):
+        body_start = _FUNCTION_BODY_START_PATTERN.search(sql, match.end())
+        next_function = next_function_pattern.search(sql, match.end())
+        if body_start is None or (
+            next_function is not None and next_function.start() < body_start.start()
+        ):
+            headers.append((match, sql[match.start() : match.end()]))
+            continue
+        headers.append((match, sql[match.start() : body_start.start()]))
+    return headers
 
 
 def _policy_grants_anon_or_public_write(statement: str) -> bool:
@@ -206,7 +361,37 @@ def check_workflow_safety(repo_root: Path) -> list[str]:
             re.IGNORECASE | re.MULTILINE,
         ):
             findings.append("render.yaml: autoDeployTrigger must remain off")
+        render_env = _render_environment_values(render_text)
+        for key, expected in RENDER_NO_LIVE_ENV.items():
+            if render_env.get(key, "").casefold() != expected:
+                findings.append(
+                    f"render.yaml: {key} must remain {expected} until hosted approval"
+                )
     return findings
+
+
+def _render_environment_values(render_text: str) -> dict[str, str]:
+    """Read literal Render env values without treating YAML as executable input."""
+
+    values: dict[str, str] = {}
+    matches = list(
+        re.finditer(
+            r"^\s*-\s+key:\s*([A-Z][A-Z0-9_]*)\s*$",
+            render_text,
+            re.MULTILINE,
+        )
+    )
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(render_text)
+        block = render_text[match.end() : end]
+        value_match = re.search(
+            r"^\s+value:\s*['\"]?([^'\"#\r\n]+?)['\"]?\s*$",
+            block,
+            re.MULTILINE,
+        )
+        if value_match is not None:
+            values[match.group(1)] = value_match.group(1).strip()
+    return values
 
 
 def _parser() -> argparse.ArgumentParser:

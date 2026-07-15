@@ -5,12 +5,14 @@ on:
     paths:
       - "supabase/migrations/**"
       - "supabase/seed.sql"
+      - "supabase/verify_g1_g2_migration.py"
       - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
     paths:
       - "supabase/migrations/**"
       - "supabase/seed.sql"
+      - "supabase/verify_g1_g2_migration.py"
       - ".github/workflows/migration-check.yml"
 
 permissions:
@@ -24,7 +26,7 @@ jobs:
   migration-check:
     name: Supabase migration safety
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Block committed env files
@@ -44,20 +46,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          found=0
+          mapfile -t migrations < <(find supabase/migrations -maxdepth 1 -type f -name '*.sql' | sort)
+          test "${#migrations[@]}" -gt 0
+
+          phase="legacy"
           expected_prefix=1
-          for file in $(find supabase/migrations -maxdepth 1 -type f -name '*.sql' | sort); do
-            found=1
+          previous_timestamp=""
+          for file in "${migrations[@]}"; do
             name="$(basename "$file")"
-            [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]]
-            prefix="${name:0:4}"
-            printf -v expected "%04d" "$expected_prefix"
-            test "$prefix" = "$expected"
-            expected_prefix=$((expected_prefix + 1))
+            if [[ "$name" =~ ^([0-9]{4})_[a-z0-9_]+\.sql$ ]]; then
+              test "$phase" = "legacy"
+              prefix="${BASH_REMATCH[1]}"
+              printf -v expected "%04d" "$expected_prefix"
+              test "$prefix" = "$expected"
+              expected_prefix=$((expected_prefix + 1))
+            elif [[ "$name" =~ ^([0-9]{14})_[a-z0-9_]+\.sql$ ]]; then
+              phase="timestamp"
+              timestamp="${BASH_REMATCH[1]}"
+              if [[ -n "$previous_timestamp" ]]; then
+                [[ "$previous_timestamp" < "$timestamp" ]]
+              fi
+              previous_timestamp="$timestamp"
+            else
+              echo "::error file=$file::Migration filename must use NNNN_name.sql or YYYYMMDDHHMMSS_name.sql"
+              exit 1
+            fi
           done
-          test "$found" = "1"
       - name: Require RLS for public tables
         run: python .github/scripts/repository_safety.py migrations
+      - name: Apply G1+G2 migrations and assert contracts
+        run: python supabase/verify_g1_g2_migration.py
       - name: Block destructive migrations without rollback note
         shell: bash
         run: |

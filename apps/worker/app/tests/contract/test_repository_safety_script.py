@@ -54,7 +54,7 @@ def test_if_not_exists_public_table_without_rls_is_rejected(tmp_path: Path) -> N
 
     findings = module.check_migration_safety(root)
 
-    assert "public table missing RLS: unsafe_table" in findings
+    assert "exposed table missing RLS: public.unsafe_table" in findings
 
 
 def test_quoted_unlogged_public_table_without_rls_is_rejected(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_quoted_unlogged_public_table_without_rls_is_rejected(tmp_path: Path) ->
 
     findings = module.check_migration_safety(root)
 
-    assert "public table missing RLS: unsafe_table" in findings
+    assert "exposed table missing RLS: public.unsafe_table" in findings
 
 
 def test_migration_cannot_disable_public_table_rls(tmp_path: Path) -> None:
@@ -80,7 +80,147 @@ def test_migration_cannot_disable_public_table_rls(tmp_path: Path) -> None:
 
     findings = module.check_migration_safety(root)
 
-    assert "public table disables RLS: events" in findings
+    assert "exposed table disables RLS: public.events" in findings
+
+
+def test_api_table_without_rls_is_rejected(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create table api.runtime_status (id bigint);\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert "exposed table missing RLS: api.runtime_status" in findings
+
+
+def test_api_view_requires_security_invoker(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create view api.runtime_status as select 1 as id;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert "api view missing security_invoker=true: runtime_status" in findings
+
+
+def test_api_security_invoker_view_is_allowed(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create view api.runtime_status with (security_invoker = true) "
+        "as select 1 as id;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert not any("api view missing security_invoker" in item for item in findings)
+
+
+def test_exposed_security_definer_function_is_rejected(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function api.unsafe_rpc() returns void language plpgsql "
+        "security definer set search_path = '' "
+        "as $$ begin null; end; $$;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert "exposed function uses SECURITY DEFINER: api.unsafe_rpc" in findings
+    assert (
+        "exposed function missing explicit SECURITY INVOKER: api.unsafe_rpc"
+        in findings
+    )
+
+
+def test_exposed_function_requires_explicit_security_invoker(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function worker_api.acquire_worker_lease() returns void "
+        "language sql as $$ select null; $$;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "exposed function missing explicit SECURITY INVOKER: "
+        "worker_api.acquire_worker_lease"
+    ) in findings
+
+
+def test_explicit_security_invoker_wrapper_is_allowed(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function worker_api.acquire_worker_lease() returns void "
+        "language sql security invoker set search_path = '' "
+        "as $$ select null; $$;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert not any("exposed function" in finding for finding in findings)
+
+
+def test_private_definer_requires_empty_search_path(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function private.unsafe_impl() returns void language plpgsql "
+        "security definer as $$ begin null; end; $$;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "private SECURITY DEFINER missing empty search_path: private.unsafe_impl"
+        in findings
+    )
+
+
+def test_worker_api_function_must_be_allowlisted(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function worker_api.place_live_order() returns void "
+        "language sql as 'select';\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert "worker_api function outside allowlist: place_live_order" in findings
+
+
+def test_worker_api_execute_cannot_be_granted_to_authenticated(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "grant execute on function worker_api.acquire_worker_lease(uuid) "
+        "to authenticated;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert "worker_api EXECUTE granted to desktop/public role" in findings
 
 
 def test_multiline_anon_write_policy_is_rejected(tmp_path: Path) -> None:

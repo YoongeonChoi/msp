@@ -42,9 +42,9 @@ jobs:
         run: python -m pytest
 
   desktop:
-    name: desktop typecheck and build
+    name: desktop lint, contracts, e2e, build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -59,13 +59,45 @@ jobs:
         run: npm run desktop:typecheck
       - name: Test
         run: npm run desktop:test
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      - name: Browser E2E
+        run: npm run desktop:e2e
       - name: Build
         run: npm run desktop:build
 
-  migrations:
-    name: migration safety checks
+  desktop-native:
+    name: Tauri Rust check, test, build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - name: Check Rust toolchain
+        run: rustc --version && cargo --version
+      - name: Cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked
+      - name: Cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked
+      - name: Cargo build
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+  migrations:
+    name: migration apply and safety checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Check migration order and safety
@@ -74,20 +106,36 @@ jobs:
           set -euo pipefail
           mapfile -t migrations < <(find supabase/migrations -maxdepth 1 -type f -name '*.sql' | sort)
           test "${#migrations[@]}" -gt 0
-          previous=""
+          phase="legacy"
+          expected_prefix=1
+          previous_timestamp=""
           for file in "${migrations[@]}"; do
             name="$(basename "$file")"
-            [[ "$name" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]]
-            if [[ -n "$previous" ]]; then
-              [[ "$previous" < "$name" ]]
+            if [[ "$name" =~ ^([0-9]{4})_[a-z0-9_]+\.sql$ ]]; then
+              test "$phase" = "legacy"
+              prefix="${BASH_REMATCH[1]}"
+              printf -v expected "%04d" "$expected_prefix"
+              test "$prefix" = "$expected"
+              expected_prefix=$((expected_prefix + 1))
+            elif [[ "$name" =~ ^([0-9]{14})_[a-z0-9_]+\.sql$ ]]; then
+              phase="timestamp"
+              timestamp="${BASH_REMATCH[1]}"
+              if [[ -n "$previous_timestamp" ]]; then
+                [[ "$previous_timestamp" < "$timestamp" ]]
+              fi
+              previous_timestamp="$timestamp"
+            else
+              echo "::error file=$file::Migration filename must use NNNN_name.sql or YYYYMMDDHHMMSS_name.sql"
+              exit 1
             fi
-            previous="$name"
           done
           for required in 0001_schema.sql 0002_rls.sql 0003_realtime.sql 0004_retention.sql 0005_schema_alignment.sql; do
             test -f "supabase/migrations/$required"
           done
       - name: Check RLS and public write safety
         run: python .github/scripts/repository_safety.py migrations
+      - name: Apply G1+G2 migrations and assert contracts
+        run: python supabase/verify_g1_g2_migration.py
       - name: Check singleton paper safety seed
         shell: python
         run: |
@@ -139,6 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           required_docs=(
+            docs/G0_OPERATING_BOUNDARY.md
             docs/API_CONNECTIONS.md
             docs/API_GAPS.md
             docs/RISK_POLICY.md
