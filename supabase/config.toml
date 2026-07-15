@@ -1,0 +1,12 @@
+project_id = "kr-auto-trading-lab"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["api", "worker_api"]
+extra_search_path = ["extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 16
