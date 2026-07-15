@@ -18,7 +18,9 @@ apps/worker/app/release_metadata.json
 *.tsbuildinfo
 *.egg-info/
 qa-*.png
+apps/desktop/test-results/
+apps/desktop/playwright-report/
+apps/desktop/src-tauri/gen/
 target/
-Cargo.lock
 pnpm-lock.yaml
 yarn.lock

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="KR Auto Trading Lab">
+  <defs>
+    <linearGradient id="background" x1="96" y1="80" x2="928" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102A43"/>
+      <stop offset="1" stop-color="#07111F"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="300" y1="236" x2="724" y2="796" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5EEAD4"/>
+      <stop offset="1" stop-color="#22C55E"/>
+    </linearGradient>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="url(#background)"/>
+  <path d="M512 190 740 278v188c0 166-91 296-228 368-137-72-228-202-228-368V278l228-88Z" fill="#0B2136" stroke="url(#shield)" stroke-width="42" stroke-linejoin="round"/>
+  <path d="M370 610 470 510l82 72 122-166" fill="none" stroke="#E6FFFA" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="370" cy="610" r="30" fill="#5EEAD4"/>
+  <circle cx="470" cy="510" r="30" fill="#5EEAD4"/>
+  <circle cx="552" cy="582" r="30" fill="#5EEAD4"/>
+  <circle cx="674" cy="416" r="30" fill="#5EEAD4"/>
+</svg>
