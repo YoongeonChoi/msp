@@ -38,6 +38,14 @@ services:
         sync: false
       - key: TOSS_ACCOUNT_ID
         sync: false
+      - key: TOSS_CREDENTIAL_SCOPE
+        value: read_only
+      - key: TOSS_ORDER_CAPABLE_CREDENTIALS
+        value: "false"
+      - key: LIVE_ORDER_EXECUTION_ENABLED
+        value: "false"
+      - key: TOSS_ORDER_ENDPOINT_ENABLED
+        value: "false"
       - key: OPENDART_API_KEY
         sync: false
       - key: KRX_API_KEY
@@ -56,5 +64,13 @@ services:
         value: "5"
       - key: ALERT_DRILL_MAX_LATENCY_MS
         value: "2000"
-      - key: LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED
+      - key: EXECUTION_V2_ENABLED
+        value: "false"
+      - key: EXECUTION_V2_ENVIRONMENT
+        value: paper
+      - key: EXECUTION_V2_WORKER_API_ENABLED
+        value: "false"
+      - key: EXECUTION_V2_PAPER_RESUME_INPUT_ENABLED
+        value: "false"
+      - key: EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED
         value: "false"
