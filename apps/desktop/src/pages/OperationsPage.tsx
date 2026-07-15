@@ -1,24 +1,8 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { OperationCommandReceipt, OperationsSnapshot } from "../lib/operationsContracts";
-import type {
-  CommandReviewDraft,
-  OperationCommandRequest,
-  StepUpCommandDraft,
-  UnknownResolutionRequestDraftV2,
-  UnknownResolutionReviewDraftV2
-} from "../lib/operationsContracts";
-import {
-  attachStepUpGrantToCommandDraft,
-  attachStepUpGrantToReviewDraft,
-  buildCommandReviewDraft,
-  buildEmergencyStopCommandRequest,
-  buildIncidentActionRequest,
-  buildOperationCommandDraft,
-  buildStepUpGrantDraftRequest,
-  secureOperationId
-} from "../lib/operationRequests";
-import type { OperationIdFactory } from "../lib/operationRequests";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import type { Incident, OperationCommandReceipt, OperationsSnapshot } from "../lib/operationsContracts";
+import type { UnknownResolutionEvidenceInput } from "../lib/unknownResolutionRequests";
+import type { OperationIdFactory, OperationCommandType } from "../lib/operationRequests";
 import {
   operationsDataApi,
   operationsErrorMessage,
@@ -27,25 +11,49 @@ import {
   unknownResolutionSnapshotQueryKey
 } from "../lib/operationsData";
 import type { OperationsDataApi, UnknownResolutionDataApi } from "../lib/operationsData";
-import {
-  attachUnknownResolutionRequestGrant,
-  attachUnknownResolutionReviewGrant,
-  buildUnknownResolutionRequestDraft,
-  buildUnknownResolutionReviewDraft,
-  buildUnknownResolutionStepUpRequest
-} from "../lib/unknownResolutionRequests";
 import { useOnlineStatus } from "../lib/useOnlineStatus";
 import { useControlPlaneRealtimeHealth } from "../lib/controlPlaneRealtime";
 import type { ClientRealtimeHealth } from "../lib/controlPlaneRealtime";
-import { ApprovalInbox } from "../components/operations/ApprovalInbox";
-import { IncidentCenter } from "../components/operations/IncidentCenter";
-import { ManualReconciliationCase } from "../components/operations/ManualReconciliationCase";
+import type { OperationsSnapshotContextValue } from "../lib/operationsSnapshotContext";
+import { AttentionQueue } from "../components/operations/AttentionQueue";
 import {
+  commandLabel,
   isCommandPostconditionVerified,
   SafetyCommandCenter
 } from "../components/operations/SafetyCommandCenter";
 import { StaleDataBoundary } from "../components/operations/StaleDataBoundary";
-import { ErrorState, LoadingState, Metric, Pill } from "../components/ui";
+import { ReadonlyReveal } from "../components/ReadonlyReveal";
+import { KeyValue, LoadingState, Pill } from "../components/ui";
+import { LazySurfaceBoundary } from "../components/LazySurfaceBoundary";
+import type { DrawerState } from "../lib/uiState";
+import { formatKst } from "../lib/formatters";
+import { operationStateLabel, workerStateLabel } from "../lib/presentation";
+import {
+  commandConfirmationGuard,
+  incidentConfirmationGuard,
+  operationsStateGuard,
+  reviewConfirmationGuard,
+  unknownConfirmationGuard
+} from "../lib/operationGuards";
+import { captureAuthSessionEpoch, isAuthSessionEpochCurrent } from "../lib/authSessionCache";
+
+const ApprovalInbox = lazy(async () => ({
+  default: (await import("../components/operations/ApprovalInbox")).ApprovalInbox
+}));
+const IncidentCenter = lazy(async () => ({
+  default: (await import("../components/operations/IncidentCenter")).IncidentCenter
+}));
+const ManualReconciliationCase = lazy(async () => ({
+  default: (await import("../components/operations/ManualReconciliationCase")).ManualReconciliationCase
+}));
+const MfaSecurityPanel = lazy(async () => ({
+  default: (await import("../components/operations/MfaSecurityPanel")).MfaSecurityPanel
+}));
+const DrawerSurface = lazy(async () => ({
+  default: (await import("../components/DialogSurface")).DrawerSurface
+}));
+
+const secureOperationId: OperationIdFactory = () => crypto.randomUUID();
 
 export interface OperationsPageProps {
   readonly dataApi?: OperationsDataApi;
@@ -53,129 +61,335 @@ export interface OperationsPageProps {
   readonly onlineOverride?: boolean;
   readonly idFactory?: OperationIdFactory;
   readonly nowFactory?: () => Date;
+  readonly snapshotSource?: OperationsSnapshotContextValue;
 }
 
-export function OperationsPage({
+export function OperationsPage(props: OperationsPageProps = {}) {
+  if (props.snapshotSource) {
+    return (
+      <OperationsPageContent
+        dataApi={props.dataApi ?? props.snapshotSource.dataApi}
+        unknownDataApi={props.unknownDataApi}
+        idFactory={props.idFactory}
+        nowFactory={props.nowFactory}
+        snapshotQuery={props.snapshotSource.query}
+        isOnline={props.onlineOverride ?? props.snapshotSource.isOnline}
+        clientRealtime={props.snapshotSource.realtime}
+      />
+    );
+  }
+  return <StandaloneOperationsPage {...props} />;
+}
+
+function StandaloneOperationsPage({
   dataApi = operationsDataApi,
   unknownDataApi = unknownResolutionDataApi,
   onlineOverride,
   idFactory = secureOperationId,
   nowFactory = () => new Date()
 }: OperationsPageProps = {}) {
-  const queryClient = useQueryClient();
   const isOnline = useOnlineStatus(onlineOverride);
   const clientRealtime = useControlPlaneRealtimeHealth();
-  const [notice, setNotice] = useState<string | null>(null);
   const snapshotQuery = useQuery({
     queryKey: operationsSnapshotQueryKey,
     queryFn: dataApi.fetchSnapshot,
     retry: false,
     refetchInterval: 15_000
   });
+
+  return (
+    <OperationsPageContent
+      dataApi={dataApi}
+      unknownDataApi={unknownDataApi}
+      idFactory={idFactory}
+      nowFactory={nowFactory}
+      snapshotQuery={snapshotQuery}
+      isOnline={isOnline}
+      clientRealtime={clientRealtime}
+    />
+  );
+}
+
+function OperationsPageContent({
+  dataApi,
+  unknownDataApi = unknownResolutionDataApi,
+  idFactory = secureOperationId,
+  nowFactory = () => new Date(),
+  snapshotQuery,
+  isOnline,
+  clientRealtime
+}: {
+  readonly dataApi: OperationsDataApi;
+  readonly unknownDataApi?: UnknownResolutionDataApi;
+  readonly idFactory?: OperationIdFactory;
+  readonly nowFactory?: () => Date;
+  readonly snapshotQuery: UseQueryResult<OperationsSnapshot, Error>;
+  readonly isOnline: boolean;
+  readonly clientRealtime: ClientRealtimeHealth | null;
+}) {
+  const queryClient = useQueryClient();
+  const [notice, setNotice] = useState<string | null>(null);
+  const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const unknownSnapshotQuery = useQuery({
     queryKey: unknownResolutionSnapshotQueryKey,
     queryFn: unknownDataApi.fetchSnapshot,
     retry: false,
     refetchInterval: 15_000
   });
+  const onlineRef = useRef(isOnline);
+  const realtimeRef = useRef(clientRealtime);
+  onlineRef.current = isOnline;
+  realtimeRef.current = clientRealtime;
 
   const requestMutation = useMutation({
-    mutationFn: async (
-      submission:
-        | { readonly kind: "emergency"; readonly request: OperationCommandRequest }
-        | { readonly kind: "step_up"; readonly draft: StepUpCommandDraft }
-    ) => {
-      if (submission.kind === "emergency") {
-        return dataApi.requestCommand(submission.request);
+    mutationFn: async ({ commandType, openGuard }: { readonly commandType: OperationCommandType; readonly openGuard: string }) => {
+      const sessionEpoch = captureAuthSessionEpoch();
+      const requests = await import("../lib/operationRequests");
+      assertMutationSessionCurrent(sessionEpoch);
+      const before = await dataApi.fetchSnapshot();
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(before, onlineRef.current, nowFactory(), realtimeRef.current);
+      if (commandConfirmationGuard(before, commandType) !== openGuard) {
+        throw new SafetyStateChangedError();
       }
+      if (commandType === "emergency_stop") {
+        const request = requests.buildEmergencyStopCommandRequest({ snapshot: before, now: nowFactory(), idFactory });
+        if (request === null || !onlineRef.current) {
+          throw new SafetyStateChangedError();
+        }
+        assertMutationSessionCurrent(sessionEpoch);
+        return dataApi.requestCommand(request);
+      }
+      const draft = requests.buildOperationCommandDraft({ commandType, snapshot: before, now: nowFactory(), idFactory });
+      if (draft === null) {
+        throw new SafetyStateChangedError();
+      }
+      const fingerprint = operationsStateGuard(before);
+      assertMutationSessionCurrent(sessionEpoch);
       const grant = await dataApi.issueStepUpGrant(
-        buildStepUpGrantDraftRequest("request", submission.draft)
+        requests.buildStepUpGrantDraftRequest("request", draft)
       );
-      return dataApi.requestCommand(attachStepUpGrantToCommandDraft(submission.draft, grant));
+      assertMutationSessionCurrent(sessionEpoch);
+      const after = await dataApi.fetchSnapshot();
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(after, onlineRef.current, nowFactory(), realtimeRef.current);
+      if (operationsStateGuard(after) !== fingerprint) {
+        throw new SafetyStateChangedError();
+      }
+      assertMutationSessionCurrent(sessionEpoch);
+      return dataApi.requestCommand(requests.attachStepUpGrantToCommandDraft(draft, grant));
     },
     retry: false,
     networkMode: "always",
     onSuccess: () => {
-      setNotice("명령별 step-up grant와 제어면 영수증이 확인되었습니다. Worker ACK가 오기 전에는 적용 완료가 아닙니다.");
+      setNotice("작업별 추가 확인과 요청 접수가 기록되었습니다. Worker 적용 확인 전에는 완료가 아닙니다.");
       return queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
     },
-    onError: (error) => setNotice(operationsErrorMessage(error))
+    onError: (error) => setNotice(mutationErrorMessage(error))
   });
   const reviewMutation = useMutation({
-    mutationFn: async (draft: CommandReviewDraft) => {
-      const grant = await dataApi.issueStepUpGrant(buildStepUpGrantDraftRequest("review", draft));
-      return dataApi.reviewCommand(attachStepUpGrantToReviewDraft(draft, grant));
+    mutationFn: async ({ commandId, decision, openGuard }: { readonly commandId: string; readonly decision: "approve" | "reject"; readonly openGuard: string }) => {
+      const sessionEpoch = captureAuthSessionEpoch();
+      const requests = await import("../lib/operationRequests");
+      assertMutationSessionCurrent(sessionEpoch);
+      const before = await dataApi.fetchSnapshot();
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(before, onlineRef.current, nowFactory(), realtimeRef.current);
+      const command = before.pending_reviews.find((item) => item.command_id === commandId);
+      if (!command || isSelfReview(before, command)) {
+        throw new SafetyStateChangedError();
+      }
+      if (reviewConfirmationGuard(before, command) !== openGuard) {
+        throw new SafetyStateChangedError();
+      }
+      const draft = requests.buildCommandReviewDraft({ command, access: before.access, decision, now: nowFactory(), idFactory });
+      if (draft === null) {
+        throw new SafetyStateChangedError();
+      }
+      const fingerprint = reviewConfirmationGuard(before, command);
+      assertMutationSessionCurrent(sessionEpoch);
+      const grant = await dataApi.issueStepUpGrant(requests.buildStepUpGrantDraftRequest("review", draft));
+      assertMutationSessionCurrent(sessionEpoch);
+      const after = await dataApi.fetchSnapshot();
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(after, onlineRef.current, nowFactory(), realtimeRef.current);
+      const current = after.pending_reviews.find((item) => item.command_id === commandId);
+      if (!current || reviewConfirmationGuard(after, current) !== fingerprint) {
+        throw new SafetyStateChangedError();
+      }
+      assertMutationSessionCurrent(sessionEpoch);
+      return dataApi.reviewCommand(requests.attachStepUpGrantToReviewDraft(draft, grant));
     },
     retry: false,
     networkMode: "always",
     onSuccess: () => {
-      setNotice("승인 결과가 제어면에 기록되었습니다. Worker 적용 상태는 별도 ACK로 확인하세요.");
+      setNotice("승인 결과가 기록되었습니다. Worker 적용 여부는 별도 상태에서 확인하세요.");
       return queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
     },
-    onError: (error) => setNotice(operationsErrorMessage(error))
+    onError: (error) => setNotice(mutationErrorMessage(error))
   });
   const incidentMutation = useMutation({
-    mutationFn: dataApi.actOnIncident,
+    mutationFn: async ({ incidentId, action, openGuard }: { readonly incidentId: string; readonly action: "acknowledge" | "resolve"; readonly openGuard: string }) => {
+      const sessionEpoch = captureAuthSessionEpoch();
+      const requests = await import("../lib/operationRequests");
+      assertMutationSessionCurrent(sessionEpoch);
+      const latest = await dataApi.fetchSnapshot();
+      assertMutationSessionCurrent(sessionEpoch);
+      if (!canMutateIncidentOperations(latest, onlineRef.current, nowFactory(), realtimeRef.current)) {
+        throw new SafetyStateChangedError();
+      }
+      const incident = latest.incidents.find((item) => item.incident_id === incidentId);
+      const expectedStatus = action === "acknowledge" ? "open" : "acknowledged";
+      if (
+        !incident ||
+        incident.status !== expectedStatus ||
+        incidentConfirmationGuard(latest, incident, action) !== openGuard ||
+        !canPerformIncidentAction(latest, incident, action) ||
+        !onlineRef.current
+      ) {
+        throw new SafetyStateChangedError();
+      }
+      assertMutationSessionCurrent(sessionEpoch);
+      return dataApi.actOnIncident(requests.buildIncidentActionRequest({ incident, action, now: nowFactory(), idFactory }));
+    },
     retry: false,
     networkMode: "always",
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
       setNotice("사고 상태 변경이 감사 가능한 제어면 기록으로 반영되었습니다.");
     },
-    onError: (error) => setNotice(operationsErrorMessage(error))
+    onError: (error) => setNotice(mutationErrorMessage(error))
   });
   const unknownRequestMutation = useMutation({
-    mutationFn: async (draft: UnknownResolutionRequestDraftV2) => {
+    mutationFn: async ({ breakId, evidence, openGuard }: { readonly breakId: string; readonly evidence: UnknownResolutionEvidenceInput; readonly openGuard: string }) => {
+      const sessionEpoch = captureAuthSessionEpoch();
+      const requests = await import("../lib/unknownResolutionRequests");
+      assertMutationSessionCurrent(sessionEpoch);
+      const [before, unknownBefore] = await Promise.all([dataApi.fetchSnapshot(), unknownDataApi.fetchSnapshot()]);
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(before, onlineRef.current, nowFactory(), realtimeRef.current);
+      const context = unknownBefore.cases.find((item) => item.break_id === breakId);
+      if (
+        !context ||
+        unknownConfirmationGuard(before, context) !== openGuard ||
+        !isTimestampFresh(unknownBefore.generated_at, nowFactory(), before.runtime_health.freshness_policy.snapshot_max_age_seconds)
+      ) {
+        throw new SafetyStateChangedError();
+      }
+      const draft = requests.buildUnknownResolutionRequestDraft({ context, access: before.access, evidence, now: nowFactory(), idFactory });
+      if (draft === null) {
+        throw new SafetyStateChangedError();
+      }
+      const fingerprint = unknownConfirmationGuard(before, context);
+      assertMutationSessionCurrent(sessionEpoch);
       const grant = await unknownDataApi.issueStepUpGrant(
-        buildUnknownResolutionStepUpRequest("request", draft)
+        requests.buildUnknownResolutionStepUpRequest("request", draft)
       );
+      assertMutationSessionCurrent(sessionEpoch);
+      const [after, unknownAfter] = await Promise.all([dataApi.fetchSnapshot(), unknownDataApi.fetchSnapshot()]);
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(after, onlineRef.current, nowFactory(), realtimeRef.current);
+      const current = unknownAfter.cases.find((item) => item.break_id === breakId);
+      if (!current || unknownConfirmationGuard(after, current) !== fingerprint) {
+        throw new SafetyStateChangedError();
+      }
+      assertMutationSessionCurrent(sessionEpoch);
       return unknownDataApi.requestResolution(
-        attachUnknownResolutionRequestGrant(draft, grant)
+        requests.attachUnknownResolutionRequestGrant(draft, grant)
       );
     },
     retry: false,
     networkMode: "always",
     onSuccess: () => {
-      setNotice("수동 대사 요청과 불변 증거 manifest가 저장되었습니다. 독립 승인과 Worker ACK 전에는 회계 조정 완료가 아닙니다.");
+      setNotice("수동 대사 요청과 증거 요약이 저장되었습니다. 독립 승인, Worker 적용, 회계 반영 전에는 완료가 아닙니다.");
       void queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
       return queryClient.invalidateQueries({ queryKey: unknownResolutionSnapshotQueryKey });
     },
-    onError: (error) => setNotice(operationsErrorMessage(error))
+    onError: (error) => setNotice(mutationErrorMessage(error))
   });
   const unknownReviewMutation = useMutation({
-    mutationFn: async (draft: UnknownResolutionReviewDraftV2) => {
+    mutationFn: async ({ breakId, decision, openGuard }: { readonly breakId: string; readonly decision: "approve" | "reject"; readonly openGuard: string }) => {
+      const sessionEpoch = captureAuthSessionEpoch();
+      const requests = await import("../lib/unknownResolutionRequests");
+      assertMutationSessionCurrent(sessionEpoch);
+      const [before, unknownBefore] = await Promise.all([dataApi.fetchSnapshot(), unknownDataApi.fetchSnapshot()]);
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(before, onlineRef.current, nowFactory(), realtimeRef.current);
+      const context = unknownBefore.cases.find((item) => item.break_id === breakId);
+      if (
+        !context ||
+        unknownConfirmationGuard(before, context) !== openGuard ||
+        !isTimestampFresh(unknownBefore.generated_at, nowFactory(), before.runtime_health.freshness_policy.snapshot_max_age_seconds)
+      ) {
+        throw new SafetyStateChangedError();
+      }
+      const draft = requests.buildUnknownResolutionReviewDraft({ context, access: before.access, decision, now: nowFactory(), idFactory });
+      if (draft === null) {
+        throw new SafetyStateChangedError();
+      }
+      const fingerprint = unknownConfirmationGuard(before, context);
+      assertMutationSessionCurrent(sessionEpoch);
       const grant = await unknownDataApi.issueStepUpGrant(
-        buildUnknownResolutionStepUpRequest("review", draft)
+        requests.buildUnknownResolutionStepUpRequest("review", draft)
       );
+      assertMutationSessionCurrent(sessionEpoch);
+      const [after, unknownAfter] = await Promise.all([dataApi.fetchSnapshot(), unknownDataApi.fetchSnapshot()]);
+      assertMutationSessionCurrent(sessionEpoch);
+      assertCommandMutationCurrent(after, onlineRef.current, nowFactory(), realtimeRef.current);
+      const current = unknownAfter.cases.find((item) => item.break_id === breakId);
+      if (!current || unknownConfirmationGuard(after, current) !== fingerprint) {
+        throw new SafetyStateChangedError();
+      }
+      assertMutationSessionCurrent(sessionEpoch);
       return unknownDataApi.reviewResolution(
-        attachUnknownResolutionReviewGrant(draft, grant)
+        requests.attachUnknownResolutionReviewGrant(draft, grant)
       );
     },
     retry: false,
     networkMode: "always",
     onSuccess: () => {
-      setNotice("수동 대사 검토 receipt가 저장되었습니다. Worker claim/application과 회계 postcondition을 계속 확인하세요.");
+      setNotice("수동 대사 검토 결과가 저장되었습니다. Worker 적용과 최신 회계 반영을 계속 확인하세요.");
       void queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
       return queryClient.invalidateQueries({ queryKey: unknownResolutionSnapshotQueryKey });
     },
-    onError: (error) => setNotice(operationsErrorMessage(error))
+    onError: (error) => setNotice(mutationErrorMessage(error))
   });
+  const resetUnknownRequestMutation = unknownRequestMutation.reset;
+  const resetUnknownReviewMutation = unknownReviewMutation.reset;
+  const unknownRequestStatus = unknownRequestMutation.status;
+  const unknownReviewStatus = unknownReviewMutation.status;
+
+  useEffect(() => {
+    if (snapshotQuery.data?.access.session_state !== "active") {
+      setDrawer(null);
+      resetUnknownRequestMutation();
+      resetUnknownReviewMutation();
+    }
+  }, [resetUnknownRequestMutation, resetUnknownReviewMutation, snapshotQuery.data?.access.session_state]);
+
+  useEffect(() => {
+    if (unknownRequestStatus === "success" || unknownRequestStatus === "error") {
+      resetUnknownRequestMutation();
+    }
+    if (unknownReviewStatus === "success" || unknownReviewStatus === "error") {
+      resetUnknownReviewMutation();
+    }
+  }, [resetUnknownRequestMutation, resetUnknownReviewMutation, unknownRequestStatus, unknownReviewStatus]);
 
   if (snapshotQuery.isLoading) {
-    return <LoadingState label="schema_version=1 운영 read model을 불러오는 중" />;
+    return <LoadingState label="최신 운영 상태를 불러오는 중" />;
   }
   if (snapshotQuery.error || !snapshotQuery.data) {
     return (
       <div className="space-y-3">
-        <div className="rounded-md border border-red-300 bg-red-50 p-4" role="alert">
-          <div className="flex items-center gap-2 font-semibold text-red-900">
-            운영 경로 차단 <Pill tone="danger">LIVE 금지</Pill>
-          </div>
-          <p className="mt-2 text-sm text-red-800">
-            {operationsErrorMessage(snapshotQuery.error)} 부분 응답이나 레거시 row를 기본값으로 보정하지 않습니다.
-          </p>
+        <div className="rounded-lg border border-danger/30 bg-dangerSoft p-4" role="alert">
+          <div className="font-semibold text-danger">운영 데이터 확인 실패</div>
+          <p className="mt-2 text-sm text-danger">{operationsErrorMessage(snapshotQuery.error)} 불완전한 값은 정상으로 추정하지 않습니다.</p>
+          <details className="mt-3 text-sm text-danger">
+            <summary className="min-h-control cursor-pointer py-2 font-semibold">연결 상세</summary>
+            <p>운영 상태 전체를 확인할 수 없어 변경 작업을 안전하게 차단했습니다.</p>
+          </details>
         </div>
-        <ErrorState message="api.get_desktop_operations_snapshot_v1이 OperationsSnapshotV1 전체 계약을 제공하지 않습니다." />
       </div>
     );
   }
@@ -200,156 +414,190 @@ export function OperationsPage({
     unknownReviewMutation.isPending;
 
   const rejectBlockedMutation = () => {
-    setNotice("현재 상태에서는 변경할 수 없습니다. fresh 상태와 유효한 온라인 세션을 먼저 확인하세요.");
+    setNotice("현재 상태에서는 변경할 수 없습니다. 최신 상태와 유효한 온라인 세션을 먼저 확인하세요.");
   };
 
   return (
-    <StaleDataBoundary health={snapshot.runtime_health} isOnline={isOnline} clientFresh={clientFresh}>
-      <section className="rounded-md border border-red-200 bg-red-50 p-4" aria-label="영구 안전 경계">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="font-semibold text-red-950">영구 안전 경계</h2>
-          <Pill tone="danger">LIVE 금지</Pill>
-        </div>
-        <p className="mt-1 text-sm text-red-900">
-          이 데스크톱은 PAPER와 CONTRACT TEST / 계약 테스트만 제어합니다. 브로커 주문 API나 LIVE 활성화 경로는 제공하지 않습니다.
-        </p>
-      </section>
-
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric title="운영 상태" value={snapshot.runtime_health.overall_state} detail={mutationsAllowed ? "변경 가능" : "변경 차단"} tone={mutationsAllowed ? "safe" : "warning"} />
-        <Metric title="승인 대기" value={`${snapshot.pending_reviews.length}건`} detail="제어면 receipt" tone={snapshot.pending_reviews.length > 0 ? "warning" : "neutral"} />
-        <Metric title="ACK/postcondition 대기" value={`${pendingWorkerAckCount(snapshot)}건`} detail="승인과 분리" tone={pendingWorkerAckCount(snapshot) > 0 ? "warning" : "neutral"} />
-        <Metric
-          title="수동 대사"
-          value={unknownSnapshot ? `${unknownSnapshot.cases.length}건` : "확인 불가"}
-          detail="V2 증거·CAS 전용"
-          tone={!unknownSnapshot || unknownSnapshot.cases.length > 0 ? "danger" : "safe"}
-        />
-      </div>
-
+    <LazySurfaceBoundary
+      title="운영 상세 화면을 안전하게 열지 못했습니다"
+      detail="화면을 다시 불러오기 전까지 운영 변경 기능은 차단됩니다."
+      logCode="operations_lazy_surface_load_failed"
+    >
+      <StaleDataBoundary health={snapshot.runtime_health} isOnline={isOnline} clientFresh={clientFresh}>
       {notice ? (
         <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900" role="status" aria-live="polite">
           {notice}
         </div>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
-        <SafetyCommandCenter
-          snapshot={snapshot}
-          mutationsAllowed={mutationsAllowed}
-          pending={pending}
-          onRequest={(commandType) => {
-            if (!mutationsAllowed) {
-              rejectBlockedMutation();
-              return;
-            }
-            if (commandType === "emergency_stop") {
-              const request = buildEmergencyStopCommandRequest({ snapshot, now: nowFactory(), idFactory });
-              if (request === null) {
-                setNotice("최근 AAL2가 확인된 operator 단일 행위자 조건이 없어 비상 정지 요청을 전송하지 않았습니다.");
+      <div className="grid min-w-0 gap-5 xl:grid-cols-12">
+        <div className="min-w-0 xl:col-span-7">
+          <SafetyCommandCenter
+            snapshot={snapshot}
+            mutationsAllowed={mutationsAllowed}
+            pending={pending}
+            onRequest={(commandType, openGuard) => {
+              if (!mutationsAllowed) {
+                rejectBlockedMutation();
                 return;
               }
-              requestMutation.mutate({ kind: "emergency", request });
-              return;
-            }
-            const draft = buildOperationCommandDraft({ commandType, snapshot, now: nowFactory(), idFactory });
-            if (draft === null) {
-              setNotice("AAL2, 요청 권한 또는 G1/G2 자격이 없어 명령 draft를 전송하지 않았습니다.");
-              return;
-            }
-            requestMutation.mutate({ kind: "step_up", draft });
-          }}
-        />
-        <ApprovalInbox
-          snapshot={snapshot}
-          mutationsAllowed={mutationsAllowed}
-          pending={pending}
-          onReview={(command, decision) => {
-            if (!mutationsAllowed || isSelfReview(snapshot, command)) {
-              rejectBlockedMutation();
-              return;
-            }
-            const review = buildCommandReviewDraft({
-              command,
-              access: snapshot.access,
-              decision,
-              now: nowFactory(),
-              idFactory
-            });
-            if (review === null) {
-              setNotice("승인 역할 또는 maker-checker 분리 조건이 없어 검토 draft를 전송하지 않았습니다.");
-              return;
-            }
-            reviewMutation.mutate(review);
-          }}
-        />
-        <IncidentCenter
-          snapshot={snapshot}
-          mutationsAllowed={incidentMutationsAllowed}
-          pending={pending}
-          onAction={(incident, action) => {
-            if (!incidentMutationsAllowed) {
-              rejectBlockedMutation();
-              return;
-            }
-            incidentMutation.mutate(
-              buildIncidentActionRequest({ incident, action, now: nowFactory(), idFactory })
-            );
-          }}
-        />
-        <ManualReconciliationCase
-          snapshot={snapshot}
-          unknownSnapshot={unknownSnapshot}
-          mutationsAllowed={unknownMutationsAllowed}
-          pending={pending}
-          now={snapshotEvaluationTime}
-          onRequest={(context, evidence) => {
-            if (!unknownMutationsAllowed) {
-              rejectBlockedMutation();
-              return;
-            }
-            try {
-              const draft = buildUnknownResolutionRequestDraft({
-                context,
-                access: snapshot.access,
-                evidence,
-                now: nowFactory(),
-                idFactory
-              });
-              if (draft === null) {
-                setNotice("operator, AAL2, 최신 CAS 또는 명시적 증거 조건이 없어 수동 대사 요청을 전송하지 않았습니다.");
-                return;
-              }
-              unknownRequestMutation.mutate(draft);
-            } catch (error) {
-              setNotice(operationsErrorMessage(error));
-            }
-          }}
-          onReview={(context, decision) => {
-            if (!unknownMutationsAllowed) {
-              rejectBlockedMutation();
-              return;
-            }
-            try {
-              const draft = buildUnknownResolutionReviewDraft({
-                context,
-                access: snapshot.access,
-                decision,
-                now: nowFactory(),
-                idFactory
-              });
-              if (draft === null) {
-                setNotice("risk_approver, AAL2, maker-checker 또는 최신 receipt revision 조건이 없어 검토를 전송하지 않았습니다.");
-                return;
-              }
-              unknownReviewMutation.mutate(draft);
-            } catch (error) {
-              setNotice(operationsErrorMessage(error));
-            }
-          }}
-        />
+              requestMutation.mutate({ commandType, openGuard });
+            }}
+          />
+        </div>
+        <div className="min-w-0 xl:col-span-5">
+          <AttentionQueue
+            snapshot={snapshot}
+            unknownSnapshot={unknownSnapshot}
+            isOnline={isOnline}
+            now={snapshotEvaluationTime}
+            onOpen={setDrawer}
+          />
+        </div>
       </div>
-    </StaleDataBoundary>
+
+      <ReadonlyReveal>
+        <details className="rounded-xl border border-line bg-surface px-5 py-2">
+          <summary className="flex min-h-control cursor-pointer items-center justify-between gap-3 font-semibold">
+            <span>최근 기록</span>
+            <span className="text-xs font-normal text-mutedStrong">
+              명령 {snapshot.commands.length} · 승인 {snapshot.pending_reviews.length} · 사고 {snapshot.incidents.length}
+            </span>
+          </summary>
+          <div className="grid gap-3 border-t border-line py-4 md:grid-cols-3">
+            <RecordShortcut label="명령 기록" detail={`${snapshot.commands.length}건 · 최신 상태 확인 포함`} onClick={() => setDrawer({ kind: "command" })} />
+            <RecordShortcut label="승인 기록" detail={`${snapshot.pending_reviews.length}건 · 독립 검토`} onClick={() => setDrawer({ kind: "approval" })} />
+            <RecordShortcut label="사고 기록" detail={`${snapshot.incidents.length}건 · 확인 기한 포함`} onClick={() => setDrawer({ kind: "incident" })} />
+          </div>
+        </details>
+      </ReadonlyReveal>
+
+      <Suspense fallback={<LoadingState label="상세 화면을 불러오는 중" />}>
+        {drawer?.kind === "command" ? (
+          <DrawerSurface open readOnly title="명령 상세" description="요청·검토·Worker 적용·최신 실행 상태를 분리해 확인합니다." onRequestClose={() => setDrawer(null)}>
+            <CommandDrawerContent snapshot={snapshot} commandId={drawer.entityId} />
+          </DrawerSurface>
+        ) : null}
+        {drawer?.kind === "approval" ? (
+          <DrawerSurface open readOnly={false} title="승인 상세" description="중요한 만료와 요청자·검토자 분리 조건은 접지 않습니다." onRequestClose={() => setDrawer(null)}>
+            <Suspense fallback={<LoadingState label="승인 상세를 불러오는 중" />}>
+              <ApprovalInbox
+                snapshot={snapshot}
+                mutationsAllowed={mutationsAllowed}
+                pending={pending}
+                onReview={(command, decision, openGuard) => {
+                  if (!mutationsAllowed || isSelfReview(snapshot, command)) {
+                    rejectBlockedMutation();
+                    return;
+                  }
+                  reviewMutation.mutate({ commandId: command.command_id, decision, openGuard });
+                }}
+              />
+            </Suspense>
+          </DrawerSurface>
+        ) : null}
+        {drawer?.kind === "incident" ? (
+          <DrawerSurface open readOnly={false} title="사고 상세" description="Worker가 오프라인이어도 최신 제어면과 2단계 인증이 확인되면 사고 확인은 가능합니다." onRequestClose={() => setDrawer(null)}>
+            <Suspense fallback={<LoadingState label="사고 상세를 불러오는 중" />}>
+              <IncidentCenter
+                snapshot={snapshot}
+                mutationsAllowed={incidentMutationsAllowed}
+                pending={pending}
+                onAction={(incident, action, openGuard) => {
+                  if (!incidentMutationsAllowed) {
+                    rejectBlockedMutation();
+                    return;
+                  }
+                  incidentMutation.mutate({ incidentId: incident.incident_id, action, openGuard });
+                }}
+              />
+            </Suspense>
+          </DrawerSurface>
+        ) : null}
+        {drawer?.kind === "reconciliation" ? (
+          <DrawerSurface open readOnly={false} title="수동 대사 상세" description="원시 증거는 현재 인증 세션의 메모리에만 유지되며 상세 화면을 닫으면 제거됩니다." onRequestClose={() => setDrawer(null)}>
+            <Suspense fallback={<LoadingState label="수동 대사 상세를 불러오는 중" />}>
+              <ManualReconciliationCase
+                snapshot={snapshot}
+                unknownSnapshot={unknownSnapshot}
+                mutationsAllowed={unknownMutationsAllowed}
+                pending={pending}
+                now={snapshotEvaluationTime}
+                onRequest={(context, evidence, openGuard) => {
+                  if (!unknownMutationsAllowed) {
+                    rejectBlockedMutation();
+                    return;
+                  }
+                  unknownRequestMutation.mutate({ breakId: context.break_id, evidence, openGuard });
+                }}
+                onReview={(context, decision, openGuard) => {
+                  if (!unknownMutationsAllowed) {
+                    rejectBlockedMutation();
+                    return;
+                  }
+                  unknownReviewMutation.mutate({ breakId: context.break_id, decision, openGuard });
+                }}
+              />
+            </Suspense>
+          </DrawerSurface>
+        ) : null}
+        {drawer?.kind === "mfa" ? (
+          <DrawerSurface open readOnly={false} title="2단계 인증 관리" onRequestClose={() => setDrawer(null)}>
+            <Suspense fallback={<LoadingState label="2단계 인증 관리를 불러오는 중" />}>
+              <MfaSecurityPanel />
+            </Suspense>
+          </DrawerSurface>
+        ) : null}
+      </Suspense>
+      </StaleDataBoundary>
+    </LazySurfaceBoundary>
+  );
+}
+
+function RecordShortcut({ label, detail, onClick }: { readonly label: string; readonly detail: string; readonly onClick: () => void }) {
+  return (
+    <button type="button" className="min-h-control rounded-lg border border-line bg-canvas p-4 text-left transition-[transform,opacity] duration-press active:scale-[0.99]" onClick={onClick}>
+      <span className="block font-semibold text-ink">{label}</span>
+      <span className="mt-1 block text-xs text-mutedStrong">{detail}</span>
+    </button>
+  );
+}
+
+function CommandDrawerContent({ snapshot, commandId }: { readonly snapshot: OperationsSnapshot; readonly commandId?: string }) {
+  const commands = commandId
+    ? snapshot.commands.filter((command) => command.command_id === commandId)
+    : snapshot.commands;
+  if (commands.length === 0) {
+    return <p className="rounded-lg border border-dashed border-line p-4 text-sm text-mutedStrong">표시할 명령 기록이 없습니다.</p>;
+  }
+  return (
+    <div className="space-y-3">
+      {commands.map((command) => {
+        const complete = isCommandPostconditionVerified(command, snapshot);
+        return (
+          <article key={command.command_id} className="rounded-lg border border-line bg-surface p-4">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="font-semibold">{commandLabel(command.command_type)}</h3>
+                <p className="mt-1 break-all text-xs text-mutedStrong">{command.command_id}</p>
+              </div>
+              <Pill tone={complete ? "safe" : ["failed", "rejected"].includes(command.state) ? "danger" : "warning"}>
+                {complete ? "최신 상태 확인 완료" : operationStateLabel(command.state)}
+              </Pill>
+            </div>
+            <div className="mt-3">
+              <KeyValue label="요청 시각" value={formatKst(command.requested_at)} />
+              <KeyValue label="만료 시각" value={formatKst(command.expires_at)} />
+              <KeyValue label="제어면 버전" value={`r${command.control_plane_receipt.revision}`} />
+              <KeyValue label="Worker 적용 확인" value={workerStateLabel(command.worker_ack?.state)} />
+            </div>
+            {!complete && command.state === "applied" ? (
+              <p className="mt-3 rounded-lg bg-warningSoft p-3 text-sm text-warning">최신 실행 상태의 결과 조건이 확인될 때까지 완료로 표시하지 않습니다.</p>
+            ) : null}
+          </article>
+        );
+      })}
+    </div>
   );
 }
 
@@ -466,14 +714,6 @@ function isControlPlaneSnapshotCurrent(
   );
 }
 
-function pendingWorkerAckCount(snapshot: OperationsSnapshot): number {
-  return snapshot.commands.filter((command) =>
-    command.state === "approved" ||
-    command.state === "claimed" ||
-    (command.state === "applied" && !isCommandPostconditionVerified(command, snapshot))
-  ).length;
-}
-
 function isSelfReview(snapshot: OperationsSnapshot, command: OperationCommandReceipt): boolean {
   return snapshot.access.actor?.actor_id === command.requested_by.actor_id;
 }
@@ -482,3 +722,48 @@ function isTimestampFresh(timestamp: string, now: Date, maxAgeSeconds: number): 
   const ageMs = now.getTime() - Date.parse(timestamp);
   return Number.isFinite(ageMs) && ageMs >= -30_000 && ageMs <= maxAgeSeconds * 1_000;
 }
+
+function assertCommandMutationCurrent(
+  snapshot: OperationsSnapshot,
+  online: boolean,
+  now: Date,
+  realtime: ClientRealtimeHealth | null
+): void {
+  if (!canMutateOperations(snapshot, online, now, realtime)) {
+    throw new SafetyStateChangedError();
+  }
+}
+
+function assertMutationSessionCurrent(epoch: number): void {
+  if (!isAuthSessionEpochCurrent(epoch)) {
+    throw new SafetyStateChangedError();
+  }
+}
+
+export function canPerformIncidentAction(
+  snapshot: OperationsSnapshot,
+  incident: Incident,
+  action: "acknowledge" | "resolve"
+): boolean {
+  const actor = snapshot.access.actor;
+  if (actor === null) return false;
+  if (action === "acknowledge") {
+    return incident.status === "open" &&
+      snapshot.access.permissions.includes("acknowledge_incident") &&
+      actor.roles.includes("operator");
+  }
+  return incident.status === "acknowledged" &&
+    snapshot.access.permissions.includes("resolve_incident") &&
+    actor.roles.includes("risk_approver") &&
+    incident.owner !== null &&
+    incident.owner.actor_id !== actor.actor_id;
+}
+
+function mutationErrorMessage(error: unknown): string {
+  if (error instanceof SafetyStateChangedError) {
+    return "상태가 변경됨 — 최신 상태를 다시 검토하세요. 발급된 확인 정보는 폐기했고 요청은 전송하지 않았습니다.";
+  }
+  return operationsErrorMessage(error);
+}
+
+class SafetyStateChangedError extends Error {}

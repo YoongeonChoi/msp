@@ -50,18 +50,19 @@ const rendered = render(
   { container }
 );
 
-await waitFor(() => container.textContent?.includes("현재 AAL") === true);
-assert.match(container.textContent ?? "", /AAL1/);
-assert.match(container.textContent ?? "", /AAL2/);
+await waitFor(() => container.textContent?.includes("현재 인증") === true);
+assert.match(container.textContent ?? "", /기본 인증/);
+assert.match(container.textContent ?? "", /2단계 인증/);
+assert.doesNotMatch(container.textContent ?? "", /AAL[12]/);
 assert.match(container.textContent ?? "", /운영 변경 차단/);
 const codeInput = container.querySelector('[aria-label="TOTP 6자리 코드"]');
 assert.ok(codeInput instanceof dom.window.HTMLInputElement);
 fireEvent.change(codeInput, { target: { value: "123456" } });
-const verifyButton = buttonByText(dom, container, "TOTP로 AAL2 재검증");
+const verifyButton = buttonByText(dom, container, "TOTP로 2단계 인증");
 await act(async () => verifyButton.click());
 await waitFor(() => verified.length === 1);
 assert.deepEqual(verified[0], { factorId: "factor-verified", code: "123456" });
-await waitFor(() => container.textContent?.includes("운영 변경 자격 확인") === true);
+await waitFor(() => container.textContent?.includes("2단계 인증 확인") === true);
 
 await act(async () => rendered.unmount());
 queryClient.clear();
@@ -114,7 +115,7 @@ assert.doesNotMatch(enrollmentContainer.textContent ?? "", /secret=|otpauth:/i, 
 const enrollmentCode = enrollmentContainer.querySelector('[aria-label="TOTP 6자리 코드"]');
 assert.ok(enrollmentCode instanceof dom.window.HTMLInputElement);
 fireEvent.change(enrollmentCode, { target: { value: "654321" } });
-await act(async () => buttonByText(dom, enrollmentContainer, "등록 및 AAL2 검증").click());
+await act(async () => buttonByText(dom, enrollmentContainer, "등록 및 2단계 인증").click());
 await waitFor(() => enrollmentVerifications.length === 1);
 assert.deepEqual(enrollmentVerifications[0], { factorId: "factor-new", code: "654321" });
 await act(async () => enrollmentRender.unmount());

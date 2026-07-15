@@ -13,9 +13,10 @@ const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></
   url: "http://localhost:1420/?page=control"
 });
 installDom(dom);
-dom.window.confirm = () => true;
+installDialogShim(dom);
 
 const snapshot = makeOperationsSnapshot();
+snapshot.runtime_health.execution_enabled = true;
 const requested: OperationCommandRequest[] = [];
 const issued: StepUpGrantDraftRequest[] = [];
 const dataApi: OperationsDataApi = {
@@ -65,8 +66,8 @@ const rendered = render(
   { container }
 );
 
-await waitFor(() => container.textContent?.includes("안전 명령 센터") === true);
-const offlinePause = buttonByText(dom, container, "PAPER 일시정지");
+await waitFor(() => container.textContent?.includes("현재 실행 상태") === true);
+const offlinePause = buttonByText(dom, container, "모의거래 일시정지");
 assert.equal(offlinePause.disabled, true);
 await act(async () => offlinePause.click());
 assert.equal(requested.length, 0, "offline click must not create a queued mutation");
@@ -85,11 +86,13 @@ await act(async () => {
     </QueryClientProvider>
   );
 });
-await waitFor(() => buttonByText(dom, container, "PAPER 일시정지").disabled === false);
+await waitFor(() => buttonByText(dom, container, "모의거래 일시정지").disabled === false);
 assert.equal(requested.length, 0, "reconnection must not replay an offline action");
 assert.equal(issued.length, 0, "reconnection must not issue an offline step-up grant");
 
-await act(async () => buttonByText(dom, container, "PAPER 일시정지").click());
+await act(async () => buttonByText(dom, container, "모의거래 일시정지").click());
+await waitFor(() => container.querySelector("dialog[open]") !== null);
+await act(async () => buttonByText(dom, container, "요청 생성").click());
 await waitFor(() => requested.length === 1);
 assert.equal(issued.length, 1);
 assert.equal(issued[0].bound_action, "request");
@@ -112,7 +115,23 @@ function installDom(value: JSDOM): void {
   Object.defineProperty(globalThis, "navigator", { value: value.window.navigator, configurable: true });
   Object.defineProperty(globalThis, "HTMLElement", { value: value.window.HTMLElement, configurable: true });
   Object.defineProperty(globalThis, "HTMLButtonElement", { value: value.window.HTMLButtonElement, configurable: true });
+  Object.defineProperty(globalThis, "HTMLDialogElement", { value: value.window.HTMLDialogElement, configurable: true });
   Object.defineProperty(globalThis, "Event", { value: value.window.Event, configurable: true });
+}
+
+function installDialogShim(value: JSDOM): void {
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+    }
+  });
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    }
+  });
 }
 
 function buttonByText(value: JSDOM, root: HTMLElement, label: string): HTMLButtonElement {

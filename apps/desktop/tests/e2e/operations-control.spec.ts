@@ -25,6 +25,7 @@ interface MockOperationsOptions {
   readonly operationsSnapshot?: OperationsSnapshot;
   readonly unknownSnapshot?: UnknownResolutionSnapshotV2;
   readonly applyUnknownReviewProjection?: boolean;
+  readonly afterStepUpGrant?: (snapshot: OperationsSnapshot) => void;
 }
 
 test.describe("operations RPC safety boundary", () => {
@@ -34,32 +35,46 @@ test.describe("operations RPC safety boundary", () => {
   ]) {
     test(`${viewport.name} runs strict grant-bound RPCs without implying LIVE or worker completion`, async ({ page }) => {
       const captured = emptyCapturedRpc();
+      const operationsSnapshot = makeCurrentOperationsSnapshot();
+      operationsSnapshot.runtime_health.execution_enabled = true;
       await page.setViewportSize(viewport);
       await mockControlPlaneRealtime(page);
-      await mockOperationsRpc(page, captured);
+      await mockOperationsRpc(page, captured, { operationsSnapshot });
       await page.goto("/?page=control");
       await expect(page).toHaveTitle("KR Auto Trading Lab");
-      await expect(page.getByRole("heading", { name: "안전 명령 센터" })).toBeVisible();
-      await expect(page.getByText("LIVE 금지").first()).toBeVisible();
-      await expect(page.getByText("승인됨 · 적용 전")).toBeVisible();
-      await expect(page.getByText(/Worker ACK 없음/)).toBeVisible();
+      await expect(page.getByRole("heading", { name: "현재 실행 상태" })).toBeVisible();
+      await expect(page.getByText("LIVE 잠금", { exact: true })).toBeVisible();
+      await expect(page.getByText("검토 승인 · Worker 대기")).toBeVisible();
+      await expect(page.getByText(/Worker 적용 확인 없음/)).toBeVisible();
       await expect(page.getByRole("button", { name: /실주문 허용 활성화/ })).toHaveCount(0);
-      const realtimeStatus = page.getByText(/^Realtime:/);
-      await expect(realtimeStatus).toContainText("연결 · 서버 신호");
-      await expect(realtimeStatus).not.toContainText("대기");
+      const dataBasis = page.locator("dd").filter({ hasText: "실시간 신호" });
+      await expect(dataBasis).toBeVisible();
+      await expect(dataBasis).not.toContainText("확인 불가");
+      const mountedDrawers = page.locator('dialog[data-variant="drawer"]');
+      await expect(mountedDrawers).toHaveCount(0);
 
-      const pauseButton = page.getByRole("button", { name: /PAPER 일시정지/ });
+      const pauseButton = page.getByRole("button", { name: "모의거래 일시정지", exact: true });
       await expect(pauseButton).toBeEnabled();
       await pauseButton.focus();
-      const dismissedDialog = handleNextDialog(page, "dismiss");
       await pauseButton.press("Enter");
-      await dismissedDialog;
+      const pauseDialog = page.getByRole("dialog", { name: "모의거래 일시정지" });
+      await expect(pauseDialog).toBeVisible();
+      const cancelPause = pauseDialog.getByRole("button", { name: "취소" });
+      const confirmPause = pauseDialog.getByRole("button", { name: "요청 생성" });
+      await expect(cancelPause).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(confirmPause).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(cancelPause).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(pauseDialog).toBeVisible();
+      await cancelPause.press("Enter");
+      await expect(pauseDialog).toHaveCount(0);
       await expect(pauseButton).toBeFocused();
       expect(captured.grants).toHaveLength(0);
 
-      const acceptedDialog = handleNextDialog(page, "accept");
       await pauseButton.press("Enter");
-      await acceptedDialog;
+      await confirmNativeDialog(page, "모의거래 일시정지", "요청 생성");
       await expect.poll(() => captured.grants.length).toBe(1);
       await expect.poll(() => captured.commands.length).toBe(1);
       expect(rpcArgument(captured.grants[0], "request_payload")).toMatchObject({
@@ -80,14 +95,17 @@ test.describe("operations RPC safety boundary", () => {
       expect(submittedCommand.idempotency_key).toBe(requestDraft.idempotency_key);
       expect(submittedCommand.command_hash).toBe("c".repeat(64));
       await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText(
-        "Worker ACK가 오기 전에는 적용 완료가 아닙니다"
+        "Worker 적용 확인 전에는 완료가 아닙니다"
       );
 
+      await page.getByRole("button", { name: "승인 검토" }).click();
+      const approvalDrawer = page.getByRole("dialog", { name: "승인 상세" });
+      await expect(approvalDrawer).toBeVisible();
+      await expect(mountedDrawers).toHaveCount(1);
       const approveButton = page.getByRole("button", { name: "승인", exact: true });
       await expect(approveButton).toBeEnabled();
-      const approveDialog = handleNextDialog(page, "accept");
       await approveButton.press("Enter");
-      await approveDialog;
+      await confirmNativeDialog(page, "운영 요청 승인", "승인 전송");
       await expect.poll(() => captured.reviews.length).toBe(1);
       await expect.poll(() => captured.grants.length).toBe(2);
       const reviewGrantEnvelope = rpcArgument(captured.grants[1], "request_payload");
@@ -102,14 +120,23 @@ test.describe("operations RPC safety boundary", () => {
       expect(submittedReview.command_hash).toBe("d".repeat(64));
       expect(submittedReview.command_hash).not.toBe(snapshotCommandHash());
 
+      await approvalDrawer.getByRole("button", { name: "상세 닫기" }).click();
+      await expect(approvalDrawer).toHaveCount(0);
+      await expect(mountedDrawers).toHaveCount(0);
+      await page.getByRole("button", { name: "사고 확인" }).click();
+      const incidentDrawer = page.getByRole("dialog", { name: "사고 상세" });
+      await expect(incidentDrawer).toBeVisible();
       const incidentButton = page.getByRole("button", { name: "확인 접수" });
       await expect(incidentButton).toBeEnabled();
       await incidentButton.press("Enter");
+      await confirmNativeDialog(page, "사고 확인 접수", "사고 확인 접수");
       await expect.poll(() => captured.incidents.length).toBe(1);
       expect(rpcArgument(captured.incidents[0], "action_payload")).toMatchObject({
         schema_version: 1,
         action: "acknowledge"
       });
+      await incidentDrawer.getByRole("button", { name: "상세 닫기" }).click();
+      await expect(incidentDrawer).toHaveCount(0);
 
       const accessibility = await new AxeBuilder({ page }).analyze();
       const blockingViolations = accessibility.violations.filter(
@@ -117,7 +144,10 @@ test.describe("operations RPC safety boundary", () => {
       );
       expect(blockingViolations).toEqual([]);
       if (viewport.name === "mobile") {
-        await expect(page.getByRole("combobox", { name: "페이지 선택" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "주 탐색" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "계정·보안" })).toBeVisible();
+        const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+        expect(horizontalOverflow).toBeLessThanOrEqual(1);
       }
     });
   }
@@ -128,8 +158,8 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured);
     await page.goto("/?page=control");
 
-    await expect(page.getByText("Realtime: 연결 · 서버 신호 대기")).toBeVisible();
-    await expect(page.getByRole("button", { name: /PAPER 일시정지/ })).toBeDisabled();
+    await expect(page.getByText(/실시간 연결 · 마지막 신호 확인 불가/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /모의거래 재개 요청/ })).toBeDisabled();
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
   });
@@ -137,15 +167,17 @@ test.describe("operations RPC safety boundary", () => {
   test("offline actions are not transmitted or replayed after reconnect", async ({ context, page }) => {
     const captured = emptyCapturedRpc();
     await mockControlPlaneRealtime(page);
-    await mockOperationsRpc(page, captured);
+    const operationsSnapshot = makeCurrentOperationsSnapshot();
+    operationsSnapshot.runtime_health.execution_enabled = true;
+    await mockOperationsRpc(page, captured, { operationsSnapshot });
     await page.goto("/?page=control");
-    const pauseButton = page.getByRole("button", { name: /PAPER 일시정지/ });
+    const pauseButton = page.getByRole("button", { name: "모의거래 일시정지", exact: true });
     await expect(pauseButton).toBeEnabled();
 
     await context.setOffline(true);
     await page.evaluate(() => window.dispatchEvent(new Event("offline")));
     await expect(pauseButton).toBeDisabled();
-    await expect(page.locator('[role="alert"][aria-live="assertive"]')).toContainText("오프라인 작업은 전송되지 않으며");
+    await expect(page.getByRole("alert").filter({ hasText: "오프라인 작업은 전송되지 않으며" })).toBeVisible();
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
 
@@ -155,6 +187,250 @@ test.describe("operations RPC safety boundary", () => {
     await page.waitForTimeout(250);
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
+  });
+
+  test("an open confirmation is invalidated when the device goes offline", async ({ context, page }) => {
+    const captured = emptyCapturedRpc();
+    const operationsSnapshot = makeCurrentOperationsSnapshot();
+    operationsSnapshot.runtime_health.execution_enabled = true;
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured, { operationsSnapshot });
+    await page.goto("/?page=control");
+
+    await page.getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "모의거래 일시정지" });
+    await expect(dialog).toBeVisible();
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event("offline")));
+    await expect(dialog.getByRole("button", { name: "요청 생성" })).toBeDisabled();
+    await expect(dialog).toContainText(/기기 연결|최신 전체 상태/);
+    expect(captured.grants).toHaveLength(0);
+    expect(captured.commands).toHaveLength(0);
+    await dialog.getByRole("button", { name: "취소" }).click();
+
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await page.waitForTimeout(250);
+    expect(captured.grants).toHaveLength(0);
+    expect(captured.commands).toHaveLength(0);
+  });
+
+  test("a post-grant state change discards the grant and sends no command", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    const operationsSnapshot = makeCurrentOperationsSnapshot();
+    operationsSnapshot.runtime_health.execution_enabled = true;
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured, {
+      operationsSnapshot,
+      afterStepUpGrant: (snapshot) => {
+        snapshot.runtime_health.state_version += 1;
+      }
+    });
+    await page.goto("/?page=control");
+
+    await page.getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
+    await confirmNativeDialog(page, "모의거래 일시정지", "요청 생성");
+    await expect.poll(() => captured.grants.length).toBe(1);
+    await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText("상태가 변경됨");
+    expect(captured.commands).toHaveLength(0);
+  });
+
+  test("worker offline blocks commands while a current incident acknowledgement remains available", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    const operationsSnapshot = makeCurrentOperationsSnapshot();
+    operationsSnapshot.runtime_health.execution_enabled = true;
+    operationsSnapshot.runtime_health.overall_state = "offline";
+    const worker = operationsSnapshot.runtime_health.components.find((component) => component.component === "worker");
+    if (!worker) {
+      throw new Error("worker fixture is required");
+    }
+    worker.state = "offline";
+    worker.detail_code = "heartbeat_missing";
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured, { operationsSnapshot });
+    await page.goto("/?page=control");
+
+    await expect(page.getByRole("button", { name: "모의거래 일시정지", exact: true })).toBeDisabled();
+    expect(captured.grants).toHaveLength(0);
+    expect(captured.commands).toHaveLength(0);
+    await page.getByRole("button", { name: "사고 확인", exact: true }).click();
+    const incidentDrawer = page.getByRole("dialog", { name: "사고 상세" });
+    await expect(incidentDrawer).toBeVisible();
+    await expect(incidentDrawer.getByRole("button", { name: "확인 접수" })).toBeEnabled();
+    await incidentDrawer.getByRole("button", { name: "확인 접수" }).click();
+    await confirmNativeDialog(page, "사고 확인 접수", "사고 확인 접수");
+    await expect.poll(() => captured.incidents.length).toBe(1);
+    expect(captured.grants).toHaveLength(0);
+    expect(captured.commands).toHaveLength(0);
+  });
+
+  test("back and forward navigation preserve the URL, selected page, and heading focus", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+
+    await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+    await expect(page).toHaveURL(/\?page=settings$/);
+    const settingsHeading = page.getByRole("heading", { name: "계정·보안", level: 1 });
+    await expect(settingsHeading).toBeFocused();
+    await expect(page.getByRole("heading", { name: "운영 계정으로 로그인" })).toBeVisible();
+
+    await page.goBack();
+    await expect(page).toHaveURL(/\?page=control$/);
+    await expect(page.getByRole("heading", { name: "운영 제어", level: 1 })).toBeFocused();
+
+    await page.goForward();
+    await expect(page).toHaveURL(/\?page=settings$/);
+    await expect(page.getByRole("heading", { name: "계정·보안", level: 1 })).toBeFocused();
+  });
+
+  test("a settings chunk failure renders a Korean fail-closed boundary", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.route(/\/src\/pages\/SettingsPage\.tsx(?:\?.*)?$/, (route) => route.abort());
+    await page.goto("/?page=settings");
+
+    await expect(page.getByRole("alert").filter({ hasText: "계정·보안 화면을 안전하게 열지 못했습니다" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "앱 새로고침" })).toBeVisible();
+  });
+
+  test("1440 and 960 layouts keep the safety rail readable without serious accessibility violations", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+
+    for (const viewport of [
+      { width: 1440, height: 900, columns: 6 },
+      { width: 960, height: 640, columns: 3 }
+    ]) {
+      await page.setViewportSize(viewport);
+      const rail = page.getByRole("region", { name: "운영 상태 레일" }).locator("dl");
+      await expect(rail).toBeVisible();
+      const columnCount = await rail.evaluate((element) =>
+        getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length
+      );
+      expect(columnCount).toBe(viewport.columns);
+      const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      expect(horizontalOverflow).toBeLessThanOrEqual(1);
+      const accessibility = await new AxeBuilder({ page }).analyze();
+      expect(accessibility.violations.filter(
+        (violation) => violation.impact === "critical" || violation.impact === "serious"
+      )).toEqual([]);
+    }
+  });
+
+  test("reduced motion, reduced transparency, and forced colors use opaque non-animated surfaces", async ({ context, page }) => {
+    const captured = emptyCapturedRpc();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setEmulatedMedia", {
+      media: "screen",
+      features: [
+        { name: "prefers-reduced-motion", value: "reduce" },
+        { name: "prefers-reduced-transparency", value: "reduce" },
+        { name: "forced-colors", value: "active" }
+      ]
+    });
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+
+    const fallback = await page.evaluate(() => {
+      const header = document.querySelector(".app-header-glass");
+      const button = document.querySelector("nav button");
+      if (!(header instanceof HTMLElement) || !(button instanceof HTMLElement)) {
+        throw new Error("fallback fixture elements are required");
+      }
+      const headerStyle = getComputedStyle(header);
+      const buttonStyle = getComputedStyle(button);
+      return {
+        reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+        reducedTransparency: matchMedia("(prefers-reduced-transparency: reduce)").matches,
+        forcedColors: matchMedia("(forced-colors: active)").matches,
+        backdropFilter: headerStyle.backdropFilter,
+        webkitBackdropFilter: headerStyle.getPropertyValue("-webkit-backdrop-filter"),
+        transitionDuration: buttonStyle.transitionDuration
+      };
+    });
+    expect(fallback).toMatchObject({
+      reducedMotion: true,
+      reducedTransparency: true,
+      forcedColors: true
+    });
+    expect([fallback.backdropFilter, fallback.webkitBackdropFilter]).not.toContain(expect.stringMatching(/blur/i));
+    expect(Number.parseFloat(fallback.transitionDuration)).toBeLessThanOrEqual(0.00001);
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    expect(accessibility.violations.filter(
+      (violation) => violation.impact === "critical" || violation.impact === "serious"
+    )).toEqual([]);
+  });
+
+  test("a 200 percent equivalent CSS viewport has no horizontal overflow", async ({ context, page }) => {
+    const captured = emptyCapturedRpc();
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      width: 720,
+      height: 450,
+      deviceScaleFactor: 2,
+      mobile: false,
+      screenWidth: 1440,
+      screenHeight: 900
+    });
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+
+    const dimensions = await page.evaluate(() => ({
+      width: window.innerWidth,
+      dpr: window.devicePixelRatio,
+      overflow: document.documentElement.scrollWidth - window.innerWidth
+    }));
+    expect(dimensions).toMatchObject({ width: 720, dpr: 2 });
+    expect(dimensions.overflow).toBeLessThanOrEqual(1);
+  });
+
+  test("page transitions and read-only scrolling produce no observed long task over 50ms", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+    const supported = await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes("longtask"));
+    expect(supported).toBe(true);
+    await page.evaluate(() => {
+      const runtime = globalThis as typeof globalThis & {
+        __uiLongTasks?: number[];
+        __uiLongTaskObserver?: PerformanceObserver;
+      };
+      runtime.__uiLongTasks = [];
+      runtime.__uiLongTaskObserver = new PerformanceObserver((list) => {
+        runtime.__uiLongTasks?.push(...list.getEntries().map((entry) => entry.duration));
+      });
+      runtime.__uiLongTaskObserver.observe({ type: "longtask", buffered: false });
+    });
+
+    await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+    await page.getByRole("button", { name: /전체 보기/ }).click();
+    const queueDrawer = page.getByRole("dialog", { name: "지금 확인할 항목 전체" });
+    await expect(queueDrawer).toBeVisible();
+    await queueDrawer.getByRole("button", { name: "상세 닫기" }).click();
+    await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "계정·보안", level: 1 })).toBeFocused();
+    await page.goBack();
+    await expect(page.getByRole("heading", { name: "운영 제어", level: 1 })).toBeFocused();
+    await page.waitForTimeout(250);
+
+    const longTasks = await page.evaluate(() => {
+      const runtime = globalThis as typeof globalThis & {
+        __uiLongTasks?: number[];
+        __uiLongTaskObserver?: PerformanceObserver;
+      };
+      runtime.__uiLongTaskObserver?.disconnect();
+      return runtime.__uiLongTasks ?? [];
+    });
+    expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
   });
 
   test("operator submits explicit unknown evidence only through dedicated V2 RPCs", async ({ page }) => {
@@ -171,19 +447,19 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    const requestButton = page.getByRole("button", { name: "AAL2 step-up 후 조정 요청" });
+    await openReconciliationDrawer(page);
+    const requestButton = page.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
     await expect(requestButton).toBeDisabled();
     const evidenceSha = "d".repeat(64);
-    await page.getByLabel("Evidence artifact URI").fill(`urn:sha256:${evidenceSha}`);
-    await page.getByLabel("Evidence SHA-256").fill(evidenceSha);
-    await page.getByLabel("Evidence captured at").fill(new Date(Date.now() - 60_000).toISOString());
-    await page.getByLabel("확정 terminal 상태").selectOption("canceled");
-    await page.getByLabel("누락 체결 manifest (strict JSON array)").fill("[]");
+    await page.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
+    await page.getByLabel("증거 SHA-256").fill(evidenceSha);
+    await page.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
+    await page.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
+    await page.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
     await expect(requestButton).toBeEnabled();
 
-    const acceptedDialog = handleNextDialog(page, "accept");
     await requestButton.click();
-    await acceptedDialog;
+    await confirmNativeDialog(page, "회계 조정 요청 확인", "요청 전송");
     await expect.poll(() => captured.unknownGrants.length).toBe(1);
     await expect.poll(() => captured.unknownRequests.length).toBe(1);
     expect(captured.grants).toHaveLength(0);
@@ -206,9 +482,9 @@ test.describe("operations RPC safety boundary", () => {
       missing_fills: []
     });
     await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText(
-      "독립 승인과 Worker ACK 전에는 회계 조정 완료가 아닙니다"
+      "독립 승인, Worker 적용, 회계 반영 전에는 완료가 아닙니다"
     );
-    await expect(page.getByText("Worker 적용·회계 확인")).toHaveCount(0);
+    await expect(page.getByText("Worker 적용·회계 반영 확인")).toHaveCount(0);
 
     const accessibility = await new AxeBuilder({ page }).analyze();
     expect(accessibility.violations.filter(
@@ -232,6 +508,7 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured, { operationsSnapshot, unknownSnapshot });
     await page.goto("/?page=control");
 
+    await openReconciliationDrawer(page);
     await expect(page.getByText("본인이 요청한 회계 조정은 승인하거나 거절할 수 없습니다.")).toBeVisible();
     await expect(page.getByRole("button", { name: "증거 승인" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "증거 거절" })).toBeDisabled();
@@ -249,11 +526,11 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
+    await openReconciliationDrawer(page);
     const approveButton = page.getByRole("button", { name: "증거 승인" });
     await expect(approveButton).toBeEnabled();
-    const acceptedDialog = handleNextDialog(page, "accept");
     await approveButton.click();
-    await acceptedDialog;
+    await confirmNativeDialog(page, "회계 조정 승인 확인", "승인 전송");
     await expect.poll(() => captured.unknownGrants.length).toBe(1);
     await expect.poll(() => captured.unknownReviews.length).toBe(1);
     expect(captured.reviews).toHaveLength(0);
@@ -263,13 +540,13 @@ test.describe("operations RPC safety boundary", () => {
       bound_command_type: "close_unknown_execution",
       command_payload: { decision: "approve", reviewer_role: "risk_approver" }
     });
-    await expect(page.getByText("승인됨 · Worker ACK 대기")).toBeVisible();
-    const timeline = page.getByRole("list", { name: "조정 요청·승인·Worker ACK·postcondition 타임라인" });
-    await expect(timeline.getByText(/3\. Worker ACK/)).toBeVisible();
+    await expect(page.getByText("승인됨 · Worker 적용 확인 대기")).toBeVisible();
+    const timeline = page.getByRole("list", { name: "조정 요청·승인·Worker 적용·회계 반영 타임라인" });
+    await expect(timeline.getByText(/Worker 적용 확인/)).toBeVisible();
     await expect(timeline.getByText("미확인 · 대기").first()).toBeVisible();
-    await expect(page.getByText("Worker 적용·회계 확인")).toHaveCount(0);
+    await expect(page.getByText("Worker 적용·회계 반영 확인")).toHaveCount(0);
     await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText(
-      "Worker claim/application과 회계 postcondition을 계속 확인하세요"
+      "Worker 적용과 최신 회계 반영을 계속 확인하세요"
     );
   });
 
@@ -281,21 +558,20 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
+    await openReconciliationDrawer(page);
     const evidenceSha = "d".repeat(64);
-    await page.getByLabel("Evidence artifact URI").fill(`urn:sha256:${evidenceSha}`);
-    await page.getByLabel("Evidence SHA-256").fill(evidenceSha);
-    await page.getByLabel("Evidence captured at").fill(new Date(Date.now() - 60_000).toISOString());
-    await page.getByLabel("확정 terminal 상태").selectOption("canceled");
-    await page.getByLabel("누락 체결 manifest (strict JSON array)").fill("[]");
-    const requestButton = page.getByRole("button", { name: "AAL2 step-up 후 조정 요청" });
+    await page.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
+    await page.getByLabel("증거 SHA-256").fill(evidenceSha);
+    await page.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
+    await page.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
+    await page.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
+    const requestButton = page.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
     await expect(requestButton).toBeEnabled();
 
     await context.setOffline(true);
     await page.evaluate(() => window.dispatchEvent(new Event("offline")));
     await expect(requestButton).toBeDisabled();
-    await expect(page.locator('[role="alert"][aria-live="assertive"]')).toContainText(
-      "오프라인 작업은 전송되지 않으며"
-    );
+    await expect(page.getByRole("alert").filter({ hasText: "오프라인 작업은 전송되지 않으며" })).toBeVisible();
     expect(captured.unknownGrants).toHaveLength(0);
     expect(captured.unknownRequests).toHaveLength(0);
 
@@ -305,6 +581,43 @@ test.describe("operations RPC safety boundary", () => {
     await page.waitForTimeout(250);
     expect(captured.unknownGrants).toHaveLength(0);
     expect(captured.unknownRequests).toHaveLength(0);
+  });
+
+  test("session expiry closes volatile drawers and leaves no deferred mutation to replay", async ({ context, page }) => {
+    const captured = emptyCapturedRpc();
+    const operationsSnapshot = makeCurrentOperationsSnapshot();
+    if (operationsSnapshot.access.actor === null) {
+      throw new Error("fixture actor is required");
+    }
+    operationsSnapshot.access.actor.roles = ["operator"];
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured, {
+      operationsSnapshot,
+      unknownSnapshot: makeCurrentUnknownResolutionSnapshot(makeUnknownResolutionSnapshot())
+    });
+    await page.goto("/?page=control");
+
+    await openReconciliationDrawer(page);
+    const evidenceInput = page.getByLabel("증거 자료 위치");
+    await evidenceInput.fill(`urn:sha256:${"d".repeat(64)}`);
+    await expect(evidenceInput).toHaveValue(/urn:sha256:/);
+
+    await context.setOffline(true);
+    await page.evaluate(() => window.dispatchEvent(new Event("offline")));
+    operationsSnapshot.access.session_state = "expired";
+    operationsSnapshot.runtime_health.overall_state = "session_expired";
+    await context.setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+
+    await expect(page.locator('dialog[data-variant="drawer"]')).toHaveCount(0);
+    await expect(evidenceInput).toHaveCount(0);
+    expect(captured.grants).toHaveLength(0);
+    expect(captured.commands).toHaveLength(0);
+    expect(captured.unknownGrants).toHaveLength(0);
+    expect(captured.unknownRequests).toHaveLength(0);
+
+    await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "운영 계정으로 로그인" })).toBeVisible();
   });
 });
 
@@ -437,6 +750,7 @@ async function mockOperationsRpc(
       const envelope = rpcArgument(body, "request_payload");
       const commandPayload = envelope.command_payload as Record<string, unknown>;
       const actionAt = String(commandPayload.requested_at ?? commandPayload.reviewed_at);
+      options.afterStepUpGrant?.(snapshot);
       await fulfillJson(route, {
         schema_version: 1,
         step_up_grant_id: captured.grants.length === 1
@@ -676,17 +990,16 @@ function snapshotCommandHash(): string {
   return "b".repeat(64);
 }
 
-function handleNextDialog(page: Page, action: "accept" | "dismiss"): Promise<void> {
-  return new Promise((resolve) => {
-    page.once("dialog", async (dialog) => {
-      if (action === "accept") {
-        await dialog.accept();
-      } else {
-        await dialog.dismiss();
-      }
-      resolve();
-    });
-  });
+async function confirmNativeDialog(page: Page, title: string, confirmLabel: string): Promise<void> {
+  const dialog = page.getByRole("dialog", { name: title });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: confirmLabel, exact: true }).press("Enter");
+  await expect(dialog).toHaveCount(0);
+}
+
+async function openReconciliationDrawer(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "대사 상세" }).first().click();
+  await expect(page.getByRole("dialog", { name: "수동 대사 상세" })).toBeVisible();
 }
 
 async function fulfillPreflight(route: Route): Promise<void> {

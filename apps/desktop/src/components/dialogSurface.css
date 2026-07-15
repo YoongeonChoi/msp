@@ -1,0 +1,330 @@
+.dialog-surface {
+  width: min(34rem, calc(100vw - 2rem));
+  max-width: none;
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: #191f28;
+}
+
+.dialog-surface::backdrop {
+  background: rgb(25 31 40 / 40%);
+}
+
+.dialog-surface[data-variant="drawer"] {
+  width: min(30rem, 100vw);
+  height: 100dvh;
+  max-height: none;
+  margin: 0 0 0 auto;
+}
+
+.dialog-surface__panel {
+  display: flex;
+  max-height: calc(100dvh - 2rem);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 20px;
+  background:
+    linear-gradient(rgb(255 255 255 / 94%), rgb(255 255 255 / 94%)) padding-box,
+    linear-gradient(145deg, rgb(255 255 255 / 95%), rgb(217 224 234 / 78%)) border-box;
+  box-shadow: 0 24px 64px rgb(25 31 40 / 18%);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  animation: dialog-surface-enter 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.dialog-surface[data-variant="drawer"] .dialog-surface__panel {
+  height: 100%;
+  max-height: none;
+  border-radius: 20px 0 0 20px;
+  animation-name: dialog-drawer-enter;
+}
+
+/* Only the top-most overlay keeps glass blur when a confirm opens in a drawer. */
+.dialog-surface__panel:has(> .dialog-surface[open]) {
+  background: #fff;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.dialog-surface__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 24px 16px;
+}
+
+.dialog-surface__header--drawer {
+  border-bottom: 1px solid #d9e0ea;
+}
+
+.dialog-surface__heading-copy {
+  min-width: 0;
+}
+
+.dialog-surface__title {
+  margin: 0;
+  color: #191f28;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dialog-surface__description {
+  margin-top: 6px;
+  color: #6b7684;
+  font-size: 15px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.dialog-surface__body {
+  min-height: 0;
+  padding: 8px 24px 24px;
+  overflow: auto;
+  color: #191f28;
+  font-size: 15px;
+  line-height: 1.6;
+  overscroll-behavior: contain;
+}
+
+.dialog-surface__body--drawer {
+  flex: 1 1 auto;
+  padding-top: 20px;
+}
+
+.dialog-surface__error {
+  margin: 0 24px 16px;
+  padding: 12px 14px;
+  border: 1px solid #f1b9b4;
+  border-radius: 12px;
+  background: #fff2f0;
+  color: #b42318;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.dialog-surface__footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 24px 24px;
+}
+
+.dialog-surface__footer--drawer {
+  border-top: 1px solid #d9e0ea;
+  padding-top: 16px;
+}
+
+.dialog-surface__button,
+.dialog-surface__icon-button {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    opacity 160ms ease;
+}
+
+.dialog-surface__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  border-radius: 12px;
+}
+
+.dialog-surface__icon-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border-color: #d9e0ea;
+  border-radius: 12px;
+  background: #fff;
+  color: #191f28;
+}
+
+.dialog-surface__button:active:not(:disabled),
+.dialog-surface__icon-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.dialog-surface__button:focus-visible,
+.dialog-surface__icon-button:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.dialog-surface__button:disabled,
+.dialog-surface__icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.dialog-surface__button--neutral {
+  border-color: #d9e0ea;
+  background: #fff;
+  color: #191f28;
+}
+
+.dialog-surface__button--neutral:hover:not(:disabled),
+.dialog-surface__icon-button:hover:not(:disabled) {
+  background: #f4f7fb;
+}
+
+.dialog-surface__button--primary {
+  background: #2563eb;
+  color: #fff;
+}
+
+.dialog-surface__button--primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.dialog-surface__button--danger {
+  background: #b42318;
+  color: #fff;
+}
+
+.dialog-surface__button--danger:hover:not(:disabled) {
+  background: #912018;
+}
+
+@keyframes dialog-surface-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes dialog-drawer-enter {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 719px) {
+  .dialog-surface,
+  .dialog-surface[data-variant="drawer"] {
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    margin: 0;
+  }
+
+  .dialog-surface__panel,
+  .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
+    height: 100%;
+    max-height: none;
+    border-radius: 0;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+
+  .dialog-surface__header {
+    padding: 20px 16px 14px;
+  }
+
+  .dialog-surface__body {
+    flex: 1 1 auto;
+    padding: 8px 16px 20px;
+  }
+
+  .dialog-surface__body--drawer {
+    padding-top: 16px;
+  }
+
+  .dialog-surface__footer {
+    padding: 14px 16px max(16px, env(safe-area-inset-bottom));
+  }
+
+  .dialog-surface__button {
+    flex: 1 1 0;
+  }
+}
+
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .dialog-surface__panel {
+    background: #fff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .dialog-surface::backdrop {
+    background: rgb(25 31 40 / 60%);
+  }
+
+  .dialog-surface__panel,
+  .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
+    background: #fff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog-surface__panel,
+  .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
+    animation: none;
+  }
+
+  .dialog-surface__button,
+  .dialog-surface__icon-button {
+    transition: none;
+  }
+
+  .dialog-surface__button:active:not(:disabled),
+  .dialog-surface__icon-button:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .dialog-surface::backdrop {
+    background: Canvas;
+    opacity: 0.75;
+  }
+
+  .dialog-surface__panel,
+  .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    forced-color-adjust: auto;
+  }
+
+  .dialog-surface__button,
+  .dialog-surface__icon-button {
+    border-color: ButtonText;
+  }
+}

@@ -11,7 +11,10 @@ const appSource = readFileSync(resolve(sourceRoot, "App.tsx"), "utf8");
 const navigationSource = readFileSync(resolve(sourceRoot, "lib/navigation.ts"), "utf8");
 const authSource = readFileSync(resolve(sourceRoot, "lib/authData.ts"), "utf8");
 const operationsSource = readFileSync(resolve(sourceRoot, "lib/operationsData.ts"), "utf8");
-const realtimeSource = readFileSync(resolve(sourceRoot, "lib/controlPlaneRealtime.tsx"), "utf8");
+const snapshotProviderSource = readFileSync(
+  resolve(sourceRoot, "lib/operationsSnapshotContext.tsx"),
+  "utf8"
+);
 const sharedSourceRoot = resolve(testDir, "../../../packages/shared/src");
 const sharedSource = collectSourceFiles(sharedSourceRoot).map((path) => readFileSync(path, "utf8")).join("\n");
 
@@ -26,15 +29,22 @@ assert.match(appSource, /SettingsPage/);
 assert.match(navigationSource, /export type PageKey = "control" \| "settings"/);
 assert.equal(existsSync(resolve(sourceRoot, "lib/rows.ts")), false, "silent-default row parser must be removed");
 assert.equal(existsSync(resolve(sourceRoot, "lib/supabaseData.ts")), false, "legacy public adapter must be removed");
-assert.match(authSource, /fetchOperationsSnapshot/);
+assert.doesNotMatch(authSource, /fetchOperationsSnapshot/);
+assert.match(appSource, /OperationsSnapshotProvider/);
+assert.doesNotMatch(appSource, /ControlPlaneRealtimeProvider/);
+assert.match(snapshotProviderSource, /refetchInterval:\s*pollIntervalMs/);
+assert.match(snapshotProviderSource, /queryKey:\s*operationsSnapshotQueryKey,\s*exact:\s*true/);
 assert.doesNotMatch(sharedSource, /\.default\s*\(/, "strict shared contracts must not repair missing fields");
 assert.match(operationsSource, /\.schema\("api"\)\.rpc\(/);
 assert.doesNotMatch(operationsSource, /\.schema\("public"\)|\.from\s*\(/);
-assert.match(realtimeSource, /schema: "api", table: "control_plane_signal"/);
-assert.match(realtimeSource, /event: "UPDATE"/);
-assert.match(realtimeSource, /z\.literal\("singleton"\)/);
-assert.match(realtimeSource, /z\.literal\("snapshot_invalidated"\)/);
-assert.doesNotMatch(realtimeSource, /schema: "public"|bot_settings|worker_heartbeats|decision_snapshots/);
+assert.match(snapshotProviderSource, /schema: "api", table: "control_plane_signal"/);
+assert.match(snapshotProviderSource, /event: "UPDATE"/);
+assert.match(snapshotProviderSource, /z\.literal\("singleton"\)/);
+assert.match(snapshotProviderSource, /z\.literal\("snapshot_invalidated"\)/);
+assert.doesNotMatch(
+  snapshotProviderSource,
+  /schema: "public"|bot_settings|worker_heartbeats|decision_snapshots/
+);
 
 console.log("desktop API-only cutover guard passed");
 

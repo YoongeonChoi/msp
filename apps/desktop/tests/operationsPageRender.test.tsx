@@ -6,8 +6,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { AppLayout } from "../src/components/Layout";
 import { isCommandPostconditionVerified } from "../src/components/operations/SafetyCommandCenter";
+import { OperationsStatusRailView } from "../src/components/operations/OperationsStatusRail";
 import { operationsSnapshotQueryKey } from "../src/lib/operationsData";
 import type { OperationsDataApi } from "../src/lib/operationsData";
+import type { OperationCommandReceipt, OperationsSnapshot } from "../src/lib/operationsContracts";
 import {
   canMutateIncidentOperations,
   canMutateOperations,
@@ -16,17 +18,46 @@ import {
 } from "../src/pages/OperationsPage";
 import { makeOperationsSnapshot } from "./operationsFixture";
 
-function renderOperations({ offline = false, stale = false, selfReview = false, aal1 = false } = {}) {
+interface RenderOptions {
+  readonly offline?: boolean;
+  readonly stale?: boolean;
+  readonly aal1?: boolean;
+  readonly running?: boolean;
+  readonly workerOffline?: boolean;
+  readonly commandState?: OperationCommandReceipt["state"];
+  readonly appliedWithoutPostcondition?: boolean;
+}
+
+function renderOperations({
+  offline = false,
+  stale = false,
+  aal1 = false,
+  running = false,
+  workerOffline = false,
+  commandState,
+  appliedWithoutPostcondition = false
+}: RenderOptions = {}) {
   const snapshot = makeOperationsSnapshot();
+  snapshot.runtime_health.execution_enabled = running;
   if (stale) {
     snapshot.runtime_health.overall_state = "stale";
   }
-  if (selfReview && snapshot.access.actor) {
-    snapshot.access.actor.actor_id = snapshot.pending_reviews[0].requested_by.actor_id;
+  if (workerOffline) {
+    snapshot.runtime_health.overall_state = "offline";
+    snapshot.runtime_health.worker_heartbeat_at = null;
+    const worker = snapshot.runtime_health.components.find((component) => component.component === "worker");
+    assert.ok(worker);
+    worker.state = "offline";
   }
   if (aal1) {
     snapshot.access.assurance_level = "aal1";
     snapshot.access.active_step_up_grants = [];
+  }
+  if (commandState !== undefined) {
+    snapshot.commands[0].state = commandState;
+  }
+  if (appliedWithoutPostcondition) {
+    makeCommandAppliedWithoutPostcondition(snapshot);
   }
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(operationsSnapshotQueryKey, snapshot);
@@ -65,47 +96,125 @@ function renderOperations({ offline = false, stale = false, selfReview = false, 
 
 const freshDocument = renderOperations();
 const freshText = freshDocument.body.textContent ?? "";
+const appHeader = freshDocument.querySelector('header[aria-label="앱 헤더"]');
+assert.ok(appHeader, "the unified AppHeader is rendered");
+const primaryNavigation = appHeader.querySelector('nav[aria-label="주 탐색"]');
+assert.ok(primaryNavigation);
+assert.deepEqual(
+  Array.from(primaryNavigation.querySelectorAll("button"), (button) => button.textContent?.trim()),
+  ["운영 제어", "계정·보안"],
+  "the AppHeader exposes only the two approved top-level destinations"
+);
 assert.ok(freshDocument.querySelector('[aria-label="운영 상태 레일"]'));
-assert.match(freshText, /LIVE 금지/);
-assert.match(freshText, /CONTRACT TEST \/ 계약 테스트/);
-assert.match(freshText, /안전 명령 센터/);
-assert.match(freshText, /승인은 제어면 영수증이며 Worker 적용 완료를 의미하지 않습니다/);
-assert.match(freshText, /승인됨 · 적용 전/);
-assert.match(freshText, /Worker ACK 없음/);
-assert.match(freshText, /수동 대사 케이스/);
-assert.match(freshText, /브로커 API를 직접 호출하거나 주문 상태를 임의 보정하지 않습니다/);
+assert.equal((freshText.match(/LIVE 잠금/g) ?? []).length, 1, "LIVE lock is shown once in the shared header rail");
+assert.doesNotMatch(freshText, /LIVE 금지/, "legacy repeated LIVE warnings are removed from page content");
+assert.match(freshText, /현재 실행 상태/);
+assert.match(freshText, /지금 확인할 항목/);
+assert.match(freshText, /검토 승인 · Worker 대기/);
+assert.match(freshText, /Worker 적용 확인 없음/);
+assert.match(freshText, /최근 기록/);
 assert.doesNotMatch(freshText, /실주문 허용 활성화/);
 assert.doesNotMatch(freshText, /샌드박스|broker_sandbox/);
 
-const pauseButton = buttonByText(freshDocument, "PAPER 일시정지");
-assert.equal(pauseButton.disabled, false, "fresh online operator may request a paper pause");
-const contractTestButton = buttonByText(freshDocument, "CONTRACT TEST 시작");
+const stoppedPrimaryButtons = commandButtonsByPriority(freshDocument, "primary");
+assert.equal(stoppedPrimaryButtons.length, 1, "stopped runtime exposes exactly one primary CTA");
+assert.equal(stoppedPrimaryButtons[0].textContent?.trim(), "모의거래 재개 요청");
+assert.equal(stoppedPrimaryButtons[0].disabled, false, "a qualified stopped runtime may request a paper resume");
+
+const runningDocument = renderOperations({ running: true });
+const runningPrimaryButtons = commandButtonsByPriority(runningDocument, "primary");
+assert.equal(runningPrimaryButtons.length, 1, "running runtime exposes exactly one primary CTA");
+assert.equal(runningPrimaryButtons[0].textContent?.trim(), "모의거래 일시정지");
+assert.equal(runningPrimaryButtons[0].disabled, false, "fresh online operator may request a paper pause");
+
+const otherOperations = detailsBySummary(freshDocument, "기타 운영 작업");
+const secondaryCommandButtons = Array.from(
+  otherOperations.querySelectorAll<HTMLButtonElement>('button[data-command-priority="secondary"]')
+);
+assert.equal(secondaryCommandButtons.length, 3, "other operations contains the three non-primary command paths");
+assert.deepEqual(
+  secondaryCommandButtons.map((button) => commandButtonLabel(button)),
+  ["모의거래 전략 적용", "위험 정책 적용", "계약 테스트 시작"]
+);
+
+const allCommandLabels = new Set([
+  ...commandButtonLabels(freshDocument),
+  ...commandButtonLabels(runningDocument)
+]);
+assert.deepEqual(
+  [...allCommandLabels].sort(),
+  [
+    "계약 테스트 시작",
+    "모의거래 일시정지",
+    "모의거래 재개 요청",
+    "모의거래 전략 적용",
+    "비상 정지 요청",
+    "위험 정책 적용"
+  ].sort(),
+  "the stopped and running states keep all six operation commands reachable through primary, danger, or other paths"
+);
+
+const contractTestButton = buttonByText(freshDocument, "계약 테스트 시작");
 assert.equal(contractTestButton.disabled, true, "contract test action is disabled outside contract_test");
-const approveButton = buttonByText(freshDocument, "승인");
-assert.equal(approveButton.disabled, false, "independent approver may review a request");
+
+const commandTimeline = freshDocument.querySelector('ol[aria-label="명령 진행 4단계"]');
+assert.ok(commandTimeline, "the most urgent command has an explicit four-step progress view");
+assert.equal(commandTimeline.children.length, 4);
+assert.deepEqual(
+  Array.from(commandTimeline.children, (step) => step.querySelector("span")?.textContent?.trim()),
+  [
+    "1. 요청 접수",
+    "2. 독립 검토자 승인",
+    "3. Worker 작업 인수 / 적용",
+    "4. 최신 실행 상태 확인"
+  ]
+);
+
+const appliedDocument = renderOperations({ appliedWithoutPostcondition: true });
+const appliedText = appliedDocument.body.textContent ?? "";
+assert.match(appliedText, /Worker 적용 보고 · 확인 중/);
+assert.match(appliedText, /완료로 표시하지 않습니다/);
+assert.doesNotMatch(appliedText, /최신 실행 상태 확인 완료/);
+
+const terminalLabels = new Map<OperationCommandReceipt["state"], string>([
+  ["rejected", "검토 거절"],
+  ["failed", "적용 실패"],
+  ["expired", "요청 만료"],
+  ["canceled", "요청 취소"]
+]);
+for (const [state, label] of terminalLabels) {
+  const terminalDocument = renderOperations({ commandState: state });
+  assert.match(
+    terminalDocument.body.textContent ?? "",
+    new RegExp(label),
+    `${state} is rendered with its own terminal label`
+  );
+}
+assert.equal(new Set(terminalLabels.values()).size, terminalLabels.size, "terminal command labels are not collapsed");
 
 const staleDocument = renderOperations({ stale: true });
 assert.ok(staleDocument.querySelector('[role="alert"]'));
 assert.match(staleDocument.body.textContent ?? "", /데이터 지연 — 거래 제어 변경 차단/);
 assert.equal(buttonByText(staleDocument, "비상 정지 요청").disabled, true);
-assert.equal(buttonByText(staleDocument, "승인").disabled, true);
-assert.equal(
-  buttonByText(staleDocument, "확인 접수").disabled,
-  false,
-  "incident acknowledgement remains available through a current healthy control plane"
-);
 
 const offlineDocument = renderOperations({ offline: true });
 assert.match(offlineDocument.body.textContent ?? "", /네트워크 오프라인 — 거래 제어 변경 차단/);
-assert.equal(buttonByText(offlineDocument, "PAPER 일시정지").disabled, true);
+assert.equal(commandButtonsByPriority(offlineDocument, "primary")[0].disabled, true);
 
-const selfReviewDocument = renderOperations({ selfReview: true });
-assert.match(selfReviewDocument.body.textContent ?? "", /본인 요청은 승인하거나 거절할 수 없습니다/);
-assert.equal(buttonByText(selfReviewDocument, "승인").disabled, true);
+const workerOfflineDocument = renderOperations({ workerOffline: true });
+const workerOfflineRailDocument = renderStatusRail(workerOfflineSnapshot());
+const tradingCommandStatus = definitionItemByTerm(workerOfflineRailDocument, "거래 명령");
+assert.match(tradingCommandStatus.textContent ?? "", /차단/);
+assert.match(tradingCommandStatus.textContent ?? "", /서비스 오프라인|Worker 상태 확인 필요|Worker 상태 신호 확인 필요/);
+assert.equal(commandButtonsByPriority(workerOfflineDocument, "primary")[0].disabled, true);
+assert.match(
+  workerOfflineDocument.body.textContent ?? "",
+  /거래 명령은 차단되지만 조건을 충족한 사고 확인 작업은 계속할 수 있습니다/,
+  "the visible attention queue explains the narrower Worker-offline command block"
+);
 
 const aal1Document = renderOperations({ aal1: true });
 assert.equal(buttonByText(aal1Document, "비상 정지 요청").disabled, true);
-assert.equal(buttonByText(aal1Document, "확인 접수").disabled, true, "AAL1 must block every operation mutation");
 
 const postconditionSnapshot = makeOperationsSnapshot();
 postconditionSnapshot.commands[0].state = "applied";
@@ -229,4 +338,79 @@ function buttonByText(document: Document, label: string): HTMLButtonElement {
     buttons.find((candidate) => candidate.textContent?.includes(label));
   assert.ok(button, `Button not found: ${label}`);
   return button as HTMLButtonElement;
+}
+
+function commandButtonsByPriority(
+  document: Document,
+  priority: "primary" | "danger" | "secondary"
+): HTMLButtonElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLButtonElement>(`button[data-command-priority="${priority}"]`)
+  );
+}
+
+function commandButtonLabels(document: Document): string[] {
+  return Array.from(
+    document.querySelectorAll<HTMLButtonElement>("button[data-command-priority]")
+  ).map((button) => commandButtonLabel(button));
+}
+
+function commandButtonLabel(button: HTMLButtonElement): string {
+  return button.firstElementChild?.textContent?.trim() ?? button.textContent?.trim() ?? "";
+}
+
+function detailsBySummary(document: Document, label: string): HTMLDetailsElement {
+  const details = Array.from(document.querySelectorAll("details")).find(
+    (candidate) => candidate.querySelector("summary")?.textContent?.includes(label)
+  );
+  assert.ok(details, `Details not found: ${label}`);
+  return details;
+}
+
+function definitionItemByTerm(document: Document, label: string): HTMLElement {
+  const term = Array.from(document.querySelectorAll("dt")).find(
+    (candidate) => candidate.textContent?.trim() === label
+  );
+  assert.ok(term, `Definition term not found: ${label}`);
+  assert.ok(term.parentElement);
+  return term.parentElement;
+}
+
+function makeCommandAppliedWithoutPostcondition(snapshot: OperationsSnapshot): void {
+  const command = snapshot.commands[0];
+  command.state = "applied";
+  command.worker_ack = {
+    schema_version: 1,
+    ack_id: "34343434-3434-4434-8434-343434343434",
+    command_id: command.command_id,
+    worker_instance_id: "35353535-3535-4535-8535-353535353535",
+    worker_release_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    claimed_at: "2099-07-13T23:52:00.000Z",
+    state: "applied",
+    applied_at: "2099-07-13T23:53:00.000Z",
+    post_state_version: snapshot.runtime_health.state_version + 1,
+    failure_code: null
+  };
+}
+
+function workerOfflineSnapshot(): OperationsSnapshot {
+  const snapshot = makeOperationsSnapshot();
+  snapshot.runtime_health.overall_state = "offline";
+  snapshot.runtime_health.worker_heartbeat_at = null;
+  const worker = snapshot.runtime_health.components.find((component) => component.component === "worker");
+  assert.ok(worker);
+  worker.state = "offline";
+  return snapshot;
+}
+
+function renderStatusRail(snapshot: OperationsSnapshot): Document {
+  const markup = renderToStaticMarkup(
+    <OperationsStatusRailView
+      snapshot={snapshot}
+      isOnline={true}
+      errorMessage={null}
+      clientRealtime={null}
+    />
+  );
+  return new JSDOM(markup).window.document;
 }

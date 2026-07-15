@@ -1,43 +1,48 @@
-import { Activity, Ban, Clock3, FileWarning, Radio, ShieldCheck } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import type { OperationsSnapshot, RuntimeHealth } from "../../lib/operationsContracts";
 import {
-  operationsDataApi,
-  operationsErrorMessage,
-  operationsSnapshotQueryKey
-} from "../../lib/operationsData";
-import type { OperationsDataApi } from "../../lib/operationsData";
-import { formatKst } from "../../lib/formatters";
-import { useOnlineStatus } from "../../lib/useOnlineStatus";
-import { Pill } from "../ui";
-import type { Tone } from "../ui";
-import { runtimeStateLabel } from "./StaleDataBoundary";
-import { isCommandPostconditionVerified } from "./SafetyCommandCenter";
-import { useControlPlaneRealtimeHealth } from "../../lib/controlPlaneRealtime";
+  Activity,
+  AlertTriangle,
+  Clock3,
+  Radio,
+  ShieldCheck
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+
 import type { ClientRealtimeHealth } from "../../lib/controlPlaneRealtime";
+import type { OperationsSnapshot } from "../../lib/operationsContracts";
+import { operationsErrorMessage } from "../../lib/operationsData";
+import {
+  buildSafetyRailModel,
+  type SafetyRailItemKey,
+  type SafetyRailTone
+} from "../../lib/operationsStatusModel";
+import { useOptionalOperationsSnapshot } from "../../lib/operationsSnapshotContext";
 
-export function OperationsStatusRail({
-  dataApi = operationsDataApi,
-  onlineOverride
-}: {
-  readonly dataApi?: OperationsDataApi;
-  readonly onlineOverride?: boolean;
-}) {
-  const isOnline = useOnlineStatus(onlineOverride);
-  const clientRealtime = useControlPlaneRealtimeHealth();
-  const snapshot = useQuery({
-    queryKey: operationsSnapshotQueryKey,
-    queryFn: dataApi.fetchSnapshot,
-    retry: false,
-    refetchInterval: 15_000
-  });
+const itemIcons: Record<SafetyRailItemKey, LucideIcon> = {
+  live: ShieldCheck,
+  execution: Activity,
+  overall: Activity,
+  worker: Radio,
+  snapshot: Clock3,
+  command: ShieldCheck
+};
 
+const toneClasses: Record<SafetyRailTone, { readonly icon: string; readonly value: string }> = {
+  neutral: { icon: "bg-slate-100 text-mutedStrong", value: "text-ink" },
+  safe: { icon: "bg-successSoft text-success", value: "text-success" },
+  warning: { icon: "bg-warningSoft text-warning", value: "text-warning" },
+  danger: { icon: "bg-dangerSoft text-danger", value: "text-danger" },
+  info: { icon: "bg-primarySoft text-primary", value: "text-primary" }
+};
+
+/** Uses the application-wide snapshot provider; no query or polling is owned here. */
+export function OperationsStatusRail() {
+  const source = useOptionalOperationsSnapshot();
   return (
     <OperationsStatusRailView
-      snapshot={snapshot.data ?? null}
-      isOnline={isOnline}
-      errorMessage={snapshot.error ? operationsErrorMessage(snapshot.error) : null}
-      clientRealtime={clientRealtime}
+      snapshot={source?.snapshot ?? null}
+      isOnline={source?.isOnline ?? true}
+      errorMessage={source?.error ? operationsErrorMessage(source.error) : null}
+      clientRealtime={source?.realtime ?? null}
     />
   );
 }
@@ -53,77 +58,52 @@ export function OperationsStatusRailView({
   readonly errorMessage: string | null;
   readonly clientRealtime?: ClientRealtimeHealth | null;
 }) {
-  const health = snapshot?.runtime_health ?? null;
-  const displayState: RuntimeHealth["overall_state"] = !isOnline ? "offline" : health?.overall_state ?? "contract_error";
-  const openIncidents = snapshot?.incidents.filter((incident) => incident.status !== "resolved").length;
-  const pendingAck = snapshot?.commands.filter((command) =>
-    command.state === "approved" ||
-    command.state === "claimed" ||
-    (command.state === "applied" && !isCommandPostconditionVerified(command, snapshot))
-  ).length;
-  const realtimeConnected = clientRealtime === null
-    ? health?.realtime_connected ?? false
-    : clientRealtime.connected && clientRealtime.connectedAt !== null;
-  const realtimeLastSignalAt = clientRealtime === null
-    ? health?.realtime_last_seen_at ?? null
-    : clientRealtime.lastSignalAt;
+  const model = buildSafetyRailModel(snapshot, isOnline, clientRealtime);
+  const criticalMessages = errorMessage === null
+    ? model.criticalMessages
+    : [...model.criticalMessages, `운영 데이터 확인 실패: ${errorMessage}`];
 
   return (
-    <header className="border-b border-line bg-white" aria-label="운영 상태 레일">
-      <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-        <Pill tone="danger">
-          <Ban size={13} aria-hidden="true" />
-          LIVE 금지
-        </Pill>
-        <Pill tone={healthTone(displayState)}>
-          <Activity size={13} aria-hidden="true" />
-          운영 상태: {runtimeStateLabel(displayState)}
-        </Pill>
-        <Pill tone={health?.environment === "contract_test" ? "info" : "safe"}>
-          <ShieldCheck size={13} aria-hidden="true" />
-          환경: {health ? environmentLabel(health.environment) : "확인 불가"}
-        </Pill>
-        <Pill tone={snapshot?.qualification?.status === "qualified" ? "safe" : "warning"}>
-          G1/G2: {snapshot?.qualification?.status === "qualified" ? "통과" : "미충족"}
-        </Pill>
-        <Pill tone={pendingAck && pendingAck > 0 ? "warning" : "neutral"}>
-          <Radio size={13} aria-hidden="true" />
-          Worker ACK 대기: {pendingAck ?? "-"}
-        </Pill>
-        <Pill tone={realtimeConnected ? "safe" : "danger"}>
-          <Radio size={13} aria-hidden="true" />
-          Realtime: {realtimeConnected
-            ? `연결 · 서버 신호 ${realtimeLastSignalAt === null ? "대기" : formatKst(realtimeLastSignalAt)}`
-            : "단절 · 15초 polling 조회 전용"}
-        </Pill>
-        <Pill tone={openIncidents && openIncidents > 0 ? "danger" : "neutral"}>
-          <FileWarning size={13} aria-hidden="true" />
-          미해결 사고: {openIncidents ?? "-"}
-        </Pill>
-        <Pill tone="neutral">
-          <Clock3 size={13} aria-hidden="true" />
-          기준 시각: {health ? formatKst(health.as_of) : "-"}
-        </Pill>
+    <section className="border-t border-line/80" aria-label="운영 상태 레일">
+      <div className="mx-auto max-w-[1440px] px-4 py-3 md:px-6" aria-live="polite">
+        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line lg:grid-cols-3 xl:grid-cols-6">
+          {model.items.map((item) => {
+            const Icon = itemIcons[item.key];
+            const tone = toneClasses[item.tone];
+            return (
+              <div key={item.key} className="min-w-0 bg-surface px-3 py-3">
+                <dt className="flex items-center gap-2 text-xs font-medium text-mutedStrong">
+                  <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full ${tone.icon}`}>
+                    <Icon size={14} aria-hidden={true} />
+                  </span>
+                  {item.label}
+                </dt>
+                <dd className="mt-2 min-w-0 pl-9">
+                  <span className={`block truncate text-sm font-bold ${tone.value}`} title={item.value}>
+                    {item.value}
+                  </span>
+                  <span className="mt-0.5 block [overflow-wrap:anywhere] text-xs text-mutedStrong" title={item.detail}>
+                    {item.detail}
+                  </span>
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
       </div>
-      {errorMessage ? (
-        <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800" role="alert">
-          {errorMessage}
+
+      {criticalMessages.length > 0 ? (
+        <div
+          className="border-t border-danger/25 bg-dangerSoft px-4 py-2.5 text-sm font-medium text-danger md:px-6"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div className="mx-auto flex max-w-[1392px] items-start gap-2">
+            <AlertTriangle className="mt-0.5 shrink-0" size={17} aria-hidden={true} />
+            <span>중요 경고 · {criticalMessages.join(" · ")}</span>
+          </div>
         </div>
       ) : null}
-    </header>
+    </section>
   );
-}
-
-function environmentLabel(environment: RuntimeHealth["environment"]): string {
-  return environment === "paper" ? "PAPER" : "CONTRACT TEST / 계약 테스트";
-}
-
-function healthTone(state: RuntimeHealth["overall_state"]): Tone {
-  if (state === "fresh") {
-    return "safe";
-  }
-  if (state === "degraded" || state === "stale") {
-    return "warning";
-  }
-  return "danger";
 }

@@ -15,7 +15,7 @@ export interface NavItem {
 
 export const navItems: readonly NavItem[] = [
   { key: "control", label: "운영 제어", icon: SlidersHorizontal },
-  { key: "settings", label: "접근 및 로그인", icon: Settings }
+  { key: "settings", label: "계정·보안", icon: Settings }
 ];
 
 export function parsePageKey(value: string): PageKey | null {

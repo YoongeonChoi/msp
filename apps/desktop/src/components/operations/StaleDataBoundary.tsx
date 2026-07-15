@@ -35,7 +35,7 @@ export function StaleDataBoundary({
           </div>
           <p className="mt-1">
             마지막 검증 시각 {formatKst(health.as_of)} · 오프라인 작업은 전송되지 않으며 재연결 후 자동 실행되는 큐를 만들지 않습니다.
-            온라인이고 제어면 snapshot이 최신이면 사고 접수·해결만 별도 권한으로 허용될 수 있습니다.
+            온라인이고 제어면 상태가 최신이면 사고 접수·해결만 별도 권한으로 허용될 수 있습니다.
           </p>
         </div>
       ) : null}

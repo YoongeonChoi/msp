@@ -22,6 +22,7 @@ const ids = [
 let idIndex = 0;
 const idFactory = () => ids[idIndex++] ?? "64646464-6464-4464-8464-646464646464";
 const now = new Date("2099-07-14T00:00:00.000Z");
+snapshot.access.actor.actor_id = "abcdefab-cdef-4abc-8def-abcdefabcdef";
 
 const requestDraft = buildAccessChangeRequestDraft({
   snapshot,
@@ -53,7 +54,7 @@ assert.equal(request.step_up_grant_expires_at, requestGrant.step_up_grant_expire
 assert.equal(
   buildAccessChangeRequestDraft({
     snapshot,
-    subjectUserId: snapshot.access.actor.actor_id,
+    subjectUserId: snapshot.access.actor.actor_id.toUpperCase(),
     requestedRole: "viewer",
     changeType: "grant",
     evidenceId: "72727272-7272-4272-8272-727272727272",
@@ -61,7 +62,7 @@ assert.equal(
     idFactory
   }),
   null,
-  "platform admins cannot request their own role changes"
+  "platform admins cannot request their own role changes through UUID casing"
 );
 
 const receipt: AccessChangeReceipt = {
@@ -92,11 +93,19 @@ const review = attachAccessStepUpGrantToReviewDraft(reviewDraft, reviewGrant);
 assert.equal(review.review_id, reviewDraft.review_id);
 assert.equal(review.change_hash, reviewGrant.change_hash);
 
-receipt.requested_by.actor_id = snapshot.access.actor.actor_id;
+receipt.requested_by.actor_id = snapshot.access.actor.actor_id.toUpperCase();
 assert.equal(
   buildAccessChangeReviewDraft({ snapshot, receipt, decision: "approve", now, idFactory }),
   null,
-  "the access-change maker cannot act as checker"
+  "the access-change maker cannot act as checker through UUID casing"
+);
+
+receipt.requested_by.actor_id = "74747474-7474-4474-8474-747474747474";
+receipt.subject_user_id = snapshot.access.actor.actor_id.toUpperCase();
+assert.equal(
+  buildAccessChangeReviewDraft({ snapshot, receipt, decision: "approve", now, idFactory }),
+  null,
+  "the access-change subject cannot act as checker through UUID casing"
 );
 
 console.log("access change immutable draft and maker-checker builders passed");

@@ -20,7 +20,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></
   url: "http://localhost:1420/?page=control"
 });
 installDom(dom);
-dom.window.confirm = () => true;
+installDialogShim(dom);
 
 const operationsSnapshot = makeOperationsSnapshot();
 const unknownSnapshot = makeRequestedUnknownResolutionSnapshot();
@@ -110,9 +110,13 @@ const rendered = render(
   { container }
 );
 
-await waitFor(() => container.textContent?.includes("risk_approver 독립 검토") === true);
-assert.match(container.textContent ?? "", /요청 digest, evidence SHA, terminal 상태와 모든 누락 체결을 검토/);
+await waitFor(() => container.textContent?.includes("지금 확인할 항목") === true);
+await act(async () => buttonByText(dom, container, "독립 검토").click());
+await waitFor(() => container.textContent?.includes("위험 승인자 독립 검토") === true);
+assert.match(container.textContent ?? "", /요청 요약 해시, 증거 SHA, 최종 주문 상태와 모든 누락 체결을 검토/);
 await act(async () => buttonByText(dom, container, "증거 거절").click());
+await waitFor(() => container.querySelector("dialog[open]") !== null);
+await act(async () => buttonByText(dom, container, "거절 전송").click());
 await waitFor(() => reviews.length === 1);
 assert.equal(unknownGrants.length, 1);
 assert.equal(unknownGrants[0].bound_action, "review");
@@ -121,7 +125,7 @@ assert.equal(reviews[0].reason_code, "evidence_incomplete");
 assert.equal(reviews[0].expected_receipt_revision, unknownSnapshot.cases[0].request?.receipt_revision);
 assert.equal(reviews[0].expected_break_revision, unknownSnapshot.cases[0].break_revision);
 assert.deepEqual(genericCalls, [], "review must not cross the generic command API");
-await waitFor(() => container.textContent?.includes("Worker claim/application과 회계 postcondition을 계속 확인하세요") === true);
+await waitFor(() => container.textContent?.includes("Worker 적용과 최신 회계 반영을 계속 확인하세요") === true);
 
 await act(async () => rendered.unmount());
 queryClient.clear();
@@ -136,7 +140,19 @@ function installDom(value: JSDOM): void {
   Object.defineProperty(globalThis, "navigator", { value: value.window.navigator, configurable: true });
   Object.defineProperty(globalThis, "HTMLElement", { value: value.window.HTMLElement, configurable: true });
   Object.defineProperty(globalThis, "HTMLButtonElement", { value: value.window.HTMLButtonElement, configurable: true });
+  Object.defineProperty(globalThis, "HTMLDialogElement", { value: value.window.HTMLDialogElement, configurable: true });
   Object.defineProperty(globalThis, "Event", { value: value.window.Event, configurable: true });
+}
+
+function installDialogShim(value: JSDOM): void {
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.setAttribute("open", ""); }
+  });
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.removeAttribute("open"); }
+  });
 }
 
 function buttonByText(value: JSDOM, root: HTMLElement, label: string): HTMLButtonElement {

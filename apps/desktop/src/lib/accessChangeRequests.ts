@@ -21,6 +21,10 @@ import type {
 import { secureOperationId } from "./operationRequests";
 import type { OperationIdFactory } from "./operationRequests";
 
+export function sameUuidIdentity(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
 export function buildAccessChangeRequestDraft({
   snapshot,
   subjectUserId,
@@ -43,7 +47,7 @@ export function buildAccessChangeRequestDraft({
     snapshot.access.assurance_level !== "aal2" ||
     actor === null ||
     !actor.roles.includes("platform_admin") ||
-    actor.actor_id === subjectUserId
+    sameUuidIdentity(actor.actor_id, subjectUserId)
   ) {
     return null;
   }
@@ -83,8 +87,8 @@ export function buildAccessChangeReviewDraft({
     actor === null ||
     !actor.roles.includes("platform_admin") ||
     receipt.state !== "requested" ||
-    receipt.requested_by.actor_id === actor.actor_id ||
-    receipt.subject_user_id === actor.actor_id ||
+    sameUuidIdentity(receipt.requested_by.actor_id, actor.actor_id) ||
+    sameUuidIdentity(receipt.subject_user_id, actor.actor_id) ||
     Date.parse(receipt.expires_at) <= now.getTime()
   ) {
     return null;

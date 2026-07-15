@@ -23,7 +23,7 @@ const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></
   url: "http://localhost:1420/?page=control"
 });
 installDom(dom);
-dom.window.confirm = () => true;
+installDialogShim(dom);
 
 const operationsSnapshot = makeOperationsSnapshot();
 const unknownSnapshot = makeUnknownResolutionSnapshot();
@@ -120,31 +120,35 @@ const rendered = render(
   { container }
 );
 
+await waitFor(() => container.textContent?.includes("지금 확인할 항목") === true);
+await act(async () => buttonByText(dom, container, "대사 상세").click());
 await waitFor(() => container.textContent?.includes("paper-order-42424242") === true);
-assert.ok(container.querySelector('ol[aria-label="조정 요청·승인·Worker ACK·postcondition 타임라인"]'));
-assert.match(container.textContent ?? "", /Worker ACK와 회계 postcondition 전에는 완료로 표시하지 않습니다/);
+assert.ok(container.querySelector('ol[aria-label="조정 요청·승인·Worker 적용·회계 반영 타임라인"]'));
+assert.match(container.textContent ?? "", /Worker 적용 확인과 회계 반영 결과가 모두 확인되기 전에는 완료로 표시하지 않습니다/);
 assert.match(container.textContent ?? "", /누락 체결이 없더라도 \[\]를 입력해야 하며 자동 기본값은 없습니다/);
 
-const requestButton = buttonByText(dom, container, "AAL2 step-up 후 조정 요청");
+const requestButton = buttonByText(dom, container, "추가 본인 확인 후 조정 요청");
 assert.equal(requestButton.disabled, true, "empty evidence and missing-fill fields must never silently default");
-fireEvent.change(inputByLabel(dom, container, "Evidence artifact URI"), {
+fireEvent.change(inputByLabel(dom, container, "증거 자료 위치"), {
   target: { value: `urn:sha256:${"d".repeat(64)}` }
 });
-fireEvent.change(inputByLabel(dom, container, "Evidence SHA-256"), {
+fireEvent.change(inputByLabel(dom, container, "증거 SHA-256"), {
   target: { value: "d".repeat(64) }
 });
-fireEvent.change(inputByLabel(dom, container, "Evidence captured at"), {
+fireEvent.change(inputByLabel(dom, container, "증거 수집 시각"), {
   target: { value: "2099-07-13T23:59:00.000Z" }
 });
-fireEvent.change(inputByLabel(dom, container, "확정 terminal 상태"), {
+fireEvent.change(inputByLabel(dom, container, "확정된 최종 주문 상태"), {
   target: { value: "canceled" }
 });
-fireEvent.change(inputByLabel(dom, container, "누락 체결 manifest (strict JSON array)"), {
+fireEvent.change(inputByLabel(dom, container, "누락 체결 목록 (엄격한 JSON 배열)"), {
   target: { value: "[]" }
 });
 assert.equal(requestButton.disabled, false, "explicit [] plus complete evidence enables the operator request");
 
 await act(async () => requestButton.click());
+await waitFor(() => container.querySelector("dialog[open]") !== null);
+await act(async () => buttonByText(dom, container, "요청 전송").click());
 await waitFor(() => unknownRequests.length === 1);
 assert.equal(unknownGrants.length, 1);
 assert.equal(unknownGrants[0].bound_action, "request");
@@ -155,7 +159,7 @@ assert.equal(unknownRequests[0].expected_break_revision, unknownSnapshot.cases[0
 assert.equal(genericGrants.length, 0, "unknown workflow must not use the generic command grant RPC");
 assert.equal(genericRequests.length, 0, "unknown workflow must not use the generic command request RPC");
 assert.equal(unknownReviews.length, 0);
-await waitFor(() => container.textContent?.includes("독립 승인과 Worker ACK 전에는 회계 조정 완료가 아닙니다") === true);
+await waitFor(() => container.textContent?.includes("독립 승인, Worker 적용, 회계 반영 전에는 완료가 아닙니다") === true);
 
 await act(async () => {
   rendered.rerender(
@@ -169,7 +173,7 @@ await act(async () => {
     </QueryClientProvider>
   );
 });
-await waitFor(() => buttonByText(dom, container, "AAL2 step-up 후 조정 요청").disabled === true);
+await waitFor(() => buttonByText(dom, container, "추가 본인 확인 후 조정 요청").disabled === true);
 assert.equal(unknownRequests.length, 1, "offline rerender must not queue or replay an unknown-resolution request");
 
 await act(async () => rendered.unmount());
@@ -185,7 +189,19 @@ function installDom(value: JSDOM): void {
   Object.defineProperty(globalThis, "navigator", { value: value.window.navigator, configurable: true });
   Object.defineProperty(globalThis, "HTMLElement", { value: value.window.HTMLElement, configurable: true });
   Object.defineProperty(globalThis, "HTMLButtonElement", { value: value.window.HTMLButtonElement, configurable: true });
+  Object.defineProperty(globalThis, "HTMLDialogElement", { value: value.window.HTMLDialogElement, configurable: true });
   Object.defineProperty(globalThis, "Event", { value: value.window.Event, configurable: true });
+}
+
+function installDialogShim(value: JSDOM): void {
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.setAttribute("open", ""); }
+  });
+  Object.defineProperty(value.window.HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.removeAttribute("open"); }
+  });
 }
 
 function buttonByText(value: JSDOM, root: HTMLElement, label: string): HTMLButtonElement {

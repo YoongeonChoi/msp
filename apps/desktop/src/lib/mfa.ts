@@ -109,7 +109,7 @@ export function createMfaDataApi(client: MfaClient): MfaDataApi {
         client.auth.mfa.getAuthenticatorAssuranceLevel()
       ]);
       if (factorResult.error || factorResult.data === null || assuranceResult.error || assuranceResult.data === null) {
-        throw new MfaOperationError("status", "TOTP 등록 상태와 AAL을 확인하지 못했습니다.");
+        throw new MfaOperationError("status", "TOTP 등록 상태와 2단계 인증을 확인하지 못했습니다.");
       }
 
       const verifiedTotpFactors = factorResult.data.totp

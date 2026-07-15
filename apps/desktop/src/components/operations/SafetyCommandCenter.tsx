@@ -1,12 +1,31 @@
-import { CirclePause, CirclePlay, CircleStop, FlaskConical, ShieldAlert } from "lucide-react";
+import { Suspense, lazy, useRef, useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  Circle,
+  CirclePause,
+  CirclePlay,
+  CircleStop,
+  Clock3,
+  FlaskConical,
+  Minus,
+  ShieldAlert,
+  XCircle
+} from "lucide-react";
 import type {
   OperationCommandReceipt,
   OperationsSnapshot
 } from "../../lib/operationsContracts";
 import type { OperationCommandType } from "../../lib/operationRequests";
+import type { ConfirmAction } from "../../lib/uiState";
 import { formatKst } from "../../lib/formatters";
+import { commandConfirmationGuard } from "../../lib/operationGuards";
 import { KeyValue, Panel, Pill, SectionTitle, pageButtonClass } from "../ui";
 import type { Tone } from "../ui";
+
+const ConfirmDialog = lazy(async () => ({
+  default: (await import("../DialogSurface")).ConfirmDialog
+}));
 
 interface CommandAction {
   readonly type: OperationCommandType;
@@ -21,31 +40,31 @@ const commandActions: readonly CommandAction[] = [
   {
     type: "emergency_stop",
     label: "비상 정지 요청",
-    description: "Worker가 claim하고 적용 결과를 ACK할 때까지 완료로 보지 않습니다.",
+    description: "Worker 적용 뒤 최신 실행 상태에서 주문 생성 중지를 확인해야 완료됩니다.",
     tone: "danger",
     requiresQualification: false,
     contractTestOnly: false
   },
   {
     type: "pause_paper",
-    label: "PAPER 일시정지",
-    description: "현재 PAPER 실행을 안전 정지하도록 요청합니다.",
+    label: "모의거래 일시정지",
+    description: "현재 모의거래의 주문 생성을 안전하게 멈추도록 요청합니다.",
     tone: "warning",
     requiresQualification: false,
     contractTestOnly: false
   },
   {
     type: "resume_paper",
-    label: "PAPER 재개 요청",
-    description: "유효한 G1/G2 자격 묶음으로 재개 승인을 요청합니다.",
+    label: "모의거래 재개 요청",
+    description: "유효한 운영 준비 확인과 독립 검토를 거쳐 주문 생성을 재개합니다.",
     tone: "safe",
     requiresQualification: true,
     contractTestOnly: false
   },
   {
     type: "activate_paper_strategy",
-    label: "PAPER 전략 적용",
-    description: "자격 묶음에 고정된 전략 버전만 요청합니다.",
+    label: "모의거래 전략 적용",
+    description: "운영 준비 확인에 고정된 전략 버전만 적용 요청합니다.",
     tone: "neutral",
     requiresQualification: true,
     contractTestOnly: false
@@ -53,20 +72,26 @@ const commandActions: readonly CommandAction[] = [
   {
     type: "apply_risk_policy_version",
     label: "위험 정책 적용",
-    description: "자격 묶음에 고정된 위험 정책 버전만 요청합니다.",
+    description: "운영 준비 확인에 고정된 위험 정책 버전만 적용 요청합니다.",
     tone: "neutral",
     requiresQualification: true,
     contractTestOnly: false
   },
   {
     type: "start_contract_test",
-    label: "CONTRACT TEST 시작",
+    label: "계약 테스트 시작",
     description: "외부 주문 전송 없이 계약 경계를 검증합니다.",
     tone: "info",
     requiresQualification: true,
     contractTestOnly: true
   }
 ];
+
+const otherOperationTypes = [
+  "activate_paper_strategy",
+  "apply_risk_policy_version",
+  "start_contract_test"
+] as const satisfies readonly OperationCommandType[];
 
 export function SafetyCommandCenter({
   snapshot,
@@ -77,100 +102,294 @@ export function SafetyCommandCenter({
   readonly snapshot: OperationsSnapshot;
   readonly mutationsAllowed: boolean;
   readonly pending: boolean;
-  readonly onRequest: (type: OperationCommandType) => void;
+  readonly onRequest: (type: OperationCommandType, openGuard: string) => void | Promise<void>;
 }) {
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction<OperationCommandType> | null>(null);
+  const confirmGuardRef = useRef<string | null>(null);
   const canRequest = snapshot.access.permissions.includes("request_command");
-  const qualificationReady = snapshot.qualification?.status === "qualified";
+  const qualificationReady = isQualificationReady(snapshot);
+  const paperRunning =
+    snapshot.runtime_health.environment === "paper" && snapshot.runtime_health.execution_enabled;
+  const primaryAction = actionFor(paperRunning ? "pause_paper" : "resume_paper");
+  const selectedAction = confirmAction === null ? null : actionFor(confirmAction.kind);
+  const selectedBlockReason = selectedAction
+    ? commandBlockReason(selectedAction, snapshot, { mutationsAllowed, pending, canRequest, qualificationReady })
+    : null;
+  const urgentCommand = selectUrgentCommand(snapshot.commands, snapshot);
+
+  const openConfirm = (action: CommandAction) => {
+    confirmGuardRef.current = commandConfirmationGuard(snapshot, action.type);
+    setConfirmAction({
+      kind: action.type,
+      label: action.label,
+      tone: confirmTone(action)
+    });
+  };
+
+  const closeConfirm = () => {
+    confirmGuardRef.current = null;
+    setConfirmAction(null);
+  };
 
   return (
-    <Panel>
-      <SectionTitle
-        title="안전 명령 센터"
-        detail={
-          <div className="flex flex-wrap gap-2">
-            <Pill tone="danger">LIVE 금지</Pill>
-            <Pill tone={mutationsAllowed ? "safe" : "warning"}>
-              {mutationsAllowed ? "변경 가능" : "읽기 전용"}
+    <div className="space-y-5">
+      <Panel className="overflow-hidden !p-0">
+        <div className="p-5 sm:p-6">
+        <SectionTitle
+          title="현재 실행 상태"
+          detail={
+            <Pill tone={runtimeTone(snapshot)}>
+              {runtimeStateLabel(snapshot)}
             </Pill>
-          </div>
-        }
-      />
-      <p className="text-sm text-muted">
-        모든 명령은 제어면 영수증과 Worker ACK를 분리합니다. 승인만으로 실제 적용을 표시하지 않습니다.
-      </p>
-      <p className="mt-1 text-xs text-muted">
-        비상 정지를 제외한 요청은 확인 직후 동일한 메모리 내 draft에 5분·1회용 step-up grant를 결합해 전송하며,
-        재시도나 오프라인 대기열에 저장하지 않습니다.
-      </p>
-
-      <div className="mt-4 rounded-md border border-line p-3">
-        <KeyValue
-          label="G1/G2 자격"
-          value={<Pill tone={qualificationReady ? "safe" : "danger"}>{qualificationReady ? "유효" : "차단"}</Pill>}
+          }
         />
-        <KeyValue label="release SHA" value={snapshot.qualification?.release_sha.slice(0, 12) ?? "-"} />
-        <KeyValue label="ledger checkpoint" value={snapshot.qualification?.ledger_checkpoint ?? "-"} />
-        <KeyValue label="유효 기한" value={formatKst(snapshot.qualification?.valid_until)} />
-      </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {commandActions.map((action) => {
-          const qualificationBlocked = action.requiresQualification && !qualificationReady;
-          const environmentBlocked = action.contractTestOnly && snapshot.runtime_health.environment !== "contract_test";
-          const emergencyAuthorized =
-            action.type === "emergency_stop" &&
-            snapshot.access.assurance_level === "aal2" &&
-            snapshot.access.actor?.roles.includes("operator") === true;
-          const commandAuthorized = action.type === "emergency_stop" ? emergencyAuthorized : true;
-          const disabled =
-            pending || !mutationsAllowed || !canRequest || !commandAuthorized || qualificationBlocked || environmentBlocked;
-          return (
-            <button
-              key={action.type}
-              type="button"
-              className={`${pageButtonClass(action.tone)} min-h-24 flex-col items-start text-left`}
-              disabled={disabled}
-              aria-describedby={`${action.type}-description`}
-              onClick={() => {
-                if (window.confirm(`${action.label}을 생성할까요? 적용 완료는 Worker ACK로 별도 확인합니다.`)) {
-                  onRequest(action.type);
-                }
-              }}
-            >
-              <span className="flex items-center gap-2">
-                <CommandIcon type={action.type} />
-                {action.label}
-              </span>
-              <span id={`${action.type}-description`} className="text-xs font-normal">
-                {environmentBlocked
-                  ? "계약 테스트 환경에서만 사용 가능"
-                  : !commandAuthorized
-                    ? "최근 AAL2 operator 세션 필요"
-                    : action.description}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {!canRequest ? (
-        <p className="mt-3 text-sm text-amber-800">현재 역할에는 request_command 권한이 없습니다.</p>
-      ) : null}
-
-      <div className="mt-6">
-        <SectionTitle title="명령 처리 추적" detail={<span className="text-xs text-muted">최근 {snapshot.commands.length}건</span>} />
-        {snapshot.commands.length === 0 ? (
-          <p className="rounded-md border border-dashed border-line p-4 text-sm text-muted">표시할 명령 영수증이 없습니다.</p>
-        ) : (
-          <div className="space-y-3">
-            {snapshot.commands.slice(0, 6).map((command) => (
-              <CommandTimeline key={command.command_id} command={command} snapshot={snapshot} />
-            ))}
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-w-2xl">
+            <p className="text-base leading-6 text-muted">
+              마지막 갱신 {formatKst(snapshot.runtime_health.as_of)} · 명령 접수만으로 완료되지 않으며,
+              Worker 적용과 최신 실행 상태를 함께 확인합니다.
+            </p>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              비상 정지를 제외한 요청은 5분·1회용 작업 전용 2단계 인증과 독립 검토를 거칩니다.
+              오프라인 요청은 저장하거나 자동 재전송하지 않습니다.
+            </p>
           </div>
-        )}
+
+          <CommandButton
+            action={primaryAction}
+            snapshot={snapshot}
+            mutationsAllowed={mutationsAllowed}
+            pending={pending}
+            canRequest={canRequest}
+            qualificationReady={qualificationReady}
+            priority="primary"
+            onClick={() => openConfirm(primaryAction)}
+          />
+        </div>
+
+        <div className="mt-5 grid gap-x-6 rounded-xl border border-line bg-slate-50/80 px-4 sm:grid-cols-2">
+          <KeyValue
+            label="운영 준비 확인"
+            value={<Pill tone={qualificationReady ? "safe" : "warning"}>{qualificationReady ? "유효" : "차단"}</Pill>}
+          />
+          <KeyValue label="Worker 배포 버전" value={snapshot.qualification?.release_sha.slice(0, 12) ?? "확인 불가"} />
+          <KeyValue label="운영 준비 회계 기준점" value={snapshot.qualification?.ledger_checkpoint ?? "확인 불가"} />
+          <KeyValue label="운영 준비 만료" value={formatKst(snapshot.qualification?.valid_until)} />
+        </div>
+
+        {!canRequest ? (
+          <p className="mt-3 text-sm text-amber-800" role="status">
+            현재 역할은 일반 운영 명령을 요청할 수 없습니다. 비상 정지는 최근 2단계 인증을 완료한 운영 담당자만
+            별도 조건으로 요청할 수 있습니다.
+          </p>
+        ) : null}
       </div>
-    </Panel>
+
+      <div className="border-t border-line bg-red-50/55 p-5 sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-2 font-semibold text-red-900">
+              <ShieldAlert size={18} aria-hidden="true" />
+              비상 제어
+            </div>
+            <p className="mt-1 text-base leading-6 text-red-800">
+              중대한 이상이 확인된 경우에만 사용합니다. 접수 뒤에도 최신 실행 상태에서 주문 생성 중지를 확인하세요.
+            </p>
+          </div>
+          <CommandButton
+            action={actionFor("emergency_stop")}
+            snapshot={snapshot}
+            mutationsAllowed={mutationsAllowed}
+            pending={pending}
+            canRequest={canRequest}
+            qualificationReady={qualificationReady}
+            priority="danger"
+            onClick={() => openConfirm(actionFor("emergency_stop"))}
+          />
+        </div>
+      </div>
+
+      <details className="group border-t border-line">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 font-semibold text-ink marker:content-none sm:px-6">
+          <span>기타 운영 작업</span>
+          <ChevronDown
+            size={18}
+            className="text-muted transition-transform duration-state group-open:rotate-180 motion-reduce:transition-none"
+            aria-hidden="true"
+          />
+        </summary>
+        <div className="grid gap-3 border-t border-line bg-slate-50/60 p-5 sm:grid-cols-2 sm:p-6 xl:grid-cols-3">
+          {otherOperationTypes.map((type) => {
+            const action = actionFor(type);
+            return (
+              <CommandButton
+                key={type}
+                action={action}
+                snapshot={snapshot}
+                mutationsAllowed={mutationsAllowed}
+                pending={pending}
+                canRequest={canRequest}
+                qualificationReady={qualificationReady}
+                priority="secondary"
+                onClick={() => openConfirm(action)}
+              />
+            );
+          })}
+        </div>
+        </details>
+      </Panel>
+
+      <Panel>
+        <SectionTitle
+          title="진행 중인 명령"
+          detail={
+            <span className="text-xs text-muted">
+              {snapshot.commands.length === 0 ? "대기 중인 명령 없음" : `총 ${snapshot.commands.length}건 중 우선 확인 1건`}
+            </span>
+          }
+        />
+        {urgentCommand === null ? (
+          <p className="rounded-xl border border-dashed border-line p-4 text-sm text-muted">
+            표시할 명령 영수증이 없습니다.
+          </p>
+        ) : (
+          <CommandTimeline command={urgentCommand} snapshot={snapshot} />
+        )}
+      </Panel>
+
+      {confirmAction !== null ? (
+        <Suspense fallback={null}>
+          <ConfirmDialog
+            open
+            title={confirmAction.label}
+            description="확인하는 순간의 최신 상태로 요청 조건을 다시 검사합니다. 접수만으로 적용 완료가 되지 않습니다."
+            confirmLabel="요청 생성"
+            pendingLabel="요청 확인 중"
+            tone={confirmAction.tone}
+            pending={pending}
+            confirmDisabled={selectedBlockReason !== null}
+            error={selectedBlockReason}
+            onCancel={closeConfirm}
+            onConfirm={async () => {
+              if (selectedBlockReason !== null) {
+                return;
+              }
+              const operationType = confirmAction.kind;
+              const openGuard = confirmGuardRef.current;
+              if (openGuard === null) {
+                return;
+              }
+              confirmGuardRef.current = null;
+              setConfirmAction(null);
+              await onRequest(operationType, openGuard);
+            }}
+          />
+        </Suspense>
+      ) : null}
+    </div>
   );
+}
+
+function CommandButton({
+  action,
+  snapshot,
+  mutationsAllowed,
+  pending,
+  canRequest,
+  qualificationReady,
+  priority,
+  onClick
+}: {
+  readonly action: CommandAction;
+  readonly snapshot: OperationsSnapshot;
+  readonly mutationsAllowed: boolean;
+  readonly pending: boolean;
+  readonly canRequest: boolean;
+  readonly qualificationReady: boolean;
+  readonly priority: "primary" | "danger" | "secondary";
+  readonly onClick: () => void;
+}) {
+  const blockReason = commandBlockReason(action, snapshot, {
+    mutationsAllowed,
+    pending,
+    canRequest,
+    qualificationReady
+  });
+  const descriptionId = `${action.type}-description`;
+  const primaryClass =
+    priority === "primary"
+      ? "min-h-11 shrink-0 !border-blue-600 !bg-blue-600 !text-white shadow-sm hover:!bg-blue-700 focus:ring-blue-500"
+      : priority === "danger"
+        ? "min-h-11 shrink-0 !border-red-700 !bg-red-700 !text-white hover:!bg-red-800 focus:ring-red-500"
+        : "min-h-24 w-full flex-col items-start text-left";
+
+  return (
+    <div className={priority === "secondary" ? "min-w-0" : "sm:max-w-sm"}>
+      <button
+        type="button"
+        className={`${pageButtonClass(priority === "primary" ? "neutral" : action.tone)} ${primaryClass} transition-transform duration-press ease-product active:scale-[0.985] motion-reduce:transform-none motion-reduce:transition-none`}
+        data-command-priority={priority}
+        disabled={blockReason !== null}
+        aria-describedby={descriptionId}
+        onClick={onClick}
+      >
+        <span className="flex items-center gap-2">
+          <CommandIcon type={action.type} />
+          {action.label}
+        </span>
+        {priority === "secondary" ? (
+          <span className="text-xs font-normal leading-5">{action.description}</span>
+        ) : null}
+      </button>
+      <p
+        id={descriptionId}
+        className={`mt-2 text-xs leading-5 ${blockReason === null ? "text-muted" : "font-medium text-amber-800"}`}
+      >
+        {blockReason ?? action.description}
+      </p>
+    </div>
+  );
+}
+
+function commandBlockReason(
+  action: CommandAction,
+  snapshot: OperationsSnapshot,
+  state: {
+    readonly mutationsAllowed: boolean;
+    readonly pending: boolean;
+    readonly canRequest: boolean;
+    readonly qualificationReady: boolean;
+  }
+): string | null {
+  if (state.pending) {
+    return "다른 운영 요청을 확인하고 있습니다. 처리가 끝난 뒤 다시 시도하세요.";
+  }
+  if (!state.mutationsAllowed) {
+    return "기기 연결과 최신 전체 상태·실시간 신호·Worker 상태를 확인해야 요청할 수 있습니다.";
+  }
+  if (action.type !== "emergency_stop" && !state.canRequest) {
+    return "현재 역할에는 운영 명령 요청 권한이 없습니다.";
+  }
+  if (
+    action.type === "emergency_stop" &&
+    (snapshot.access.assurance_level !== "aal2" || snapshot.access.actor?.roles.includes("operator") !== true)
+  ) {
+    return "최근 2단계 인증을 완료한 운영자 역할이 필요합니다.";
+  }
+  if (
+    (action.type === "pause_paper" || action.type === "resume_paper") &&
+    snapshot.runtime_health.environment !== "paper"
+  ) {
+    return "현재 환경이 모의거래가 아니므로 이 작업을 요청할 수 없습니다.";
+  }
+  if (action.requiresQualification && !state.qualificationReady) {
+    return "유효한 운영 준비 확인과 고정된 배포 버전·회계 기준점이 필요합니다.";
+  }
+  if (action.contractTestOnly && snapshot.runtime_health.environment !== "contract_test") {
+    return "계약 테스트 환경에서만 시작할 수 있습니다.";
+  }
+  return null;
 }
 
 function CommandTimeline({
@@ -180,52 +399,171 @@ function CommandTimeline({
   readonly command: OperationCommandReceipt;
   readonly snapshot: OperationsSnapshot;
 }) {
-  const approved = ["approved", "claimed", "applied"].includes(command.state);
-  const claimed = command.worker_ack !== null;
-  const applied = isCommandPostconditionVerified(command, snapshot);
-  const workerReportedApplied = command.worker_ack?.state === "applied";
-  const terminalFailure = ["rejected", "failed", "expired", "canceled"].includes(command.state);
-  const steps = [
-    { label: "요청됨", detail: "제어면 접수", done: true },
-    { label: "승인됨", detail: "제어면 영수증", done: approved },
-    { label: "Claim됨", detail: "Worker ACK", done: claimed },
-    { label: "적용됨", detail: "Worker post-state", done: applied }
-  ] as const;
+  const reviewDone = ["approved", "claimed", "applied", "failed"].includes(command.state);
+  const workerApplied = command.worker_ack?.state === "applied";
+  const postconditionVerified = isCommandPostconditionVerified(command, snapshot);
+  const terminalState = terminalCommandState(command.state);
+  const terminal = ["rejected", "failed", "expired", "canceled"].includes(command.state);
+  const steps: readonly ProgressStep[] = [
+    { label: "요청 접수", detail: "제어면 영수증", state: "complete" },
+    command.command_type === "emergency_stop"
+      ? { label: "독립 검토자 승인", detail: "비상 정지는 검토 없음", state: "not_applicable" }
+      : {
+          label: "독립 검토자 승인",
+          detail: reviewDone ? "승인 영수증 확인" : "검토 대기",
+          state: command.state === "rejected" ? "blocked" : reviewDone ? "complete" : terminal ? "pending" : "current"
+        },
+    {
+      label: "Worker 작업 인수 / 적용",
+      detail: workerApplied ? "적용 보고 수신" : command.worker_ack === null ? "Worker 확인 대기" : "Worker 처리 중",
+      state:
+        command.state === "failed"
+          ? "failed"
+          : workerApplied
+            ? "complete"
+            : command.worker_ack !== null
+              ? "current"
+              : "pending"
+    },
+    {
+      label: "최신 실행 상태 확인",
+      detail: postconditionVerified ? "결과 조건 확인" : "최신 상태 대기",
+      state: postconditionVerified ? "complete" : workerApplied ? "current" : "pending"
+    }
+  ];
 
   return (
-    <article className="rounded-md border border-line p-3" aria-label={`${commandLabel(command.command_type)} 처리 상태`}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
+    <article className="rounded-xl border border-line bg-white p-4" aria-label={`${commandLabel(command.command_type)} 처리 상태`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-semibold text-ink">{commandLabel(command.command_type)}</p>
-          <p className="text-xs text-muted">요청 {formatKst(command.requested_at)} · 만료 {formatKst(command.expires_at)}</p>
+          <p className="mt-1 text-xs text-muted">
+            요청 {formatKst(command.requested_at)} · 만료 {formatKst(command.expires_at)}
+          </p>
         </div>
-        <Pill tone={terminalFailure ? "danger" : applied ? "safe" : "warning"}>
-          {commandStateLabel(command.state, applied)}
+        <Pill tone={commandStateTone(command, postconditionVerified)}>
+          {commandStateLabel(command.state, postconditionVerified)}
         </Pill>
       </div>
-      <ol className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {steps.map((step) => (
-          <li
-            key={step.label}
-            className={`rounded border px-2 py-2 text-xs ${
-              step.done ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-line bg-slate-50 text-muted"
-            }`}
-          >
-            <span className="block font-semibold">{step.done ? "✓ " : "○ "}{step.label}</span>
-            <span>{step.detail}</span>
-          </li>
+
+      <ol className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="명령 진행 4단계">
+        {steps.map((step, index) => (
+          <ProgressStepItem key={step.label} step={step} index={index + 1} />
         ))}
       </ol>
-      <p className="mt-2 text-xs text-muted">
-        제어면 receipt r{command.control_plane_receipt.revision} · Worker ACK {command.worker_ack?.state ?? "없음"}
+
+      <p className="mt-3 break-words text-xs text-muted">
+        제어면 영수증 r{command.control_plane_receipt.revision} · Worker 적용 확인 {workerAckLabel(command)}
       </p>
-      {workerReportedApplied && !applied ? (
-        <p className="mt-1 text-xs text-amber-800">
-          Worker applied ACK는 수신했지만 fresh runtime state_version에서 postcondition을 아직 확인하지 못했습니다.
+      {command.worker_ack?.state === "applied" && !postconditionVerified ? (
+        <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-amber-800" role="status">
+          <Clock3 className="mt-0.5 shrink-0" size={14} aria-hidden="true" />
+          Worker 적용 보고는 수신했지만 최신 실행 상태에서 결과를 아직 확인하지 못했습니다. 완료로 표시하지 않습니다.
+        </p>
+      ) : null}
+      {terminalState ? (
+        <p className={`mt-2 text-xs leading-5 ${terminalState.className}`} role="status">
+          {terminalState.message}
         </p>
       ) : null}
     </article>
   );
+}
+
+type ProgressState = "complete" | "current" | "pending" | "blocked" | "failed" | "not_applicable";
+
+interface ProgressStep {
+  readonly label: string;
+  readonly detail: string;
+  readonly state: ProgressState;
+}
+
+function ProgressStepItem({ step, index }: { readonly step: ProgressStep; readonly index: number }) {
+  const style = progressStepStyle(step.state);
+  return (
+    <li className={`rounded-lg border px-3 py-3 text-xs ${style.className}`} aria-current={step.state === "current" ? "step" : undefined}>
+      <span className="flex items-center gap-2 font-semibold">
+        <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full border" aria-hidden="true">
+          <ProgressIcon state={step.state} />
+        </span>
+        {index}. {step.label}
+      </span>
+      <span className="mt-1 block pl-7 leading-5">{style.stateLabel} · {step.detail}</span>
+    </li>
+  );
+}
+
+function ProgressIcon({ state }: { readonly state: ProgressState }) {
+  if (state === "complete") {
+    return <Check size={12} strokeWidth={3} />;
+  }
+  if (state === "current") {
+    return <Clock3 size={11} />;
+  }
+  if (state === "blocked" || state === "failed") {
+    return <XCircle size={12} />;
+  }
+  if (state === "not_applicable") {
+    return <Minus size={12} />;
+  }
+  return <Circle size={8} />;
+}
+
+function progressStepStyle(state: ProgressState): { readonly className: string; readonly stateLabel: string } {
+  if (state === "complete") {
+    return { className: "border-emerald-200 bg-emerald-50 text-emerald-900", stateLabel: "확인됨" };
+  }
+  if (state === "current") {
+    return { className: "border-blue-200 bg-blue-50 text-blue-900", stateLabel: "확인 중" };
+  }
+  if (state === "failed") {
+    return { className: "border-red-200 bg-red-50 text-red-900", stateLabel: "중단됨" };
+  }
+  if (state === "blocked") {
+    return { className: "border-amber-200 bg-amber-50 text-amber-900", stateLabel: "거절됨" };
+  }
+  if (state === "not_applicable") {
+    return { className: "border-dashed border-line bg-slate-50 text-mutedStrong", stateLabel: "해당 없음" };
+  }
+  return { className: "border-line bg-slate-50 text-mutedStrong", stateLabel: "대기" };
+}
+
+function selectUrgentCommand(
+  commands: readonly OperationCommandReceipt[],
+  snapshot: OperationsSnapshot
+): OperationCommandReceipt | null {
+  if (commands.length === 0) {
+    return null;
+  }
+  return [...commands].sort((left, right) => {
+    const priorityDifference = commandUrgency(left, snapshot) - commandUrgency(right, snapshot);
+    if (priorityDifference !== 0) {
+      return priorityDifference;
+    }
+    return Date.parse(left.expires_at) - Date.parse(right.expires_at);
+  })[0] ?? null;
+}
+
+function commandUrgency(command: OperationCommandReceipt, snapshot: OperationsSnapshot): number {
+  if (command.state === "failed") {
+    return 0;
+  }
+  if (command.state === "applied" && !isCommandPostconditionVerified(command, snapshot)) {
+    return 1;
+  }
+  if (command.state === "claimed") {
+    return 2;
+  }
+  if (command.state === "approved") {
+    return 3;
+  }
+  if (command.state === "requested") {
+    return 4;
+  }
+  if (["rejected", "expired", "canceled"].includes(command.state)) {
+    return 5;
+  }
+  return 6;
 }
 
 function CommandIcon({ type }: { readonly type: OperationCommandType }) {
@@ -244,13 +582,64 @@ function CommandIcon({ type }: { readonly type: OperationCommandType }) {
   return <CircleStop size={17} aria-hidden="true" />;
 }
 
+function actionFor(type: OperationCommandType): CommandAction {
+  const action = commandActions.find((candidate) => candidate.type === type);
+  if (!action) {
+    throw new Error(`Unsupported operation command: ${type}`);
+  }
+  return action;
+}
+
+function confirmTone(action: CommandAction): ConfirmAction["tone"] {
+  if (action.tone === "danger") {
+    return "danger";
+  }
+  if (action.type === "pause_paper" || action.type === "resume_paper") {
+    return "primary";
+  }
+  return "neutral";
+}
+
+function runtimeStateLabel(snapshot: OperationsSnapshot): string {
+  const runtime = snapshot.runtime_health;
+  if (runtime.overall_state !== "fresh") {
+    return "상태 확인 필요";
+  }
+  if (runtime.environment === "contract_test") {
+    return runtime.execution_enabled ? "계약 테스트 실행 중" : "계약 테스트 중지";
+  }
+  return runtime.execution_enabled ? "모의거래 실행 중" : "주문 생성 중지";
+}
+
+function runtimeTone(snapshot: OperationsSnapshot): Tone {
+  if (snapshot.runtime_health.overall_state !== "fresh") {
+    return "warning";
+  }
+  return snapshot.runtime_health.execution_enabled ? "info" : "neutral";
+}
+
+function isQualificationReady(snapshot: OperationsSnapshot): boolean {
+  const qualification = snapshot.qualification;
+  if (
+    qualification === null ||
+    qualification.status !== "qualified" ||
+    qualification.environment !== snapshot.runtime_health.environment ||
+    qualification.g1.status !== "pass" ||
+    qualification.g2.status !== "pass"
+  ) {
+    return false;
+  }
+  const snapshotAt = Date.parse(snapshot.generated_at);
+  return Date.parse(qualification.valid_from) <= snapshotAt && Date.parse(qualification.valid_until) > snapshotAt;
+}
+
 export function commandLabel(type: OperationCommandReceipt["command_type"]): string {
   const labels: Record<OperationCommandReceipt["command_type"], string> = {
     emergency_stop: "비상 정지",
-    pause_paper: "PAPER 일시정지",
-    resume_paper: "PAPER 재개",
-    activate_paper_strategy: "PAPER 전략 적용",
-    start_contract_test: "CONTRACT TEST 시작",
+    pause_paper: "모의거래 일시정지",
+    resume_paper: "모의거래 재개",
+    activate_paper_strategy: "모의거래 전략 적용",
+    start_contract_test: "계약 테스트 시작",
     apply_risk_policy_version: "위험 정책 적용"
   };
   return labels[type];
@@ -258,16 +647,61 @@ export function commandLabel(type: OperationCommandReceipt["command_type"]): str
 
 function commandStateLabel(state: OperationCommandReceipt["state"], postconditionVerified = false): string {
   const labels: Record<OperationCommandReceipt["state"], string> = {
-    requested: "요청됨",
-    approved: "승인됨 · 적용 전",
-    claimed: "Worker claim",
-    applied: postconditionVerified ? "적용·postcondition 확인" : "Worker 적용 보고 · 확인 중",
-    rejected: "거절됨",
-    failed: "실패",
-    expired: "만료",
-    canceled: "취소"
+    requested: "요청 접수 · 검토 대기",
+    approved: "검토 승인 · Worker 대기",
+    claimed: "Worker 처리 중",
+    applied: postconditionVerified ? "최신 실행 상태 확인 완료" : "Worker 적용 보고 · 확인 중",
+    rejected: "검토 거절",
+    failed: "적용 실패",
+    expired: "요청 만료",
+    canceled: "요청 취소"
   };
   return labels[state];
+}
+
+function commandStateTone(command: OperationCommandReceipt, postconditionVerified: boolean): Tone {
+  if (command.state === "failed") {
+    return "danger";
+  }
+  if (command.state === "rejected" || command.state === "expired") {
+    return "warning";
+  }
+  if (command.state === "canceled") {
+    return "neutral";
+  }
+  return postconditionVerified ? "safe" : "info";
+}
+
+function workerAckLabel(command: OperationCommandReceipt): string {
+  if (command.worker_ack?.state === "applied") {
+    return "적용 보고 수신";
+  }
+  if (command.worker_ack?.state === "claimed") {
+    return "처리 중";
+  }
+  if (command.worker_ack?.state === "failed") {
+    return "실패 보고 수신";
+  }
+  return "없음";
+}
+
+function terminalCommandState(state: OperationCommandReceipt["state"]): {
+  readonly message: string;
+  readonly className: string;
+} | null {
+  if (state === "failed") {
+    return { message: "Worker 적용이 실패했습니다. 실패 코드를 확인하고 새 요청을 검토하세요.", className: "text-red-800" };
+  }
+  if (state === "rejected") {
+    return { message: "독립 검토자가 요청을 거절했습니다. 기존 요청은 다시 전송되지 않습니다.", className: "text-amber-800" };
+  }
+  if (state === "expired") {
+    return { message: "유효 시간이 지나 요청이 만료됐습니다. 필요하면 최신 상태에서 새로 요청하세요.", className: "text-amber-800" };
+  }
+  if (state === "canceled") {
+    return { message: "요청이 취소됐습니다. 취소된 요청은 자동 재개되지 않습니다.", className: "text-muted" };
+  }
+  return null;
 }
 
 export function isCommandPostconditionVerified(

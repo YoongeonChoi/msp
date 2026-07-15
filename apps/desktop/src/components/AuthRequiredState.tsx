@@ -1,7 +1,7 @@
 import { AlertTriangle } from "lucide-react";
 import { Panel, Pill } from "./ui";
 
-export function AuthRequiredState({ surface = "cockpit 데이터" }: { readonly surface?: string }) {
+export function AuthRequiredState({ surface = "운영 데이터" }: { readonly surface?: string }) {
   return (
     <Panel className="border-amber-200 bg-amber-50">
       <AuthRequiredBlock surface={surface} />
@@ -9,7 +9,7 @@ export function AuthRequiredState({ surface = "cockpit 데이터" }: { readonly 
   );
 }
 
-export function AuthRequiredBlock({ surface = "cockpit 데이터" }: { readonly surface?: string }) {
+export function AuthRequiredBlock({ surface = "운영 데이터" }: { readonly surface?: string }) {
   return (
     <div className="space-y-2 text-sm text-amber-900">
       <div className="flex flex-wrap items-center gap-2 font-semibold">
@@ -18,7 +18,7 @@ export function AuthRequiredBlock({ surface = "cockpit 데이터" }: { readonly 
         <Pill tone="warning">권한 필요</Pill>
       </div>
       <p>
-        {surface}는 Supabase RLS admin 세션이 있어야 표시됩니다. 거래 봇 정지와는 별개이며, Settings에서 admin 계정으로 로그인하세요.
+        {surface}는 운영 관리자 세션이 있어야 표시됩니다. 거래 봇 정지와는 별개이며, 계정·보안에서 관리자 계정으로 로그인하세요.
       </p>
     </div>
   );

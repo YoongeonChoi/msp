@@ -371,7 +371,7 @@ export function operationsErrorMessage(error: unknown): string {
     return "응답이 schema_version=1 계약과 일치하지 않아 모든 운영 변경을 차단했습니다.";
   }
   if (error instanceof OperationsTransportError) {
-    return "운영 read model/RPC를 사용할 수 없어 모든 운영 변경을 차단했습니다.";
+    return "운영 연결을 사용할 수 없어 모든 운영 변경을 차단했습니다.";
   }
   if (error instanceof OperationsResponseMismatchError) {
     return "운영 제어 응답이 요청 식별자와 일치하지 않아 결과를 반영하지 않았습니다.";
