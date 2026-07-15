@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from app.application.ports.alert_outbox_port import (
+    AlertOutboxPort,
+    DedupeAwareAlertDestinationPort,
+)
+from app.domain.common.time import now_utc
+from app.domain.operations.models import OperationsInvariantError
+
+
+@dataclass(frozen=True, slots=True)
+class AlertOutboxDispatchResult:
+    claimed: int
+    delivered: int
+    failed: int
+
+
+class DispatchAlertOutbox:
+    """Lease, deliver, and settle the durable alert outbox.
+
+    A delivery completion write can fail after the receiver accepted the event.
+    The stable receiver dedupe key makes the resulting retry safe; this use case
+    intentionally does not mark that case as a delivery failure.
+    """
+
+    def __init__(
+        self,
+        outbox: AlertOutboxPort,
+        destination: DedupeAwareAlertDestinationPort,
+        *,
+        worker_id: str,
+        clock: Callable[[], datetime] = now_utc,
+        lease_ttl: timedelta = timedelta(seconds=30),
+        retry_after: timedelta = timedelta(seconds=30),
+        max_retry_after: timedelta = timedelta(hours=1),
+    ) -> None:
+        if not worker_id.strip():
+            raise OperationsInvariantError("outbox_worker_id_is_required")
+        if (
+            lease_ttl <= timedelta(0)
+            or retry_after <= timedelta(0)
+            or max_retry_after < retry_after
+        ):
+            raise OperationsInvariantError("outbox_duration_must_be_positive")
+        self.outbox = outbox
+        self.destination = destination
+        self.worker_id = worker_id
+        self.clock = clock
+        self.lease_ttl = lease_ttl
+        self.retry_after = retry_after
+        self.max_retry_after = max_retry_after
+
+    async def dispatch_once(self, *, limit: int = 50) -> AlertOutboxDispatchResult:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise OperationsInvariantError("outbox_dispatch_limit_is_invalid")
+        claimed_at = self._now()
+        items = await self.outbox.claim_delivery_outbox(
+            worker_id=self.worker_id,
+            now=claimed_at,
+            limit=limit,
+            lease_ttl=self.lease_ttl,
+        )
+        delivered = 0
+        failed = 0
+        for item in items:
+            if item.lease_expires_at <= claimed_at:
+                raise OperationsInvariantError("claimed_outbox_lease_is_expired")
+            try:
+                receipt = await self.destination.deliver_outbox_item(
+                    item,
+                    dedupe_key=item.dedupe_key,
+                )
+            except Exception as exc:
+                await self.outbox.fail_outbox_delivery(
+                    outbox_id=item.outbox_id,
+                    worker_id=self.worker_id,
+                    lease_token=item.lease_token,
+                    now=self._now(),
+                    error_code=_safe_delivery_error_code(exc),
+                    retry_after=self._retry_delay(item.attempt_count),
+                )
+                failed += 1
+                continue
+
+            await self.outbox.complete_outbox_delivery(
+                outbox_id=item.outbox_id,
+                worker_id=self.worker_id,
+                lease_token=item.lease_token,
+                now=self._now(),
+                external_receipt_id=receipt.external_receipt_id,
+                external_receipt_sha256=receipt.external_receipt_sha256,
+            )
+            delivered += 1
+        return AlertOutboxDispatchResult(
+            claimed=len(items),
+            delivered=delivered,
+            failed=failed,
+        )
+
+    def _now(self) -> datetime:
+        value = self.clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise OperationsInvariantError("outbox_clock_must_be_timezone_aware")
+        return value
+
+    def _retry_delay(self, attempt_count: int) -> timedelta:
+        exponent = min(attempt_count - 1, 20)
+        delay_seconds = self.retry_after.total_seconds() * float(2**exponent)
+        capped_seconds = min(delay_seconds, self.max_retry_after.total_seconds())
+        return timedelta(seconds=capped_seconds)
+
+
+def _safe_delivery_error_code(exc: Exception) -> str:
+    return f"destination_{type(exc).__name__.lower()}"[:120]
