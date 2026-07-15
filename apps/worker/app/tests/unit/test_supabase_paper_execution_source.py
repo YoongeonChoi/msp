@@ -179,6 +179,7 @@ async def test_paper_source_loads_strict_bundle_and_reschedules_with_cas() -> No
     assert bundle.command.intent.environment == "paper"
     assert bundle.command.intent.lease_holder_id == worker_id
     assert len(bundle.command.bars) == 1
+    assert bundle.command.bars[0].other_intent_filled_quantity == 0
     assert bundle.risk_input is not None
     assert bundle.risk_input.settings.live_order_allowed is False
     assert completion.state == "pending"
@@ -205,6 +206,43 @@ async def test_paper_source_rejects_unknown_bundle_fields() -> None:
     )
     invalid = _bundle(claim, now)
     invalid["silent_default"] = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"bundle": invalid}], request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SupabasePaperExecutionCommandSource(
+            _enabled_settings(),
+            account_id="paper-primary",
+            release_sha="a" * 40,
+            client=client,
+        )
+        with pytest.raises(ExecutionInvariantError, match="response_fields_are_invalid"):
+            await source.load_claimed_paper_execution_bundle(claim, now=now)
+
+
+async def test_paper_source_requires_explicit_other_intent_bar_usage() -> None:
+    now = datetime(2026, 7, 15, 9, 2, tzinfo=UTC)
+    claim = ClaimedPaperExecutionCommand(
+        command_id=str(uuid4()),
+        intent_id=str(uuid4()),
+        kind="new_candidate",
+        claim_token=str(uuid4()),
+        source_revision=2,
+        worker_id=str(uuid4()),
+        release_sha="a" * 40,
+        available_at=now - timedelta(minutes=1),
+        claimed_at=now,
+        claim_expires_at=now + timedelta(seconds=30),
+    )
+    invalid = _bundle(claim, now)
+    command = invalid["command"]
+    assert isinstance(command, dict)
+    bars = command["bars"]
+    assert isinstance(bars, list)
+    bar = bars[0]
+    assert isinstance(bar, dict)
+    del bar["other_intent_filled_quantity"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[{"bundle": invalid}], request=request)
@@ -482,6 +520,7 @@ def _bundle(
                     "low_krw": 9_800,
                     "close_krw": 9_900,
                     "volume": 100,
+                    "other_intent_filled_quantity": 0,
                 }
             ],
             "cost_schedule": {

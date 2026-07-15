@@ -293,7 +293,13 @@ def build_operations_v2_runtime(
         ttl=timedelta(seconds=settings.worker_lease_ttl_sec),
     )
     run_operations = RunOperationsV2(
-        ApplyOperationCommands(worker_api, holder_id=worker_id),
+        ApplyOperationCommands(
+            worker_api,
+            account_id=account_id,
+            holder_id=worker_id,
+            current_release_sha=worker_api.release_sha,
+            lease_provider=lambda: lease_manager.current,
+        ),
         RunExecutionSupervisorV2(
             execution_source,
             run_execution_v2,
@@ -325,7 +331,10 @@ def build_operations_v2_runtime(
                     worker_id=worker_id,
                     current_release_sha=worker_api.release_sha,
                 ),
+                account_id=account_id,
                 worker_id=worker_id,
+                current_release_sha=worker_api.release_sha,
+                lease_provider=lambda: lease_manager.current,
             ),
         ),
         DispatchAlertOutbox(

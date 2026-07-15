@@ -16,7 +16,11 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260714160105_operations_runtime_scheduler.sql`,
 `20260714161511_unknown_execution_resolution_v2.sql`, and
 `20260714165910_unknown_resolution_desktop_projection.sql`, followed by
-`20260715020752_kst_trading_date_convergence.sql`.
+`20260715020752_kst_trading_date_convergence.sql`,
+`20260715041903_paper_bar_participation_guard.sql`,
+`20260715041909_operation_claim_fencing.sql`,
+`20260715041912_sell_cost_basis_checkpoint_guard.sql`, and
+`20260715041915_paper_evidence_and_sell_reservation_guards.sql`.
 
 ## Start-of-day Paper checklist
 

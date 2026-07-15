@@ -19,16 +19,26 @@ async def test_contract_qualification_emits_complete_passing_manifest() -> None:
     )
 
     assert report.result == "pass"
+    assert report.suite_version == "contract-test-qualification-v2"
+    assert report.to_json()["suite_version"] == "contract-test-qualification-v2"
     assert report.openapi_sha256 == QUALIFIED_TOSS_OPENAPI_SHA256
     assert [item.check_id for item in report.checks] == [
         "cancel_lifecycle",
         "create_lifecycle",
         "fault_injection",
+        "ledger_invariants",
         "production_order_network_zero",
         "status_partial_terminal",
     ]
     assert all(item.status == "pass" for item in report.checks)
     assert all(len(item.evidence_sha256) == 64 for item in report.checks)
+    ledger = next(item for item in report.checks if item.check_id == "ledger_invariants")
+    assert ledger.metrics == {
+        "balanced_transaction_count": 1,
+        "position_quantity": 4,
+        "provider_identity_change_blocked": True,
+        "projection_backed_by_journal": True,
+    }
     network = next(
         item for item in report.checks if item.check_id == "production_order_network_zero"
     )

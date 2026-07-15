@@ -4,7 +4,8 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Literal
 
 from app.adapters.broker.contract_test_broker import (
@@ -14,18 +15,32 @@ from app.adapters.broker.contract_test_broker import (
     ContractStatusOutcome,
     ContractTestBroker,
 )
+from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernelV2
+from app.adapters.persistence.sql_repository import InMemoryRepository
 from app.application.ports.broker_port import BrokerOrderRequest
+from app.application.services.execution_service import ExecutionService
+from app.application.services.risk_service import RiskService
 from app.domain.common.errors import (
     ProviderSchemaError,
     ProviderTimeoutError,
     ProviderUnavailableError,
     ProviderUnknownError,
 )
+from app.domain.execution_v2.models import (
+    ExecutionCostSchedule,
+    ExecutionGate,
+    ExecutionIntent,
+    ExecutionInvariantError,
+    ExecutionObservation,
+    PaperExecutionEvidence,
+)
+from app.domain.trading.entities import BotSettings
 
 ContractQualificationCheckId = Literal[
     "cancel_lifecycle",
     "create_lifecycle",
     "fault_injection",
+    "ledger_invariants",
     "production_order_network_zero",
     "status_partial_terminal",
 ]
@@ -36,6 +51,7 @@ _CHECK_IDS: tuple[ContractQualificationCheckId, ...] = (
     "cancel_lifecycle",
     "create_lifecycle",
     "fault_injection",
+    "ledger_invariants",
     "production_order_network_zero",
     "status_partial_terminal",
 )
@@ -99,11 +115,11 @@ class RunContractQualification:
     """Exercise the pinned, zero-network contract simulator.
 
     The returned manifest matches the check set accepted by
-    ``worker_api.register_qualification_run_v1``. It is local evidence only;
+    ``worker_api.register_qualification_run_v2``. It is local evidence only;
     it never contacts a broker endpoint and cannot enable execution.
     """
 
-    suite_version = "contract-test-qualification-v1"
+    suite_version = "contract-test-qualification-v2"
 
     def __init__(
         self,
@@ -125,6 +141,7 @@ class RunContractQualification:
             "cancel_lifecycle": self._verify_cancel_lifecycle,
             "create_lifecycle": self._verify_create_lifecycle,
             "fault_injection": self._verify_fault_injection,
+            "ledger_invariants": self._verify_ledger_invariants,
             "production_order_network_zero": self._verify_network_boundary,
             "status_partial_terminal": self._verify_status_lifecycle,
         }
@@ -372,8 +389,91 @@ class RunContractQualification:
             raise _QualificationCheckFailed("network_boundary_not_fail_closed")
         return {
             "request_count": 0,
-            "simulator_instance_count": len(self._brokers),
-            "execution_transport": "local_contract_simulator",
+        }
+
+    async def _verify_ledger_invariants(self) -> Mapping[str, ContractMetricValue]:
+        kernel, intent, cost_schedule, execution_evidence = (
+            await _qualification_contract_context()
+        )
+        broker = self._broker(placement_outcomes=("filled",))
+        service = ExecutionService(
+            broker,
+            InMemoryRepository(BotSettings()),
+            RiskService(),
+        )
+        await _qualified_call(
+            service.dispatch_contract_test_order(
+                intent,
+                kernel,
+                cost_schedule=cost_schedule,
+                execution_evidence=execution_evidence,
+                now=intent.eligible_at,
+            ),
+            "ledger_dispatch_failed",
+        )
+        snapshot = await kernel.account_snapshot(intent.account_id)
+        transactions = await kernel.accounting_transactions_for(intent.id)
+        if (
+            len(transactions) != 1
+            or transactions[0].total_debit_krw
+            != transactions[0].total_credit_krw
+            or snapshot.quantity_for(intent.symbol) != intent.quantity
+            or snapshot.reserved_cash_krw != 0
+        ):
+            raise _QualificationCheckFailed("ledger_projection_or_journal_mismatch")
+
+        identity_kernel, identity_intent, _, _ = await _qualification_contract_context(
+            account_id="contract-qualification-identity"
+        )
+        await identity_kernel.mark_dispatch_started(
+            identity_intent,
+            now=identity_intent.eligible_at,
+        )
+        await identity_kernel.record_execution_observation(
+            identity_intent,
+            ExecutionObservation.create(
+                intent_id=identity_intent.id,
+                sequence=1,
+                status="open",
+                observed_at=identity_intent.eligible_at,
+                provider_order_id="contract-identity-a",
+                provider_execution_id=None,
+                cumulative_quantity=0,
+                cumulative_gross_krw=0,
+                cumulative_commission_krw=0,
+                cumulative_tax_krw=0,
+            ),
+            now=identity_intent.eligible_at,
+        )
+        try:
+            await identity_kernel.record_execution_observation(
+                identity_intent,
+                ExecutionObservation.create(
+                    intent_id=identity_intent.id,
+                    sequence=2,
+                    status="open",
+                    observed_at=identity_intent.eligible_at + timedelta(seconds=1),
+                    provider_order_id="contract-identity-b",
+                    provider_execution_id=None,
+                    cumulative_quantity=0,
+                    cumulative_gross_krw=0,
+                    cumulative_commission_krw=0,
+                    cumulative_tax_krw=0,
+                ),
+                now=identity_intent.eligible_at + timedelta(seconds=1),
+            )
+        except ExecutionInvariantError as exc:
+            if exc.safe_message != "provider_order_identity_mismatch":
+                raise _QualificationCheckFailed(
+                    "ledger_identity_failure_reason_mismatch"
+                ) from exc
+        else:
+            raise _QualificationCheckFailed("ledger_identity_change_was_accepted")
+        return {
+            "balanced_transaction_count": 1,
+            "position_quantity": intent.quantity,
+            "provider_identity_change_blocked": True,
+            "projection_backed_by_journal": True,
         }
 
     def _broker(
@@ -427,6 +527,95 @@ def _request(idempotency_key: str) -> BrokerOrderRequest:
         quantity=4,
         limit_price_krw=10_000,
     )
+
+
+async def _qualification_contract_context(
+    *,
+    account_id: str = "contract-qualification-account",
+) -> tuple[
+    InMemoryExecutionKernelV2,
+    ExecutionIntent,
+    ExecutionCostSchedule,
+    PaperExecutionEvidence,
+]:
+    now = datetime(2026, 7, 15, 1, 0, 30, tzinfo=UTC)
+    expires_at = now.replace(hour=8, minute=0, second=0)
+    kernel = InMemoryExecutionKernelV2("contract_test")
+    await kernel.configure_account(account_id, cash_krw=1_000_000)
+    await kernel.replace_gate(
+        ExecutionGate(
+            account_id=account_id,
+            environment="contract_test",
+            enabled=True,
+            control_epoch=1,
+            effective_at=now,
+            expires_at=expires_at + timedelta(hours=1),
+        )
+    )
+    lease = await kernel.acquire_lease(
+        account_id=account_id,
+        holder_id="contract-qualification-worker",
+        now=now,
+        ttl=timedelta(hours=8),
+    )
+    cost_schedule = ExecutionCostSchedule(
+        version="contract-qualification-cost-v1",
+        effective_from=now - timedelta(days=1),
+        effective_until=expires_at + timedelta(days=1),
+        evidence_sha256="a" * 64,
+        settlement_days=0,
+        settlement_evidence_sha256="b" * 64,
+        buy_commission_rate=Decimal("0.001"),
+        sell_commission_rate=Decimal("0.001"),
+        sell_tax_rate=Decimal("0.002"),
+    )
+    intent = ExecutionIntent.create(
+        account_id=account_id,
+        environment="contract_test",
+        decision_id="11111111-1111-4111-8111-111111111111",
+        risk_result_id="22222222-2222-4222-8222-222222222222",
+        decision_feature_sha256="c" * 64,
+        risk_allowed=True,
+        risk_reason_codes=(),
+        risk_evaluated_at=now,
+        risk_expires_at=now + timedelta(hours=1),
+        strategy_version_id="contract-qualification-strategy-v1",
+        symbol="005930",
+        side="buy",
+        quantity=4,
+        limit_price_krw=10_000,
+        decision_at=now,
+        signal_valid_from=now - timedelta(minutes=1),
+        signal_valid_until=expires_at,
+        execution_policy_version="contract-qualification-policy-v1",
+        cost_schedule=cost_schedule,
+        expires_at=expires_at,
+        gate_epoch=1,
+        lease_holder_id=lease.holder_id,
+        lease_fencing_token=lease.fencing_token,
+    )
+    execution_evidence = PaperExecutionEvidence(
+        version="contract-qualification-evidence-v1",
+        execution_policy_version=intent.execution_policy_version,
+        effective_from=now - timedelta(days=1),
+        effective_until=expires_at + timedelta(days=1),
+        tick_rule_version="contract-qualification-tick-v1",
+        tick_size_krw=1,
+        tick_rule_evidence_sha256="d" * 64,
+        volume_source="contract_qualification_fixture",
+        volume_unit="shares",
+        volume_evidence_sha256="e" * 64,
+        corporate_action_status="not_required",
+        corporate_action_evidence_sha256="f" * 64,
+        market_calendar_version="contract-qualification-calendar-v1",
+        market_calendar_status="open_sessions_verified",
+        market_calendar_evidence_sha256="1" * 64,
+        open_session_dates=tuple(
+            intent.eligible_at.date() + timedelta(days=offset) for offset in range(4)
+        ),
+    )
+    assert await kernel.reserve_intent(intent, now=now)
+    return kernel, intent, cost_schedule, execution_evidence
 
 
 def _evidence_sha256(value: Mapping[str, object]) -> str:

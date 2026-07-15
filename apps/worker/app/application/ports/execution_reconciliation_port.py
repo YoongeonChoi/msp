@@ -17,7 +17,10 @@ class ExecutionReconciliationPort(Protocol):
     async def claim_execution_reconciliation_batch(
         self,
         *,
+        account_id: str,
         worker_id: str,
+        release_sha: str,
+        fencing_token: int,
         now: datetime,
         limit: int,
         after_priority: int | None,

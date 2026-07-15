@@ -107,6 +107,22 @@ def test_partial_fill_remains_pending_before_expiry() -> None:
     assert result.observations[-1].cumulative_quantity == 1
 
 
+def test_existing_other_intent_fill_reduces_bar_capacity() -> None:
+    intent = _intent(quantity=2, limit_price_krw=10_000)
+    bar = _bar(intent.eligible_at, volume=100, open_krw=9_000)
+    bar = replace(bar, other_intent_filled_quantity=1)
+
+    result = DeterministicPaperExecutionSimulator().simulate(
+        intent,
+        [bar],
+        cost_schedule=_cost_schedule(intent),
+        execution_evidence=_execution_evidence(intent),
+        now=bar.completed_at,
+    )
+
+    assert result.fills == ()
+
+
 @pytest.mark.parametrize(
     ("offset", "expected_statuses"),
     [

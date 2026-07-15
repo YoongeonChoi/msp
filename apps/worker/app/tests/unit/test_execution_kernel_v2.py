@@ -194,6 +194,67 @@ async def test_concurrent_sell_reservations_cannot_oversubscribe_position() -> N
     assert snapshot.quantity_for("005930") == 5
 
 
+async def test_sell_reservations_serialize_until_terminal_release() -> None:
+    now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
+    kernel, lease = await _ready_kernel(
+        now,
+        positions=(
+            PaperPositionCostBasis(
+                symbol="005930",
+                quantity=3,
+                total_cost_krw=100,
+            ),
+        ),
+    )
+    first = _intent(
+        now,
+        fencing_token=lease.fencing_token,
+        quantity=1,
+        side="sell",
+        strategy_version="strategy-a",
+        limit_price_krw=9_000,
+    )
+    second = _intent(
+        now,
+        fencing_token=lease.fencing_token,
+        quantity=1,
+        side="sell",
+        strategy_version="strategy-b",
+        limit_price_krw=9_000,
+    )
+
+    results = await asyncio.gather(
+        kernel.reserve_intent(first, now=now),
+        kernel.reserve_intent(second, now=now),
+        return_exceptions=True,
+    )
+
+    assert sum(result is True for result in results) == 1
+    errors = [result for result in results if isinstance(result, Exception)]
+    assert len(errors) == 1
+    assert isinstance(errors[0], ExecutionInvariantError)
+    assert str(errors[0]) == "paper_account_has_active_sell_reservation"
+    winner = first if results[0] is True else second
+    blocked = second if winner is first else first
+    assert await kernel.reserve_intent(winner, now=now)
+
+    await kernel.mark_dispatch_started(winner, now=winner.eligible_at)
+    result = await kernel.execute_paper(
+        winner,
+        [_bar(winner.eligible_at, volume=100, open_krw=10_000)],
+        cost_schedule=_cost_schedule(winner),
+        execution_evidence=_execution_evidence(winner),
+        now=_execution_now(winner),
+    )
+    assert result.observations[-1].status == "filled"
+    assert result.fills[0].position_cost_relief_krw == 33
+
+    assert await kernel.reserve_intent(blocked, now=_execution_now(winner))
+    snapshot = await kernel.account_snapshot("paper-account")
+    assert snapshot.quantity_for("005930") == 2
+    assert snapshot.reserved_quantity_for("005930") == 1
+
+
 async def test_partial_fill_consumes_reservation_and_expiry_releases_residual() -> None:
     now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
     kernel, lease = await _ready_kernel(now)
@@ -340,7 +401,7 @@ async def test_moving_weighted_average_v1_matches_accounting_golden_vector() -> 
     assert bought_position.total_cost_krw == 98_018
 
     sell = _intent(
-        now,
+        now + timedelta(minutes=1),
         fencing_token=lease.fencing_token,
         quantity=4,
         side="sell",

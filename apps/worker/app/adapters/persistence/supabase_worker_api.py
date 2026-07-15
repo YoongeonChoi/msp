@@ -639,14 +639,28 @@ class SupabaseWorkerApi:
     async def claim_execution_reconciliation_batch(
         self,
         *,
+        account_id: str,
         worker_id: str,
+        release_sha: str,
+        fencing_token: int,
         now: datetime,
         limit: int,
         after_priority: int | None,
         after_intent_id: str | None,
         lease_ttl: timedelta,
     ) -> tuple[ExecutionReconciliationClaim, ...]:
+        _require_nonempty_input_text(account_id, "account_id")
         _require_uuid_input(worker_id, "worker_id")
+        if release_sha != self.release_sha:
+            raise ExecutionInvariantError("worker_api_release_sha_mismatch")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token <= 0
+        ):
+            raise ExecutionInvariantError(
+                "worker_api_reconciliation_fencing_token_is_invalid"
+            )
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
             raise ExecutionInvariantError("worker_api_reconciliation_limit_is_invalid")
         if (after_priority is None) != (after_intent_id is None):
@@ -666,6 +680,7 @@ class SupabaseWorkerApi:
             await self._rpc(
                 "claim_execution_reconciliation_batch",
                 {
+                    "p_account_id": account_id,
                     "p_worker_id": worker_id,
                     "p_now": _isoformat(now),
                     "p_limit": limit,
@@ -673,6 +688,7 @@ class SupabaseWorkerApi:
                     "p_after_intent_id": after_intent_id,
                     "p_lease_seconds": lease_seconds,
                     "p_release_sha": self.release_sha,
+                    "p_fencing_token": fencing_token,
                 },
             )
         )
@@ -1231,19 +1247,33 @@ class SupabaseWorkerApi:
     async def claim_operation_command_batch(
         self,
         *,
+        account_id: str,
         holder_id: str,
+        release_sha: str,
+        fencing_token: int,
         now: datetime,
         limit: int,
     ) -> tuple[ClaimedOperationCommand, ...]:
+        _require_nonempty_input_text(account_id, "account_id")
         _require_uuid_input(holder_id, "holder_id")
+        if release_sha != self.release_sha:
+            raise ExecutionInvariantError("worker_api_release_sha_mismatch")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token <= 0
+        ):
+            raise ExecutionInvariantError("worker_api_command_fencing_token_is_invalid")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
             raise ExecutionInvariantError("worker_api_command_claim_limit_is_invalid")
         rows = _row_set(
             await self._rpc(
                 "claim_operation_command_batch",
                 {
+                    "p_account_id": account_id,
                     "p_holder_id": holder_id,
                     "p_release_sha": self.release_sha,
+                    "p_fencing_token": fencing_token,
                     "p_now": _isoformat(now),
                     "p_limit": limit,
                 },
@@ -1299,16 +1329,35 @@ class SupabaseWorkerApi:
         self,
         *,
         command_id: str,
-        phase: Literal["claimed", "applied", "failed"],
+        phase: Literal["applied", "failed"],
+        account_id: str,
         holder_id: str,
+        release_sha: str,
+        fencing_token: int,
+        expected_revision: int,
         now: datetime,
         result_summary: JsonObject,
         failure_code: str | None = None,
     ) -> OperationCommandAcknowledgement:
         _require_uuid_input(command_id, "command_id")
-        if phase not in {"claimed", "applied", "failed"}:
+        if phase not in {"applied", "failed"}:
             raise ExecutionInvariantError("worker_api_command_phase_is_invalid")
-        _require_nonempty_input_text(holder_id, "holder_id")
+        _require_nonempty_input_text(account_id, "account_id")
+        _require_uuid_input(holder_id, "holder_id")
+        if release_sha != self.release_sha:
+            raise ExecutionInvariantError("worker_api_release_sha_mismatch")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token <= 0
+        ):
+            raise ExecutionInvariantError("worker_api_command_fencing_token_is_invalid")
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision <= 0
+        ):
+            raise ExecutionInvariantError("worker_api_command_revision_is_invalid")
         if not isinstance(result_summary, dict) or not all(
             isinstance(key, str) for key in result_summary
         ):
@@ -1325,8 +1374,11 @@ class SupabaseWorkerApi:
                 {
                     "p_command_id": command_id,
                     "p_phase": phase,
+                    "p_account_id": account_id,
                     "p_holder_id": holder_id,
                     "p_release_sha": self.release_sha,
+                    "p_fencing_token": fencing_token,
+                    "p_expected_revision": expected_revision,
                     "p_now": _isoformat(now),
                     "p_result_summary": result_summary,
                     "p_failure_code": failure_code,
@@ -1345,7 +1397,7 @@ class SupabaseWorkerApi:
             },
         )
         state = _required_text(row, "state")
-        if state not in {"claimed", "applied", "failed"}:
+        if state != phase:
             raise ExecutionInvariantError("worker_api_rpc_response_field_is_invalid")
         return OperationCommandAcknowledgement(
             command_id=_required_uuid_text(row, "command_id"),

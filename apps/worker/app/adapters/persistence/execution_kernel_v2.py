@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from app.application.services.paper_execution_v2 import DeterministicPaperExecutionSimulator
+from app.application.services.paper_execution_v2 import (
+    DeterministicPaperExecutionSimulator,
+    build_fill_accounting_transaction,
+)
 from app.domain.execution_v2.models import (
     BLOCKING_EXECUTION_STATUSES,
     TERMINAL_EXECUTION_STATUSES,
@@ -73,6 +76,7 @@ class InMemoryExecutionKernelV2:
         self._reservations_by_intent: dict[str, _IntentReservation] = {}
         self._observations_by_intent: dict[str, tuple[ExecutionObservation, ...]] = {}
         self._transactions_by_id: dict[str, AccountingTransaction] = {}
+        self._provider_execution_bindings: dict[str, tuple[str, int, str]] = {}
         self._results_by_intent: dict[str, PaperSimulationResult] = {}
         self._position_cost_basis_by_intent: dict[
             str,
@@ -161,6 +165,16 @@ class InMemoryExecutionKernelV2:
                 return False
             if intent.id in self._intents_by_id:
                 raise ExecutionInvariantError("execution_intent_id_already_exists")
+            if intent.side == "sell" and any(
+                reservation.account_id == intent.account_id
+                and reservation.symbol == intent.symbol
+                and reservation.side == "sell"
+                and not reservation.terminal
+                for reservation in self._reservations_by_intent.values()
+            ):
+                raise ExecutionInvariantError(
+                    "paper_account_has_active_sell_reservation"
+                )
             if intent.side == "buy":
                 available_cash = account.cash_krw - account.reserved_cash_krw
                 if available_cash < intent.cash_commitment_krw:
@@ -237,9 +251,19 @@ class InMemoryExecutionKernelV2:
                 raise ExecutionInvariantError(
                     "paper_position_cost_basis_snapshot_mismatch"
                 )
+            capacity_aware_bars = tuple(
+                replace(
+                    bar,
+                    other_intent_filled_quantity=max(
+                        bar.other_intent_filled_quantity,
+                        self._other_intent_bar_usage(intent, bar),
+                    ),
+                )
+                for bar in bars
+            )
             result = self._paper_simulator.simulate(
                 intent,
-                bars,
+                capacity_aware_bars,
                 cost_schedule=cost_schedule,
                 execution_evidence=execution_evidence,
                 now=now,
@@ -274,6 +298,21 @@ class InMemoryExecutionKernelV2:
                 self._transactions_by_id[transaction.id] = transaction
             self._results_by_intent[intent.id] = result
             return result
+
+    def _other_intent_bar_usage(
+        self,
+        intent: ExecutionIntent,
+        bar: MinuteBar,
+    ) -> int:
+        return sum(
+            fill.quantity
+            for other_intent_id, result in self._results_by_intent.items()
+            if other_intent_id != intent.id
+            and self._intents_by_id[other_intent_id].account_id == intent.account_id
+            and self._intents_by_id[other_intent_id].symbol == intent.symbol
+            for fill in result.fills
+            if fill.filled_at == bar.completed_at
+        )
 
     def _settle_paper_result(
         self,
@@ -376,6 +415,7 @@ class InMemoryExecutionKernelV2:
         intent: ExecutionIntent,
         observation: ExecutionObservation,
         *,
+        accounting_transaction: AccountingTransaction | None = None,
         now: datetime,
     ) -> None:
         async with self._lock:
@@ -390,11 +430,34 @@ class InMemoryExecutionKernelV2:
             ):
                 raise ExecutionInvariantError("execution_observation_precedes_dispatch_marker")
             current = self._observations_by_intent[intent.id]
+            if observation.sequence <= len(current):
+                existing_observation = current[observation.sequence - 1]
+                existing_transaction = next(
+                    (
+                        transaction
+                        for transaction in self._transactions_by_id.values()
+                        if transaction.intent_id == intent.id
+                        and transaction.observation_sequence == observation.sequence
+                    ),
+                    None,
+                )
+                if (
+                    existing_observation != observation
+                    or accounting_transaction != existing_transaction
+                    or (existing_observation.last_fill_quantity is not None)
+                    != (existing_transaction is not None)
+                ):
+                    raise ExecutionInvariantError(
+                        "contract_observation_replay_conflict"
+                    )
+                return
             if current and (
                 current[-1].status in TERMINAL_EXECUTION_STATUSES
                 or current[-1].status in BLOCKING_EXECUTION_STATUSES
             ):
                 raise ExecutionInvariantError("execution_observation_follows_blocking_state")
+            if current and observation.provider_order_id != current[-1].provider_order_id:
+                raise ExecutionInvariantError("provider_order_identity_mismatch")
             if observation.intent_id != intent.id or observation.sequence != len(current) + 1:
                 raise ExecutionInvariantError("execution_observation_sequence_is_invalid")
             if observation.cumulative_quantity > intent.quantity:
@@ -422,8 +485,122 @@ class InMemoryExecutionKernelV2:
                 )
             ):
                 raise ExecutionInvariantError("failed_pre_dispatch_observation_has_execution")
+            has_fill = observation.last_fill_quantity is not None
+            if has_fill != (accounting_transaction is not None):
+                raise ExecutionInvariantError(
+                    "contract_fill_observation_requires_accounting_transaction"
+                )
+            if accounting_transaction is not None:
+                if (
+                    accounting_transaction.intent_id != intent.id
+                    or accounting_transaction.observation_sequence
+                    != observation.sequence
+                    or accounting_transaction.posted_at != observation.observed_at
+                ):
+                    raise ExecutionInvariantError(
+                        "contract_accounting_transaction_identity_mismatch"
+                    )
+                if accounting_transaction.id in self._transactions_by_id:
+                    raise ExecutionInvariantError("duplicate_accounting_transaction")
+            if observation.provider_execution_id is not None:
+                provider_binding = (
+                    intent.id,
+                    observation.sequence,
+                    observation.provider_observation_sha256,
+                )
+                existing_provider_binding = self._provider_execution_bindings.get(
+                    observation.provider_execution_id
+                )
+                if (
+                    existing_provider_binding is not None
+                    and existing_provider_binding != provider_binding
+                ):
+                    raise ExecutionInvariantError(
+                        "provider_execution_identity_reused"
+                    )
+            expected_transaction = self._expected_contract_accounting_transaction(
+                intent,
+                current,
+                observation,
+            )
+            if accounting_transaction != expected_transaction:
+                raise ExecutionInvariantError(
+                    "contract_accounting_transaction_projection_mismatch"
+                )
             self._apply_contract_observation(intent, current, observation)
             self._observations_by_intent[intent.id] = (*current, observation)
+            if accounting_transaction is not None:
+                self._transactions_by_id[accounting_transaction.id] = accounting_transaction
+            if observation.provider_execution_id is not None:
+                self._provider_execution_bindings[
+                    observation.provider_execution_id
+                ] = (
+                    intent.id,
+                    observation.sequence,
+                    observation.provider_observation_sha256,
+                )
+
+    def _expected_contract_accounting_transaction(
+        self,
+        intent: ExecutionIntent,
+        current: tuple[ExecutionObservation, ...],
+        observation: ExecutionObservation,
+    ) -> AccountingTransaction | None:
+        previous = current[-1] if current else None
+        previous_quantity = previous.cumulative_quantity if previous else 0
+        previous_gross = previous.cumulative_gross_krw if previous else 0
+        previous_commission = previous.cumulative_commission_krw if previous else 0
+        previous_tax = previous.cumulative_tax_krw if previous else 0
+        fill_quantity = observation.cumulative_quantity - previous_quantity
+        gross_delta = observation.cumulative_gross_krw - previous_gross
+        commission_delta = observation.cumulative_commission_krw - previous_commission
+        tax_delta = observation.cumulative_tax_krw - previous_tax
+        if fill_quantity == 0:
+            if (
+                observation.last_fill_quantity is not None
+                or gross_delta != 0
+                or commission_delta != 0
+                or tax_delta != 0
+            ):
+                raise ExecutionInvariantError("contract_observation_fill_delta_is_invalid")
+            return None
+        if (
+            observation.last_fill_quantity != fill_quantity
+            or observation.last_fill_price_krw is None
+            or observation.last_fill_settlement_date is None
+            or gross_delta != fill_quantity * observation.last_fill_price_krw
+        ):
+            raise ExecutionInvariantError("contract_observation_fill_delta_is_invalid")
+
+        position_cost_relief = 0
+        if intent.side == "sell":
+            position = self._accounts[intent.account_id].positions.get(intent.symbol)
+            if position is None or position.quantity < fill_quantity:
+                raise ExecutionInvariantError("contract_position_invariant_failed")
+            position_cost_relief = (
+                position.total_cost_krw
+                if fill_quantity == position.quantity
+                else position.total_cost_krw * fill_quantity // position.quantity
+            )
+        fill_sequence = 1 + sum(
+            item.last_fill_quantity is not None for item in current
+        )
+        fill = PaperFill(
+            sequence=fill_sequence,
+            filled_at=observation.observed_at,
+            quantity=fill_quantity,
+            price_krw=observation.last_fill_price_krw,
+            commission_krw=commission_delta,
+            tax_krw=tax_delta,
+            settlement_date=observation.last_fill_settlement_date,
+            position_cost_relief_krw=position_cost_relief,
+            realized_pnl_krw=(
+                gross_delta - position_cost_relief - commission_delta - tax_delta
+                if intent.side == "sell"
+                else 0
+            ),
+        )
+        return build_fill_accounting_transaction(intent, fill, observation.sequence)
 
     def _apply_contract_observation(
         self,

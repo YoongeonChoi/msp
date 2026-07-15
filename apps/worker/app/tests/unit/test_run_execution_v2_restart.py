@@ -20,6 +20,7 @@ from app.application.use_cases.run_execution_v2 import (
 from app.domain.execution_v2.models import (
     AccountingTransaction,
     ExecutionCostSchedule,
+    ExecutionGate,
     ExecutionIntent,
     ExecutionInvariantError,
     ExecutionObservation,
@@ -124,6 +125,69 @@ async def test_durable_partial_result_remains_pending_before_expiry() -> None:
     assert outcome.status == "pending"
     assert outcome.result is not None
     assert [item.status for item in outcome.result.observations] == ["partial_filled"]
+
+
+async def test_in_memory_bar_participation_is_shared_across_semantic_intents() -> None:
+    first = _command()
+    kernel = InMemoryExecutionKernelV2("paper")
+    await kernel.configure_account(first.intent.account_id, cash_krw=1_000_000)
+    await kernel.replace_gate(
+        ExecutionGate(
+            account_id=first.intent.account_id,
+            environment="paper",
+            enabled=True,
+            control_epoch=first.intent.gate_epoch,
+            effective_at=first.intent.decision_at,
+            expires_at=first.intent.expires_at + timedelta(hours=1),
+        )
+    )
+    lease = await kernel.acquire_lease(
+        account_id=first.intent.account_id,
+        holder_id=first.intent.lease_holder_id,
+        now=first.intent.decision_at,
+        ttl=timedelta(hours=1),
+    )
+    assert lease.fencing_token == first.intent.lease_fencing_token
+    second_intent = ExecutionIntent.create(
+        account_id=first.intent.account_id,
+        environment="paper",
+        decision_id=str(uuid4()),
+        risk_result_id=str(uuid4()),
+        decision_feature_sha256=first.intent.decision_feature_sha256,
+        risk_allowed=True,
+        risk_reason_codes=(),
+        risk_evaluated_at=first.intent.risk_evaluated_at,
+        risk_expires_at=first.intent.risk_expires_at,
+        strategy_version_id="strategy-v2",
+        symbol=first.intent.symbol,
+        side="buy",
+        quantity=first.intent.quantity,
+        limit_price_krw=first.intent.limit_price_krw,
+        decision_at=first.intent.decision_at,
+        signal_valid_from=first.intent.signal_valid_from,
+        signal_valid_until=first.intent.signal_valid_until,
+        execution_policy_version=first.intent.execution_policy_version,
+        cost_schedule=first.cost_schedule,
+        expires_at=first.intent.expires_at,
+        gate_epoch=first.intent.gate_epoch,
+        lease_holder_id=first.intent.lease_holder_id,
+        lease_fencing_token=first.intent.lease_fencing_token,
+    )
+    second = replace(first, intent=second_intent)
+    runner = RunExecutionV2(kernel)
+
+    first_outcome = await runner.execute_paper(first)
+    first_replay = await runner.execute_paper(first)
+    second_outcome = await runner.execute_paper(second)
+
+    assert first_outcome.result is not None
+    assert first_replay.result == first_outcome.result
+    assert second_outcome.result is not None
+    assert sum(fill.quantity for fill in first_outcome.result.fills) == 2
+    assert sum(fill.quantity for fill in second_outcome.result.fills) == 0
+    assert [item.status for item in second_outcome.result.observations] == ["expired"]
+    snapshot = await kernel.account_snapshot(first.intent.account_id)
+    assert snapshot.quantity_for(first.intent.symbol) == 2
 
 
 async def test_durable_partial_resumes_next_bar_after_process_and_lease_restart() -> None:

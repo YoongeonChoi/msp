@@ -39,7 +39,11 @@ approval and dedicated staging credentials.
 29. `20260714161511_unknown_execution_resolution_v2.sql`
 30. `20260714165910_unknown_resolution_desktop_projection.sql`
 31. `20260715020752_kst_trading_date_convergence.sql`
-32. `seed.sql`
+32. `20260715041903_paper_bar_participation_guard.sql`
+33. `20260715041909_operation_claim_fencing.sql`
+34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
+35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
+36. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -69,6 +73,20 @@ The timestamp migrations extend that boundary in this order:
 - `20260715020752` converges reservation, Paper-candidate, Unknown-fill, and
   qualification calendar comparisons on an explicit `Asia/Seoul` date,
   including the 00:00-08:59 KST boundary.
+- `20260715041903` adds current-intent-excluding Paper bar participation to the
+  strict Worker bundle and serializes fill commits so aggregate account/symbol/
+  completed-bar quantity cannot exceed one percent of bar volume. It also
+  requires journal, projection, and provider-identity evidence in the contract
+  qualification `ledger_invariants` check.
+- `20260715041909` binds operation-command claim/ACK and reconciliation claim to
+  the active account lease release and fencing token; legacy tokenless overloads
+  remain fail-closed during a rolling Worker upgrade.
+- `20260715041912` binds sell-fill `POSITION_COST` postings to the immutable
+  moving-weighted-average checkpoint captured when the intent reserved shares;
+  checkpoint/projection disagreement rolls the transaction back.
+- `20260715041915` rejects mixed series/source/volume evidence for aggregate
+  Paper fills in one completed minute and permits only one active sell
+  reservation per account and symbol until its quantity reaches zero.
 
 ## Required project configuration
 
@@ -103,7 +121,8 @@ same tail to the retained `0015` fixture path, and converge the retained `0023`
 operational fixture. It then checks schema/grant/RLS assertions, Paper-only
 constraints, ledger invariants, command separation, append-only audit behavior,
 Paper source publication, KST cash settlement, Unknown V2 dedicated
-maker/checker application, and Worker RPC visibility. Also run the Python
+maker/checker application, aggregate Paper bar participation, lease-bound
+operation/reconciliation claims, and Worker RPC visibility. Also run the Python
 contract tests and repository safety checks.
 
 Do not use the service role or a database owner session as evidence for the

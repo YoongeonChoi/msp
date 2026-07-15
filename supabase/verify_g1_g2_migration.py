@@ -509,6 +509,88 @@ insert into private.provider_contract_registry (
 """
 
 
+def install_paper_fill_bar_evidence(
+    container: str,
+    *,
+    intent_id: str,
+    filled_at: str,
+    label: str,
+    volume: int = 1_000_000,
+) -> None:
+    if volume <= 0:
+        raise VerificationError("paper fill evidence volume must be positive")
+    series_id = str(uuid4())
+    fixture_id = str(uuid4())
+    strategy_version_id = str(uuid4())
+
+    def evidence_hash(kind: str) -> str:
+        return hashlib.sha256(f"{label}:{intent_id}:{kind}".encode()).hexdigest()
+
+    fixture_hash = evidence_hash("fixture")
+    psql(container, f"""
+insert into private.paper_bar_series (
+  id,environment,source_kind,dataset_version,symbol,model_version,
+  execution_policy_version,tick_rule_version,tick_size_krw,
+  tick_rule_evidence_sha256,volume_source,volume_evidence_sha256,
+  corporate_action_status,corporate_action_evidence_sha256,
+  market_calendar_version,market_calendar_evidence_sha256,effective_from,
+  effective_until,created_release_sha
+)
+select
+  '{series_id}','paper','local_fixture','{label}-{series_id}',intent.symbol,
+  'dedupe-model',intent.execution_policy_version,'dedupe-tick',1,
+  '{'c' * 64}','shares','{'d' * 64}','not_required','{'e' * 64}',
+  'dedupe-calendar','{'b' * 64}',intent.eligible_at-interval '1 day',
+  intent.expires_at+interval '1 day',intent.release_sha
+from private.order_intents as intent
+where intent.id='{intent_id}';
+insert into private.paper_bar_fixture_sets (
+  id,series_id,batch_sequence,first_minute,last_minute,bar_count,
+  observed_through,fixture_sha256,evidence_urn,release_sha,ingested_at
+)
+select
+  '{fixture_id}','{series_id}',1,
+  date_trunc('minute','{filled_at}'::timestamptz)-interval '1 minute',
+  date_trunc('minute','{filled_at}'::timestamptz)-interval '1 minute',1,
+  date_trunc('minute','{filled_at}'::timestamptz),'{fixture_hash}',
+  'urn:sha256:{fixture_hash}',intent.release_sha,clock_timestamp()
+from private.order_intents as intent
+where intent.id='{intent_id}';
+insert into private.paper_minute_bars (
+  fixture_set_id,series_id,sequence,minute,completed_at,as_of,source_sha256,
+  is_complete,open_krw,high_krw,low_krw,close_krw,volume,bar_sha256
+) values (
+  '{fixture_id}','{series_id}',1,
+  date_trunc('minute','{filled_at}'::timestamptz)-interval '1 minute',
+  date_trunc('minute','{filled_at}'::timestamptz),
+  date_trunc('minute','{filled_at}'::timestamptz),'{evidence_hash('source')}',
+  true,10000,10000,10000,10000,{volume},'{evidence_hash('bar')}'
+);
+insert into private.paper_execution_candidates (
+  intent_id,account_id,environment,semantic_key_sha256,decision_id,risk_result_id,
+  decision_feature_sha256,risk_evaluated_at,risk_expires_at,strategy_version_id,
+  symbol,side,quantity,limit_price_krw,cash_commitment_krw,decision_at,
+  signal_valid_from,signal_valid_until,eligible_at,expires_at,
+  execution_policy_version,cost_schedule_version,cost_schedule_evidence_sha256,
+  fixture_series_id,risk_input,candidate_sha256,source_release_sha,created_at
+)
+select
+  intent.id,intent.account_id,intent.environment,intent.semantic_key_sha256,
+  intent.decision_id,intent.risk_result_id,'{'7' * 64}',intent.decision_at,
+  risk.expires_at,'{strategy_version_id}',intent.symbol,intent.side,
+  intent.quantity,intent.limit_price_krw,intent.cash_commitment_krw,
+  intent.decision_at,intent.signal_valid_from,intent.signal_valid_until,
+  intent.eligible_at,date_trunc('minute',intent.expires_at),
+  intent.execution_policy_version,
+  intent.cost_schedule_version,intent.cost_schedule_evidence_sha256,
+  '{series_id}',jsonb_build_object('fixture_label','{label}'),
+  '{evidence_hash('candidate')}',intent.release_sha,intent.decision_at
+from private.order_intents as intent
+join private.risk_results as risk on risk.id=intent.risk_result_id
+where intent.id='{intent_id}';
+""")
+
+
 def jwt_claim_sql(user_id: str, *, role: str = "authenticated", totp: bool = True) -> str:
     method = "totp" if totp else "password"
     return f"""
@@ -586,11 +668,35 @@ select concat_ws('|',
   to_regprocedure('api.review_unknown_resolution_v2(jsonb)') is not null,
   to_regclass('private.paper_execution_work_items') is not null,
   to_regclass('private.cash_settlement_obligations') is not null,
-  to_regclass('private.unknown_execution_resolution_applications_v2') is not null
+  to_regclass('private.unknown_execution_resolution_applications_v2') is not null,
+  to_regprocedure(
+    'worker_api.claim_operation_command_batch(text,text,text,bigint,timestamptz,integer)'
+  ) is not null,
+  to_regprocedure(
+    'worker_api.acknowledge_operation_command(uuid,text,text,text,text,bigint,bigint,timestamptz,jsonb,text)'
+  ) is not null,
+  to_regprocedure(
+    'worker_api.claim_execution_reconciliation_batch(text,text,text,bigint,timestamptz,integer,integer,uuid,integer)'
+  ) is not null,
+  not has_function_privilege(
+    'service_role',
+    'worker_api.claim_operation_command_batch(text,text,timestamptz,integer)',
+    'EXECUTE'
+  ),
+  not has_function_privilege(
+    'service_role',
+    'worker_api.acknowledge_operation_command(uuid,text,text,text,timestamptz,jsonb,text)',
+    'EXECUTE'
+  ),
+  not has_function_privilege(
+    'service_role',
+    'worker_api.claim_execution_reconciliation_batch(text,text,timestamptz,integer,integer,uuid,integer)',
+    'EXECUTE'
+  )
 );
 """).stdout.strip()
     parts = result.split("|")
-    if len(parts) != 21:
+    if len(parts) != 27:
         raise VerificationError(f"catalog boundary shape mismatch: {result}")
     worker_rpc_count = int(parts[0])
     stable_boundary = parts[1:6]
@@ -717,6 +823,16 @@ with draft(value) as (select {draft}), grant_value(value) as (
 select api.request_account_opening_v1(draft.value || grant_value.value)
 from draft, grant_value;
 """)
+    bootstrap_probe = "87878787-8787-4787-8787-878787878787"
+    expect_failure(
+        container,
+        jwt_claim_sql(bootstrap_probe, role="service_role") + f"""
+select * from worker_api.acquire_worker_lease(
+  'paper-primary','{bootstrap_probe}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+""",
+        "open_trading_account_required",
+    )
     review = f"jsonb_build_object('schema_version',1,'review_id',gen_random_uuid()," \
         f"'command_id','{ACCOUNT_COMMAND}','command_type','account_opening'," \
         "'reviewer_role','risk_approver','decision','approve'," \
@@ -732,11 +848,26 @@ from draft, grant_value;
 """)
     holder = "88888888-8888-4888-8888-888888888888"
     result = psql(container, jwt_claim_sql(holder, role="service_role") + f"""
-select command_type from worker_api.claim_operation_command_batch(
-  '{holder}','{RELEASE_SHA}',clock_timestamp(),25);
+create temp table account_opening_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{holder}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+create temp table account_opening_claim as
+select * from worker_api.claim_operation_command_batch(
+  'paper-primary','{holder}','{RELEASE_SHA}',
+  (select fencing_token from account_opening_lease),clock_timestamp(),25
+);
+select command_type from account_opening_claim;
 select state from worker_api.acknowledge_operation_command(
-  '{ACCOUNT_COMMAND}','applied','{holder}','{RELEASE_SHA}',clock_timestamp(),
+  '{ACCOUNT_COMMAND}','applied','paper-primary','{holder}','{RELEASE_SHA}',
+  (select fencing_token from account_opening_lease),
+  (select revision from account_opening_claim where command_id='{ACCOUNT_COMMAND}'),
+  clock_timestamp(),
   '{{}}'::jsonb,null);
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{holder}',(select fencing_token from account_opening_lease),
+  clock_timestamp(),'{RELEASE_SHA}'
+);
 reset role;
 select concat_ws('|',
   (select state from private.trading_accounts where account_id='paper-primary'),
@@ -746,7 +877,7 @@ select concat_ws('|',
   (select settled_cash_krw::bigint from private.cash_balance_projection where account_id='paper-primary')
 );
 """).stdout.strip().splitlines()
-    if result[-3:] != ["account_opening", "applied", "open|1|2|10000000"]:
+    if result[-4:] != ["account_opening", "applied", "f", "open|1|2|10000000"]:
         raise VerificationError(f"account opening mismatch: {result}")
     print("PASS account opening request/review/claim/exact-once journal")
 
@@ -1012,13 +1143,23 @@ insert into private.operation_commands (
 );
 """)
     result = psql(container, jwt_claim_sql(holder, role="service_role") + f"""
+create temp table allowlist_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{holder}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
 select command_type from worker_api.claim_operation_command_batch(
-  '{holder}','{RELEASE_SHA}',clock_timestamp(),25);
+  'paper-primary','{holder}','{RELEASE_SHA}',
+  (select fencing_token from allowlist_lease),clock_timestamp(),25
+);
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{holder}',(select fencing_token from allowlist_lease),
+  clock_timestamp(),'{RELEASE_SHA}'
+);
 reset role;
 select count(*) from private.operation_commands
 where command_type='unknown_resolution' and state='approved';
-""").stdout.strip().splitlines()[-2:]
-    if result != ["pause_paper", "30"]:
+""").stdout.strip().splitlines()[-3:]
+    if result[-3:] != ["pause_paper", "f", "30"]:
         raise VerificationError(f"unsupported command queue starvation: {result}")
     print("PASS worker claim excludes unsupported commands before LIMIT")
 
@@ -1040,13 +1181,21 @@ insert into private.operation_commands (
   clock_timestamp()+interval '500 milliseconds','ack-expiry-regression'
 );
 """ + jwt_claim_sql(worker, role="service_role") + f"""
-select state from worker_api.acknowledge_operation_command(
-  '{command_id}','claimed','{worker}','{RELEASE_SHA}',clock_timestamp(),
-  '{{}}'::jsonb,null
+create temp table ack_expiry_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+create temp table ack_expiry_claim as
+select * from worker_api.claim_operation_command_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from ack_expiry_lease),clock_timestamp(),25
 );
 select pg_sleep(0.7);
 select state from worker_api.acknowledge_operation_command(
-  '{command_id}','applied','{worker}','{RELEASE_SHA}',clock_timestamp(),
+  '{command_id}','applied','paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from ack_expiry_lease),
+  (select revision from ack_expiry_claim where command_id='{command_id}'),
+  clock_timestamp(),
   '{{}}'::jsonb,null
 );
 """,
@@ -1058,7 +1207,182 @@ from private.operation_commands where id='{command_id}';
 """).stdout.strip()
     if state != f"claimed|{worker}|t":
         raise VerificationError(f"expired ACK mutated command: {state}")
+    ack_expiry_token = psql(container, f"""
+select fencing_token from private.worker_leases
+where account_id='paper-primary' and holder_id='{worker}';
+""").stdout.strip()
+    psql(container, jwt_claim_sql(worker, role="service_role") + f"""
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{worker}',{ack_expiry_token},
+  clock_timestamp(),'{RELEASE_SHA}'
+);
+""")
     print("PASS applied ACK rechecks command expiry against database time")
+
+
+def verify_command_claim_generation_fencing(container: str) -> None:
+    command_id = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae"
+    worker = "afafafaf-afaf-4faf-8faf-afafafafafaf"
+    first = psql(container, f"""
+insert into private.operation_commands (
+  id,command_type,state,requested_change,revision,requester_user_id,
+  reviewer_user_id,requested_at,reviewed_at,expires_at,idempotency_key
+)
+select
+  '{command_id}','pause_paper','approved',
+  jsonb_build_object(
+    'account_id','paper-primary','environment','paper',
+    'expected_state_version',control_epoch,'reason_code','claim_generation_test'
+  ),
+  1,'{OPERATOR}','{RISK}',clock_timestamp(),clock_timestamp(),
+  clock_timestamp()+interval '1 hour','claim-generation-fencing'
+from private.execution_controls where account_id='paper-primary';
+{jwt_claim_sql(worker, role='service_role')}
+create temp table command_generation_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+create temp table first_command_generation as
+select * from worker_api.claim_operation_command_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from command_generation_lease),clock_timestamp(),25
+);
+select concat_ws('|',
+  (select fencing_token from command_generation_lease),
+  (select revision from first_command_generation where command_id='{command_id}')
+);
+""").stdout.strip().splitlines()[-1].split("|")
+    fencing_token, first_revision = (int(value) for value in first)
+    second_revision = int(psql(container, f"""
+update private.operation_commands
+set claim_expires_at=claimed_at+interval '1 microsecond'
+where id='{command_id}';
+{jwt_claim_sql(worker, role='service_role')}
+select revision from worker_api.claim_operation_command_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',{fencing_token},
+  clock_timestamp(),25
+)
+where command_id='{command_id}';
+""").stdout.strip().splitlines()[-1])
+    if second_revision != first_revision + 1:
+        raise VerificationError(
+            "operation command reclaim did not advance claim revision"
+        )
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.acknowledge_operation_command(
+  '{command_id}','failed','paper-primary','{worker}','{RELEASE_SHA}',
+  {fencing_token},{first_revision},clock_timestamp(),
+  '{{}}'::jsonb,'stale_claim_generation'
+);
+""",
+        "operation_command_claim_generation_stale",
+    )
+    state = psql(container, f"""
+select concat_ws('|',state,revision,claim_fencing_token,claim_release_sha)
+from private.operation_commands where id='{command_id}';
+""").stdout.strip()
+    if state != f"claimed|{second_revision}|{fencing_token}|{RELEASE_SHA}":
+        raise VerificationError(f"stale command ACK mutated claim: {state}")
+
+    psql(container, f"""
+update private.operation_commands
+set claim_release_sha=null, claim_fencing_token=null
+where id='{command_id}';
+""")
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.acknowledge_operation_command(
+  '{command_id}','failed','paper-primary','{worker}','{RELEASE_SHA}',
+  {fencing_token},{second_revision},clock_timestamp(),
+  '{{}}'::jsonb,'legacy_tokenless_claim'
+);
+""",
+        "operation_command_claim_generation_stale",
+    )
+    tokenless_state = psql(container, f"""
+select concat_ws('|',state,revision,claim_release_sha is null,
+  claim_fencing_token is null)
+from private.operation_commands where id='{command_id}';
+""").stdout.strip()
+    if tokenless_state != f"claimed|{second_revision}|t|t":
+        raise VerificationError(
+            f"tokenless legacy command ACK mutated claim: {tokenless_state}"
+        )
+    psql(container, f"""
+update private.operation_commands
+set claim_release_sha='{RELEASE_SHA}', claim_fencing_token={fencing_token}
+where id='{command_id}';
+""")
+
+    contract_lease_before = psql(container, """
+select count(*) from private.worker_leases
+where account_id='contract-test-primary';
+""").stdout.strip()
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.claim_operation_command_batch(
+  'contract-test-primary','{worker}','{RELEASE_SHA}',{fencing_token},
+  clock_timestamp(),25
+);
+""",
+        "operation_command_worker_lease_stale_or_missing",
+    )
+    contract_lease_after = psql(container, """
+select count(*) from private.worker_leases
+where account_id='contract-test-primary';
+""").stdout.strip()
+    if contract_lease_before != contract_lease_after:
+        raise VerificationError("cross-account command claim created a worker lease")
+
+    terminal = psql(container, jwt_claim_sql(worker, role="service_role") + f"""
+select state from worker_api.acknowledge_operation_command(
+  '{command_id}','failed','paper-primary','{worker}','{RELEASE_SHA}',
+  {fencing_token},{second_revision},clock_timestamp(),
+  '{{}}'::jsonb,'claim_generation_test_complete'
+);
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{worker}',{fencing_token},clock_timestamp(),'{RELEASE_SHA}'
+);
+""").stdout.strip().splitlines()[-2:]
+    if terminal != ["failed", "f"]:
+        raise VerificationError(f"current command generation did not ACK: {terminal}")
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.claim_operation_command_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',{fencing_token},
+  clock_timestamp(),25
+);
+""",
+        "operation_command_worker_lease_stale_or_missing",
+    )
+    expect_failure(
+        container,
+        f"""
+select * from worker_api.claim_operation_command_batch(
+  '{worker}','{RELEASE_SHA}',clock_timestamp(),25
+);
+""",
+        "worker_upgrade_required",
+    )
+    expect_failure(
+        container,
+        f"""
+select * from worker_api.acknowledge_operation_command(
+  '{command_id}','failed','{worker}','{RELEASE_SHA}',clock_timestamp(),
+  '{{}}'::jsonb,'legacy_ack'
+);
+""",
+        "worker_upgrade_required",
+    )
+    print(
+        "PASS command claim account/lease generation, revision CAS and legacy "
+        "overloads fail closed"
+    )
 
 
 def verify_qualification_expiry_at_application(container: str) -> None:
@@ -1111,11 +1435,21 @@ from private.execution_controls where account_id='paper-primary';
 alter table private.operation_commands
   enable trigger guard_operation_command_v1_qualification;
 {jwt_claim_sql(worker, role='service_role')}
-select command_id from worker_api.claim_operation_command_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),25
-) where command_id='{command_id}';
+create temp table qualification_expiry_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+create temp table qualification_expiry_claim as
+select * from worker_api.claim_operation_command_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from qualification_expiry_lease),clock_timestamp(),25
+);
+select command_id from qualification_expiry_claim where command_id='{command_id}';
 select state from worker_api.acknowledge_operation_command(
-  '{command_id}','applied','{worker}','{RELEASE_SHA}',clock_timestamp(),
+  '{command_id}','applied','paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from qualification_expiry_lease),
+  (select revision from qualification_expiry_claim where command_id='{command_id}'),
+  clock_timestamp(),
   '{{}}'::jsonb,null
 );
 """,
@@ -1132,8 +1466,294 @@ select concat_ws('|',
 """).stdout.strip()
     if state != "claimed|f|1":
         raise VerificationError(f"expired qualification changed control: {state}")
+    qualification_expiry_token = psql(container, f"""
+select fencing_token from private.worker_leases
+where account_id='paper-primary' and holder_id='{worker}';
+""").stdout.strip()
+    psql(container, jwt_claim_sql(worker, role="service_role") + f"""
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{worker}',{qualification_expiry_token},
+  clock_timestamp(),'{RELEASE_SHA}'
+);
+""")
 
     print("PASS non-v1/expired qualification is rejected again at Worker apply")
+
+
+def verify_qualification_suite_upgrade_retry(container: str) -> None:
+    worker_id = "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1"
+    reference_request_id = "d2d2d2d2-d2d2-42d2-82d2-d2d2d2d2d2d2"
+    snapshot_id = "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3"
+    snapshot_sequence = int(
+        psql(
+            container,
+            """
+select coalesce(max(sequence), 0) + 1
+from private.account_snapshots
+where account_id='contract-test-primary'
+  and environment='contract_test';
+""",
+        ).stdout.strip()
+    )
+
+    def build_payload(run_id: str, suite_version: str, *, ledger_v2: bool) -> dict:
+        check_ids = [
+            "cancel_lifecycle",
+            "create_lifecycle",
+            "fault_injection",
+            "production_order_network_zero",
+            "status_partial_terminal",
+        ]
+        if ledger_v2:
+            check_ids.append("ledger_invariants")
+        checks = []
+        for check_id in sorted(check_ids):
+            metrics: dict[str, object] = {}
+            if check_id == "production_order_network_zero":
+                metrics = {"request_count": 0}
+            elif check_id == "ledger_invariants":
+                metrics = {
+                    "balanced_transaction_count": 1,
+                    "position_quantity": 1,
+                    "provider_identity_change_blocked": True,
+                    "projection_backed_by_journal": True,
+                }
+            checks.append(
+                {
+                    "check_id": check_id,
+                    "status": "pass",
+                    "evidence_sha256": hashlib.sha256(check_id.encode()).hexdigest(),
+                    "metrics": metrics,
+                }
+            )
+        base = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "run_kind": "contract_qualification",
+            "account_id": "contract-test-primary",
+            "environment": "contract_test",
+            "reference_bundle_request_id": reference_request_id,
+            "account_snapshot_id": snapshot_id,
+            "account_snapshot_sequence": snapshot_sequence,
+            "ledger_checkpoint_sha256": "4" * 64,
+            "release_sha": RELEASE_SHA,
+            "suite_version": suite_version,
+            "started_at": "2026-07-14T09:00:00+00:00",
+            "completed_at": "2026-07-14T09:01:00+00:00",
+            "result": "pass",
+            "evidence_manifest": {"schema_version": 1, "checks": checks},
+            "worker_id": worker_id,
+        }
+        encoded = json.dumps(base, separators=(",", ":"), sort_keys=True)
+        return json.loads(psql(container, f"""
+with payload(value) as (select $payload${encoded}$payload$::jsonb)
+select value || jsonb_build_object(
+  'evidence_sha256',private.sha256_jsonb_v1(value)
+)
+from payload;
+""").stdout.strip())
+
+    legacy_payload = build_payload(
+        "d4d4d4d4-d4d4-44d4-84d4-d4d4d4d4d4d4",
+        "contract-test-qualification-v1",
+        ledger_v2=False,
+    )
+    current_payload = build_payload(
+        "d5d5d5d5-d5d5-45d5-85d5-d5d5d5d5d5d5",
+        "contract-test-qualification-v2",
+        ledger_v2=True,
+    )
+
+    def payload_literal(payload: dict) -> str:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    # Reproduce an exact v1 row that was committed by the pre-upgrade RPC.  It
+    # is deliberately injected with trigger replication disabled because only
+    # an earlier deployed schema could have accepted that five-check suite.
+    legacy_encoded = payload_literal(legacy_payload)
+    psql(container, f"""
+set session_replication_role=replica;
+with payload(value) as (select $payload${legacy_encoded}$payload$::jsonb)
+insert into private.qualification_runs (
+  id,run_kind,account_id,environment,reference_bundle_request_id,
+  account_snapshot_id,account_snapshot_sequence,ledger_checkpoint_sha256,
+  release_sha,suite_version,result,evidence_manifest,evidence_sha256,
+  started_at,completed_at,worker_id
+)
+select
+  (value->>'run_id')::uuid,value->>'run_kind',value->>'account_id',
+  value->>'environment',(value->>'reference_bundle_request_id')::uuid,
+  (value->>'account_snapshot_id')::uuid,
+  (value->>'account_snapshot_sequence')::bigint,
+  value->>'ledger_checkpoint_sha256',value->>'release_sha',
+  value->>'suite_version',value->>'result',value->'evidence_manifest',
+  value->>'evidence_sha256',(value->>'started_at')::timestamptz,
+  (value->>'completed_at')::timestamptz,(value->>'worker_id')::uuid
+from payload;
+set session_replication_role=origin;
+""")
+
+    # Build valid storage prerequisites, then exercise the v2 RPC as a true
+    # first insertion.  This is distinct from the old-row exact retry above.
+    psql(container, f"""
+update private.trading_accounts
+set state='open',opened_at=clock_timestamp(),closed_at=null
+where account_id='contract-test-primary';
+insert into private.market_calendars (
+  id,environment,calendar_version,calendar_sha256,timezone_name,
+  valid_from,valid_until,status,evidence_id,requested_by,reviewed_by
+) values (
+  'e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1','contract_test',
+  'qualification-v2-calendar','{'a' * 64}','Asia/Seoul',current_date-1,
+  current_date+10,'approved','{CONTRACT_EVIDENCE}','{ADMIN_1}','{ADMIN_2}'
+);
+insert into private.paper_execution_model_registry (
+  id,environment,model_version,tick_size_evidence_sha256,
+  volume_model_evidence_sha256,corporate_action_evidence_sha256,
+  market_calendar_id,status,evidence_id,requested_by,reviewed_by,
+  effective_from,effective_until
+) values (
+  'e2e2e2e2-e2e2-42e2-82e2-e2e2e2e2e2e2','contract_test',
+  'qualification-v2-model','{'b' * 64}','{'c' * 64}','{'d' * 64}',
+  'e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1','approved',
+  '{CONTRACT_EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
+  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+);
+insert into private.paper_execution_policies (
+  id,account_id,policy_version,policy_sha256,status,price_model,fill_model,
+  parameters,evidence_id,requested_by,reviewed_by,effective_from,effective_until
+) values (
+  'e3e3e3e3-e3e3-43e3-83e3-e3e3e3e3e3e3','contract-test-primary',
+  'qualification-v2-policy','{'e' * 64}','approved',
+  'next_executable_minute_v1','whole_share_volume_bounded_v1','{{}}'::jsonb,
+  '{CONTRACT_EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
+  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+);
+insert into private.execution_cost_schedules (
+  id,account_id,schedule_version,schedule_sha256,buy_commission_rate,
+  sell_commission_rate,sell_tax_rate,settlement_days,status,evidence_id,
+  requested_by,reviewed_by,effective_from,effective_until
+) values (
+  'e4e4e4e4-e4e4-44e4-84e4-e4e4e4e4e4e4','contract-test-primary',
+  'qualification-v2-cost','{'f' * 64}',0,0,0,0,'approved',
+  '{CONTRACT_EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
+  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+);
+insert into private.control_approval_requests (
+  id,request_kind,account_id,environment,payload,payload_sha256,
+  requester_user_id,requested_at,expires_at,idempotency_key
+) values (
+  '{reference_request_id}','reference_bundle','contract-test-primary',
+  'contract_test',jsonb_build_object('release_sha','{RELEASE_SHA}'),
+  '{'1' * 64}','{ADMIN_1}',clock_timestamp()-interval '2 minutes',
+  clock_timestamp()+interval '1 hour',
+  'e5e5e5e5-e5e5-45e5-85e5-e5e5e5e5e5e5'
+);
+insert into private.control_approval_reviews (
+  id,request_id,decision,payload,payload_sha256,
+  expected_request_payload_sha256,reviewer_user_id,reviewed_at
+) values (
+  'e6e6e6e6-e6e6-46e6-86e6-e6e6e6e6e6e6','{reference_request_id}',
+  'approved','{{}}'::jsonb,'{'2' * 64}','{'1' * 64}','{ADMIN_2}',
+  clock_timestamp()-interval '1 minute'
+);
+insert into private.reference_bundle_materializations (
+  request_id,review_id,evidence_id,policy_id,cost_schedule_id,calendar_id,
+  execution_model_id,provider_contract_id,execution_model_sha256,
+  provider_contract_sha256,bundle_sha256
+) values (
+  '{reference_request_id}','e6e6e6e6-e6e6-46e6-86e6-e6e6e6e6e6e6',
+  '{CONTRACT_EVIDENCE}','e3e3e3e3-e3e3-43e3-83e3-e3e3e3e3e3e3',
+  'e4e4e4e4-e4e4-44e4-84e4-e4e4e4e4e4e4',
+  'e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1',
+  'e2e2e2e2-e2e2-42e2-82e2-e2e2e2e2e2e2',
+  (select id from private.provider_contract_registry
+    where provider='toss' and qualification_environment='contract_test'
+    order by created_at limit 1),
+  '{'3' * 64}','{OPENAPI_SHA256}','{'5' * 64}'
+);
+insert into private.account_snapshots (
+  id,account_id,environment,sequence,cash_krw,reserved_cash_krw,
+  positions_sha256,source_type,source_id,observed_at,
+  checkpoint_schema_version,ledger_checkpoint_sha256
+) values (
+  '{snapshot_id}','contract-test-primary','contract_test',{snapshot_sequence},
+  0,0,'{'6' * 64}',
+  'ledger_projection','e7e7e7e7-e7e7-47e7-87e7-e7e7e7e7e7e7',
+  clock_timestamp(),1,'{'4' * 64}'
+);
+{jwt_claim_sql(worker_id, role='service_role')}
+select fencing_token from worker_api.acquire_worker_lease(
+  'contract-test-primary','{worker_id}',clock_timestamp(),300,'{RELEASE_SHA}'
+);
+""")
+
+    current_encoded = payload_literal(current_payload)
+    current_first = json.loads(psql(
+        container,
+        jwt_claim_sql(worker_id, role="service_role") + f"""
+select worker_api.register_qualification_run_v2(
+  $payload${current_encoded}$payload$::jsonb
+);
+""",
+    ).stdout.strip().splitlines()[-1])
+    if (
+        current_first.get("inserted") is not True
+        or current_first.get("evidence_sha256")
+        != current_payload["evidence_sha256"]
+    ):
+        raise VerificationError(
+            f"qualification v2 first insertion mismatch: {current_first}"
+        )
+    legacy_retry = json.loads(psql(
+        container,
+        jwt_claim_sql(worker_id, role="service_role") + f"""
+select worker_api.register_qualification_run_v1(
+  $payload${legacy_encoded}$payload$::jsonb
+);
+""",
+    ).stdout.strip().splitlines()[-1])
+    current_retry = json.loads(psql(
+        container,
+        jwt_claim_sql(worker_id, role="service_role") + f"""
+select worker_api.register_qualification_run_v2(
+  $payload${current_encoded}$payload$::jsonb
+);
+""",
+    ).stdout.strip().splitlines()[-1])
+    if (
+        legacy_retry.get("inserted") is not False
+        or current_retry.get("inserted") is not False
+        or legacy_retry.get("evidence_sha256")
+        != legacy_payload["evidence_sha256"]
+        or current_retry.get("evidence_sha256")
+        != current_payload["evidence_sha256"]
+    ):
+        raise VerificationError(
+            f"qualification suite exact retry mismatch: {legacy_retry}|{current_retry}"
+        )
+    expect_failure(
+        container,
+        jwt_claim_sql(worker_id, role="service_role") + f"""
+select worker_api.register_qualification_run_v2(
+  $payload${legacy_encoded}$payload$::jsonb
+);
+""",
+        "qualification_run_values_invalid",
+    )
+    expect_failure(
+        container,
+        jwt_claim_sql(worker_id, role="service_role") + f"""
+select worker_api.register_qualification_run_v1(
+  $payload${current_encoded}$payload$::jsonb
+);
+""",
+        "qualification_run_check_set_invalid",
+    )
+    print(
+        "PASS qualification v1 exact retry survives v2 deployment, v2 first "
+        "submission persists, and suites remain version-separated"
+    )
 
 
 def verify_reconciliation_keyset(container: str) -> None:
@@ -1188,20 +1808,21 @@ select id,30,'pending',clock_timestamp()-interval '1 minute'
 from private.order_intents where decision_id='{decision}';
 """)
     result = psql(container, jwt_claim_sql(worker, role="service_role") + f"""
+create temp table reconciliation_lease as
+select fencing_token,expires_at from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
 create temp table first_batch as
 select * from worker_api.claim_execution_reconciliation_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),50,null,null,30);
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from reconciliation_lease),
+  clock_timestamp(),50,null,null,30);
 create temp table second_batch as
 select * from worker_api.claim_execution_reconciliation_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),50,30,
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from reconciliation_lease),
+  clock_timestamp(),50,30,
   (select intent_id from first_batch order by intent_id desc limit 1),30);
-select concat_ws('|',
-  (select count(*) from first_batch),
-  (select count(*) from second_batch),
-  (select count(distinct intent_id) from (
-    select intent_id from first_batch union all select intent_id from second_batch
-  ) as all_claims)
-);
 select state from worker_api.complete_execution_reconciliation(
   (select intent_id from first_batch order by intent_id limit 1),
   '{worker}','{RELEASE_SHA}',
@@ -1209,10 +1830,22 @@ select state from worker_api.complete_execution_reconciliation(
   clock_timestamp(),'reschedule',clock_timestamp()+interval '1 minute',
   'reconciliation_positive_control'
 );
+reset role;
+select concat_ws('|',
+  (select count(*) from first_batch),
+  (select count(*) from second_batch),
+  (select count(distinct intent_id) from (
+    select intent_id from first_batch union all select intent_id from second_batch
+  ) as all_claims),
+  (select lease.expires_at = initial.expires_at
+    from private.worker_leases as lease
+    cross join reconciliation_lease as initial
+    where lease.account_id='paper-primary')
+);
 """).stdout.strip().splitlines()[-2:]
-    if result != ["50|10|60", "pending"]:
+    if result != ["pending", "50|10|60|t"]:
         raise VerificationError(f"reconciliation keyset/starvation mismatch: {result}")
-    old_token = psql(container, f"""
+    old_token = psql(container, """
 select fencing_token from private.worker_leases where account_id='paper-primary';
 """).stdout.strip()
     psql(container, jwt_claim_sql(worker, role="service_role") + f"""
@@ -1220,6 +1853,36 @@ select idempotent from worker_api.release_worker_lease(
   'paper-primary','{worker}',{old_token},clock_timestamp(),'{RELEASE_SHA}'
 );
 """)
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.claim_execution_reconciliation_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',{old_token},
+  clock_timestamp(),1,null,null,30
+);
+""",
+        "reconciliation_worker_lease_stale_or_missing",
+    )
+    contract_lease_before = psql(container, """
+select count(*) from private.worker_leases
+where account_id='contract-test-primary';
+""").stdout.strip()
+    expect_failure(
+        container,
+        jwt_claim_sql(worker, role="service_role") + f"""
+select * from worker_api.claim_execution_reconciliation_batch(
+  'contract-test-primary','{worker}','{RELEASE_SHA}',{old_token},
+  clock_timestamp(),1,null,null,30
+);
+""",
+        "reconciliation_worker_lease_stale_or_missing",
+    )
+    contract_lease_after = psql(container, """
+select count(*) from private.worker_leases
+where account_id='contract-test-primary';
+""").stdout.strip()
+    if contract_lease_before != contract_lease_after:
+        raise VerificationError("cross-account reconciliation created a worker lease")
     new_token = psql(container, jwt_claim_sql(worker, role="service_role") + f"""
 select fencing_token from worker_api.acquire_worker_lease(
   'paper-primary','{worker}',clock_timestamp(),30,'{RELEASE_SHA}'
@@ -1330,9 +1993,15 @@ set lease_expires_at=clock_timestamp()-interval '1 second',
     next_reconcile_at=clock_timestamp()-interval '1 second'
 where intent_id='{candidate}';
 {jwt_claim_sql(worker, role='service_role')}
+create temp table manual_reconciliation_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
 select concat_ws('|',intent_id,lease_fencing_token)
 from worker_api.claim_execution_reconciliation_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),1,null,null,30
+  'paper-primary','{worker}','{RELEASE_SHA}',
+  (select fencing_token from manual_reconciliation_lease),
+  clock_timestamp(),1,null,null,30
 )
 where intent_id='{candidate}';
 """).stdout.strip().splitlines()[-1].split("|")
@@ -1408,6 +2077,11 @@ select concat_ws('|',
     ]
     if results != expected:
         raise VerificationError(f"manual reconciliation atomicity mismatch: {results}")
+    psql(container, jwt_claim_sql(worker, role="service_role") + f"""
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{worker}',{token},clock_timestamp(),'{RELEASE_SHA}'
+);
+""")
     print(
         "PASS manual reconciliation atomically stops execution and emits "
         "idempotent break/incident/outbox/audit evidence"
@@ -1507,9 +2181,9 @@ select fencing_token from worker_api.acquire_worker_lease(
 );
 reset role;
 with times as (
-  select
-    date_trunc('minute',clock_timestamp())-interval '1 minute' as decision_at,
-    date_trunc('minute',clock_timestamp())-interval '2 minutes' as signal_from,
+    select
+      date_trunc('minute',clock_timestamp())-interval '1 minute' as decision_at,
+      date_trunc('minute',clock_timestamp())-interval '2 minutes' as signal_from,
     date_trunc('minute',clock_timestamp())+interval '10 minutes' as signal_until,
     date_trunc('minute',clock_timestamp()) as eligible_at,
     date_trunc('minute',clock_timestamp())+interval '5 minutes' as expires_at,
@@ -1590,6 +2264,546 @@ select concat_ws('|',
     }
 
 
+def verify_single_active_sell_reservation(
+    container: str,
+    canonical: dict[str, str],
+) -> None:
+    symbol = "091990"
+    worker = canonical["worker_id"]
+    token = canonical["fencing_token"]
+    epoch = canonical["control_epoch"]
+    payloads = [
+        {
+            "intent_id": "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1",
+            "decision_id": "c2c2c2c2-c2c2-42c2-82c2-c2c2c2c2c2c2",
+            "risk_id": "c3c3c3c3-c3c3-43c3-83c3-c3c3c3c3c3c3",
+            "feature_hash": "6" * 64,
+            "window_offset": 1,
+        },
+        {
+            "intent_id": "d1d1d1d1-d1d1-41d1-81d1-d1d1d1d1d1d1",
+            "decision_id": "d2d2d2d2-d2d2-42d2-82d2-d2d2d2d2d2d2",
+            "risk_id": "d3d3d3d3-d3d3-43d3-83d3-d3d3d3d3d3d3",
+            "feature_hash": "7" * 64,
+            "window_offset": 2,
+        },
+    ]
+    psql(container, f"""
+insert into private.position_projection (
+  account_id,symbol,quantity,reserved_quantity,pending_sell_quantity,
+  average_cost_krw,projection_version,projected_at
+) values (
+  'paper-primary','{symbol}',3,0,0,10000,0,clock_timestamp()
+)
+on conflict (account_id,symbol) do update
+set quantity=3,reserved_quantity=0,pending_sell_quantity=0,
+    average_cost_krw=10000,projection_version=0,
+    projected_at=clock_timestamp();
+{jwt_claim_sql(worker, role='service_role')}
+select fencing_token from worker_api.renew_worker_lease(
+  'paper-primary','{worker}',{token},clock_timestamp(),300,'{RELEASE_SHA}'
+);
+""")
+    timing = json.loads(psql(container, f"""
+with times as (
+  select
+    date_trunc('minute',clock_timestamp())-interval '1 minute' as decision_at,
+    date_trunc('minute',clock_timestamp())-interval '2 minutes' as signal_from,
+    date_trunc('minute',clock_timestamp())-interval '30 seconds'
+      as risk_evaluated_at,
+    date_trunc('minute',clock_timestamp())+interval '5 minutes'
+      as risk_expires_at,
+    date_trunc('minute',clock_timestamp())+interval '10 minutes'
+      + interval '1 second' as signal_until_1,
+    date_trunc('minute',clock_timestamp())+interval '10 minutes'
+      + interval '2 seconds' as signal_until_2,
+    date_trunc('minute',clock_timestamp()) as eligible_at,
+    date_trunc('minute',clock_timestamp())+interval '5 minutes' as expires_at
+)
+select jsonb_build_object(
+  'decision_at',decision_at,'signal_from',signal_from,
+  'risk_evaluated_at',risk_evaluated_at,'risk_expires_at',risk_expires_at,
+  'signal_until_1',signal_until_1,'signal_until_2',signal_until_2,
+  'eligible_at',eligible_at,'expires_at',expires_at,
+  'semantic_key_1',private.compute_order_semantic_key(
+    'paper-primary','paper','dedupe-strategy','{symbol}','sell',
+    signal_from,signal_until_1,'dedupe-policy'
+  ),
+  'semantic_key_2',private.compute_order_semantic_key(
+    'paper-primary','paper','dedupe-strategy','{symbol}','sell',
+    signal_from,signal_until_2,'dedupe-policy'
+  )
+)
+from times;
+""").stdout.strip())
+    for index, payload in enumerate(payloads, start=1):
+        payload["semantic_key"] = timing[f"semantic_key_{index}"]
+        payload["signal_until"] = timing[f"signal_until_{index}"]
+
+    def reserve_sql(payload: dict[str, object]) -> str:
+        return jwt_claim_sql(worker, role="service_role") + f"""
+select concat_ws('|',result.reserved,result.intent_id,result.reservation_id,
+  result.reason_code)
+from worker_api.reserve_order_intent(
+  '{payload['intent_id']}','{payload['semantic_key']}',
+  'paper-primary','paper','dedupe-strategy','{payload['decision_id']}',
+  '{payload['feature_hash']}','{payload['risk_id']}',true,array[]::text[],
+  '{timing['risk_evaluated_at']}','{timing['risk_expires_at']}',
+  '{symbol}','sell',1,10000,'{timing['decision_at']}',
+  '{timing['signal_from']}','{payload['signal_until']}','dedupe-policy',
+  'dedupe-cost','{'1' * 64}',0,'{timing['eligible_at']}',
+  '{timing['expires_at']}',{epoch},
+  '{worker}',{token},'{RELEASE_SHA}'
+) as result;
+"""
+
+    def reserve_once(payload: dict[str, object]) -> tuple[str, str]:
+        result = psql(container, reserve_sql(payload), check=False)
+        if result.returncode == 0:
+            return "success", result.stdout.strip().splitlines()[-1]
+        return "failure", (result.stdout + "\n" + result.stderr).lower()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent = list(executor.map(reserve_once, payloads))
+    successes = [item for item in concurrent if item[0] == "success"]
+    failures = [item for item in concurrent if item[0] == "failure"]
+    if len(successes) != 1 or len(failures) != 1:
+        raise VerificationError(
+            f"active sell reservation concurrency mismatch: {concurrent}"
+        )
+    if "active_sell_reservation_exists" not in failures[0][1]:
+        raise VerificationError(
+            f"active sell reservation rejection mismatch: {failures[0][1]}"
+        )
+    created = successes[0][1].split("|")
+    if len(created) != 4 or created[0] != "t" or created[3] != "reserved":
+        raise VerificationError(f"active sell reservation create mismatch: {created}")
+    winner_intent, winner_reservation = created[1], created[2]
+    winner_index = next(
+        index
+        for index, payload in enumerate(payloads)
+        if payload["intent_id"] == winner_intent
+    )
+    loser_payload = payloads[1 - winner_index]
+
+    replay = reserve_once(payloads[winner_index])
+    expected_replay = (
+        "success",
+        f"f|{winner_intent}|{winner_reservation}|duplicate_semantic_intent",
+    )
+    if replay != expected_replay:
+        raise VerificationError(f"active sell exact replay mismatch: {replay}")
+
+    def release_reservation(intent_id: str, reason_code: str) -> None:
+        claimed = psql(
+            container,
+            f"""
+update private.execution_reconciliation_state
+set priority=0,state='pending',next_reconcile_at=clock_timestamp()-interval '1 second',
+    lease_owner=null,lease_expires_at=null
+where intent_id='{intent_id}';
+{jwt_claim_sql(worker, role='service_role')}
+select intent_id from worker_api.claim_execution_reconciliation_batch(
+  'paper-primary','{worker}','{RELEASE_SHA}',{token},clock_timestamp(),
+  1,null,null,30
+);
+""",
+        ).stdout.strip().splitlines()[-1]
+        if claimed != intent_id:
+            raise VerificationError(
+                f"active sell reconciliation claim mismatch: {claimed}"
+            )
+        released = psql(
+            container,
+            jwt_claim_sql(worker, role="service_role")
+            + f"""
+select concat_ws('|',state,reason_code,idempotent)
+from worker_api.fail_reserved_intent_pre_dispatch(
+  '{intent_id}','{worker}',{token},{epoch},'{RELEASE_SHA}',clock_timestamp(),
+  '{reason_code}'
+);
+""",
+        ).stdout.strip().splitlines()[-1]
+        if released != f"complete|{reason_code}|f":
+            raise VerificationError(
+                f"active sell terminal release mismatch: {released}"
+            )
+
+    release_reservation(winner_intent, "sell_reservation_verifier_release")
+    released_state = psql(container, f"""
+select concat_ws('|',
+  (select event_type from private.reservation_events
+    where intent_id='{winner_intent}' order by event_sequence desc limit 1),
+  (select remaining_quantity from private.reservation_events
+    where intent_id='{winner_intent}' order by event_sequence desc limit 1),
+  (select state from private.execution_reconciliation_state
+    where intent_id='{winner_intent}'),
+  (select reserved_quantity from private.position_projection
+    where account_id='paper-primary' and symbol='{symbol}')
+);
+""").stdout.strip()
+    if released_state != "released|0|complete|0":
+        raise VerificationError(
+            f"active sell terminal release state mismatch: {released_state}"
+        )
+
+    after_release = reserve_once(loser_payload)
+    if after_release[0] != "success":
+        raise VerificationError(
+            f"sell reservation after release was rejected: {after_release[1]}"
+        )
+    recreated = after_release[1].split("|")
+    if len(recreated) != 4 or recreated[0] != "t" or recreated[3] != "reserved":
+        raise VerificationError(
+            f"sell reservation after release mismatch: {after_release[1]}"
+        )
+    release_reservation(recreated[1], "sell_reservation_verifier_cleanup")
+    final_reserved = psql(container, f"""
+select reserved_quantity from private.position_projection
+where account_id='paper-primary' and symbol='{symbol}';
+""").stdout.strip()
+    if final_reserved != "0":
+        raise VerificationError(
+            f"sell reservation cleanup projection mismatch: {final_reserved}"
+        )
+    print(
+        "PASS concurrent sell reservation serializes exactly one active intent, "
+        "preserves exact replay, and permits the next intent after terminal release"
+    )
+
+
+def verify_aggregate_paper_bar_participation(
+    container: str,
+    canonical: dict[str, str],
+) -> None:
+    first_intent = canonical["intent_id"]
+    worker = canonical["worker_id"]
+    token = canonical["fencing_token"]
+    second_intent = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1"
+    second_decision = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2"
+    second_risk = "a3a3a3a3-a3a3-43a3-83a3-a3a3a3a3a3a3"
+    series_id = "a4a4a4a4-a4a4-44a4-84a4-a4a4a4a4a4a4"
+    fixture_id = "a5a5a5a5-a5a5-45a5-85a5-a5a5a5a5a5a5"
+    conflicting_series_id = "b4b4b4b4-b4b4-44b4-84b4-b4b4b4b4b4b4"
+    conflicting_fixture_id = "b5b5b5b5-b5b5-45b5-85b5-b5b5b5b5b5b5"
+    attempt_a = "a6a6a6a6-a6a6-46a6-86a6-a6a6a6a6a6a6"
+    attempt_b = "a7a7a7a7-a7a7-47a7-87a7-a7a7a7a7a7a7"
+    observation_a = "a8a8a8a8-a8a8-48a8-88a8-a8a8a8a8a8a8"
+    observation_b = "a9a9a9a9-a9a9-49a9-89a9-a9a9a9a9a9a9"
+    marker = psql(
+        container,
+        jwt_claim_sql(worker, role="service_role")
+        + f"""
+begin;
+reset role;
+create temp table participation_second_reservation on commit drop as
+with source as (
+  select
+    intent.*,
+    risk.evaluated_at as risk_evaluated_at,
+    risk.expires_at as risk_expires_at,
+    intent.signal_valid_until + interval '1 second' as second_signal_until,
+    private.compute_order_semantic_key(
+      intent.account_id,intent.environment,intent.strategy_version_id,
+      intent.symbol,intent.side,intent.signal_valid_from,
+      intent.signal_valid_until + interval '1 second',
+      intent.execution_policy_version
+    ) as second_semantic_key
+  from private.order_intents as intent
+  join private.risk_results as risk on risk.id=intent.risk_result_id
+  where intent.id='{first_intent}'
+)
+select result.*
+from source
+cross join lateral worker_api.reserve_order_intent(
+  '{second_intent}',source.second_semantic_key,'paper-primary','paper',
+  source.strategy_version_id,'{second_decision}','{'7' * 64}',
+  '{second_risk}',true,array[]::text[],source.risk_evaluated_at,
+  source.risk_expires_at,source.symbol,source.side,1,
+  source.limit_price_krw,source.decision_at,source.signal_valid_from,
+  source.second_signal_until,source.execution_policy_version,
+  source.cost_schedule_version,source.cost_schedule_evidence_sha256,
+  source.cash_commitment_krw,source.eligible_at,source.expires_at,
+  source.control_epoch,'{worker}',{token},'{RELEASE_SHA}'
+) as result;
+reset role;
+do $verify$
+begin
+  if not exists (
+    select 1 from participation_second_reservation
+    where reserved and intent_id='{second_intent}'
+  ) then
+    raise exception 'participation_second_intent_reservation_failed';
+  end if;
+end;
+$verify$;
+
+create temp table participation_bar on commit drop as
+select
+  date_trunc('minute',clock_timestamp())-interval '2 minutes' as minute,
+  date_trunc('minute',clock_timestamp())-interval '1 minute' as completed_at;
+
+insert into private.paper_bar_series (
+  id,environment,source_kind,dataset_version,symbol,model_version,
+  execution_policy_version,tick_rule_version,tick_size_krw,
+  tick_rule_evidence_sha256,volume_source,volume_evidence_sha256,
+  corporate_action_status,corporate_action_evidence_sha256,
+  market_calendar_version,market_calendar_evidence_sha256,effective_from,
+  effective_until,created_release_sha
+) values (
+  '{series_id}','paper','local_fixture','aggregate-cap-verifier-v1','005930',
+  'dedupe-model','dedupe-policy','dedupe-tick',1,'{'c' * 64}','shares',
+  '{'d' * 64}','not_required','{'e' * 64}','dedupe-calendar','{'b' * 64}',
+  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day',
+  '{RELEASE_SHA}'
+);
+insert into private.paper_bar_fixture_sets (
+  id,series_id,batch_sequence,first_minute,last_minute,bar_count,
+  observed_through,fixture_sha256,evidence_urn,release_sha,ingested_at
+)
+select
+  '{fixture_id}','{series_id}',1,minute,minute,1,completed_at,'{'2' * 64}',
+  'urn:sha256:{'2' * 64}','{RELEASE_SHA}',clock_timestamp()
+from participation_bar;
+insert into private.paper_minute_bars (
+  fixture_set_id,series_id,sequence,minute,completed_at,as_of,source_sha256,
+  is_complete,open_krw,high_krw,low_krw,close_krw,volume,bar_sha256
+)
+select
+  '{fixture_id}','{series_id}',1,minute,completed_at,completed_at,'{'3' * 64}',
+  true,10000,10000,10000,10000,100,'{'4' * 64}'
+from participation_bar;
+insert into private.paper_bar_series (
+  id,environment,source_kind,dataset_version,symbol,model_version,
+  execution_policy_version,tick_rule_version,tick_size_krw,
+  tick_rule_evidence_sha256,volume_source,volume_evidence_sha256,
+  corporate_action_status,corporate_action_evidence_sha256,
+  market_calendar_version,market_calendar_evidence_sha256,effective_from,
+  effective_until,created_release_sha
+) values (
+  '{conflicting_series_id}','paper','local_fixture',
+  'aggregate-conflict-verifier-v1','005930','dedupe-model','dedupe-policy',
+  'dedupe-tick',1,'{'c' * 64}','conflicting-shares','{'6' * 64}',
+  'not_required','{'e' * 64}','dedupe-calendar','{'b' * 64}',
+  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day',
+  '{RELEASE_SHA}'
+);
+insert into private.paper_bar_fixture_sets (
+  id,series_id,batch_sequence,first_minute,last_minute,bar_count,
+  observed_through,fixture_sha256,evidence_urn,release_sha,ingested_at
+)
+select
+  '{conflicting_fixture_id}','{conflicting_series_id}',1,minute,minute,1,
+  completed_at,'{'7' * 64}','urn:sha256:{'7' * 64}','{RELEASE_SHA}',
+  clock_timestamp()
+from participation_bar;
+insert into private.paper_minute_bars (
+  fixture_set_id,series_id,sequence,minute,completed_at,as_of,source_sha256,
+  is_complete,open_krw,high_krw,low_krw,close_krw,volume,bar_sha256
+)
+select
+  '{conflicting_fixture_id}','{conflicting_series_id}',1,minute,completed_at,
+  completed_at,'{'8' * 64}',true,10000,10000,10000,10000,1000,'{'9' * 64}'
+from participation_bar;
+insert into private.paper_execution_candidates (
+  intent_id,account_id,environment,semantic_key_sha256,decision_id,risk_result_id,
+  decision_feature_sha256,risk_evaluated_at,risk_expires_at,strategy_version_id,
+  symbol,side,quantity,limit_price_krw,cash_commitment_krw,decision_at,
+  signal_valid_from,signal_valid_until,eligible_at,expires_at,
+  execution_policy_version,cost_schedule_version,cost_schedule_evidence_sha256,
+  fixture_series_id,risk_input,candidate_sha256,source_release_sha,created_at
+)
+select
+  intent.id,intent.account_id,intent.environment,intent.semantic_key_sha256,
+  intent.decision_id,intent.risk_result_id,'{'7' * 64}',intent.decision_at,
+  risk.expires_at,'b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1',intent.symbol,
+  intent.side,intent.quantity,intent.limit_price_krw,intent.cash_commitment_krw,
+  intent.decision_at,intent.signal_valid_from,intent.signal_valid_until,
+  intent.eligible_at,intent.expires_at,intent.execution_policy_version,
+  intent.cost_schedule_version,intent.cost_schedule_evidence_sha256,
+  '{series_id}','{{}}'::jsonb,
+  case when intent.id='{first_intent}' then '{'5' * 64}' else '{'6' * 64}' end,
+  intent.release_sha,intent.created_at
+from private.order_intents as intent
+join private.risk_results as risk on risk.id=intent.risk_result_id
+where intent.id in ('{first_intent}','{second_intent}');
+
+insert into private.order_attempts (
+  id,reservation_id,intent_id,account_id,environment,broker,lease_holder_id,
+  fencing_token,control_epoch,client_order_key,request_sha256,prepared_at
+)
+select
+  case when reservation.intent_id='{first_intent}'
+    then '{attempt_a}'::uuid else '{attempt_b}'::uuid end,
+  reservation.id,reservation.intent_id,reservation.account_id,
+  reservation.environment,'internal_paper','{worker}',reservation.fencing_token,
+  reservation.control_epoch,
+  case when reservation.intent_id='{first_intent}'
+    then 'aggregate-cap-verifier-a' else 'aggregate-cap-verifier-b' end,
+  case when reservation.intent_id='{first_intent}'
+    then '{'8' * 64}' else '{'9' * 64}' end,
+  bar.completed_at-interval '1 second'
+from private.order_reservations as reservation
+cross join participation_bar as bar
+where reservation.intent_id in ('{first_intent}','{second_intent}');
+insert into private.provider_order_bindings (
+  attempt_id,intent_id,provider_order_id,binding_sha256,bound_at
+)
+select '{attempt_a}'::uuid,'{first_intent}'::uuid,
+       'paper:{first_intent}','{'a' * 64}',
+       completed_at-interval '1 second'
+from participation_bar
+union all
+select '{attempt_b}'::uuid,'{second_intent}'::uuid,
+       'paper:{second_intent}','{'f' * 64}',
+       completed_at-interval '1 second'
+from participation_bar;
+insert into private.execution_observations (
+  id,intent_id,attempt_id,sequence,event_type,observed_at,cumulative_quantity,
+  cumulative_gross_krw,cumulative_commission_krw,cumulative_tax_krw,
+  observation_sha256,provider_order_id,provider_execution_id,
+  provider_observation_sha256
+)
+select '{observation_a}'::uuid,'{first_intent}'::uuid,'{attempt_a}'::uuid,
+       1,'filled',completed_at,
+       1,10000,0,0,'{'0' * 64}','paper:{first_intent}',
+       'paper:{first_intent}:fill:1','{'1' * 64}'
+from participation_bar
+union all
+select '{observation_b}'::uuid,'{second_intent}'::uuid,'{attempt_b}'::uuid,
+       1,'filled',completed_at,
+       1,10000,0,0,'{'2' * 64}','paper:{second_intent}',
+       'paper:{second_intent}:fill:1','{'3' * 64}'
+from participation_bar;
+
+insert into private.fills (
+  event_id,intent_id,attempt_id,account_id,broker,provider_execution_id,
+  quantity,price_krw,commission_krw,tax_krw,filled_at,settlement_date
+)
+select '{observation_a}','{first_intent}','{attempt_a}','paper-primary',
+       'internal_paper','paper:{first_intent}:fill:1',1,10000,0,0,completed_at,
+       (completed_at at time zone 'Asia/Seoul')::date
+from participation_bar;
+do $verify$
+declare
+  rejected boolean := false;
+begin
+  begin
+    insert into private.fills (
+      event_id,intent_id,attempt_id,account_id,broker,provider_execution_id,
+      quantity,price_krw,commission_krw,tax_krw,filled_at,settlement_date
+    )
+    select '{observation_b}','{second_intent}','{attempt_b}','paper-primary',
+           'internal_paper','paper:{second_intent}:fill:1',1,10000,0,0,
+           completed_at,(completed_at at time zone 'Asia/Seoul')::date
+    from participation_bar;
+  exception
+    when check_violation then
+      if sqlerrm <> 'paper_bar_participation_capacity_exceeded' then
+        raise;
+      end if;
+      rejected := true;
+  end;
+  if not rejected then
+    raise exception 'aggregate_paper_bar_participation_was_not_rejected';
+  end if;
+  if (
+    select concat_ws('|',count(*),coalesce(sum(fill.quantity),0))
+    from private.fills as fill
+    join private.order_intents as intent on intent.id=fill.intent_id
+    cross join participation_bar as bar
+    where fill.account_id='paper-primary'
+      and intent.symbol='005930'
+      and fill.filled_at=bar.completed_at
+  ) <> '1|1' then
+    raise exception 'aggregate_paper_bar_participation_count_mismatch';
+  end if;
+end;
+$verify$;
+
+-- Candidate rows are immutable in production.  The disposable verifier
+-- rewires only the unfilled second fixture to prove both conflicting evidence
+-- arrival orders against the same already-committed fill.
+alter table private.paper_execution_candidates
+  disable trigger reject_paper_execution_candidate_mutation;
+update private.paper_execution_candidates
+set fixture_series_id='{conflicting_series_id}'
+where intent_id='{second_intent}';
+alter table private.paper_execution_candidates
+  enable trigger reject_paper_execution_candidate_mutation;
+do $verify$
+declare
+  rejected boolean := false;
+begin
+  begin
+    insert into private.fills (
+      event_id,intent_id,attempt_id,account_id,broker,provider_execution_id,
+      quantity,price_krw,commission_krw,tax_krw,filled_at,settlement_date
+    )
+    select '{observation_b}','{second_intent}','{attempt_b}','paper-primary',
+           'internal_paper','paper:{second_intent}:fill:1',1,10000,0,0,
+           completed_at,(completed_at at time zone 'Asia/Seoul')::date
+    from participation_bar;
+  exception
+    when check_violation then
+      if sqlerrm <> 'paper_bar_participation_evidence_conflict' then
+        raise;
+      end if;
+      rejected := true;
+  end;
+  if not rejected then
+    raise exception 'paper_bar_cross_series_conflict_was_not_rejected';
+  end if;
+end;
+$verify$;
+
+alter table private.paper_execution_candidates
+  disable trigger reject_paper_execution_candidate_mutation;
+update private.paper_execution_candidates
+set fixture_series_id='{conflicting_series_id}'
+where intent_id='{first_intent}';
+update private.paper_execution_candidates
+set fixture_series_id='{series_id}'
+where intent_id='{second_intent}';
+alter table private.paper_execution_candidates
+  enable trigger reject_paper_execution_candidate_mutation;
+do $verify$
+declare
+  rejected boolean := false;
+begin
+  begin
+    insert into private.fills (
+      event_id,intent_id,attempt_id,account_id,broker,provider_execution_id,
+      quantity,price_krw,commission_krw,tax_krw,filled_at,settlement_date
+    )
+    select '{observation_b}','{second_intent}','{attempt_b}','paper-primary',
+           'internal_paper','paper:{second_intent}:fill:1',1,10000,0,0,
+           completed_at,(completed_at at time zone 'Asia/Seoul')::date
+    from participation_bar;
+  exception
+    when check_violation then
+      if sqlerrm <> 'paper_bar_participation_evidence_conflict' then
+        raise;
+      end if;
+      rejected := true;
+  end;
+  if not rejected then
+    raise exception 'paper_bar_reverse_series_conflict_was_not_rejected';
+  end if;
+end;
+$verify$;
+select 'aggregate_participation_ok';
+rollback;
+""",
+    ).stdout.strip().splitlines()
+    if "aggregate_participation_ok" not in marker:
+        raise VerificationError(f"aggregate participation marker missing: {marker}")
+    print(
+        "PASS aggregate Paper bar participation cap and cross-series evidence "
+        "conflicts are order-independent"
+    )
+
+
 def verify_execution_transition_guards(container: str) -> None:
     base = "private.execution_observation_transition_violation"
     valid = psql(container, f"""
@@ -1666,11 +2880,17 @@ set acquired_at=clock_timestamp()-interval '2 minutes',
 where account_id='paper-primary' and holder_id='{crashed_worker}'
   and fencing_token={crashed_token};
 """ + jwt_claim_sql(worker, role="service_role") + f"""
+create temp table pre_dispatch_recovery_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker}',clock_timestamp(),120,'{NEXT_RELEASE_SHA}'
+);
 select concat_ws('|',intent_id,lease_fencing_token,reservation_fencing_token,
   control_epoch,reservation_control_epoch,intent_release_sha,lease_release_sha,
   recovery_disposition)
 from worker_api.claim_execution_reconciliation_batch(
-  '{worker}','{NEXT_RELEASE_SHA}',clock_timestamp(),1,null,null,120
+  'paper-primary','{worker}','{NEXT_RELEASE_SHA}',
+  (select fencing_token from pre_dispatch_recovery_lease),
+  clock_timestamp(),1,null,null,120
 );
 """).stdout.strip().splitlines()[-1]
     claim_parts = claim.split("|")
@@ -1863,12 +3083,20 @@ from worker_api.mark_dispatch_started(
     if not reserved[0].startswith(f"t|{intent_id}|") or not reserved[1].endswith("|prepared"):
         raise VerificationError(f"partial fixture reserve/dispatch mismatch: {reserved}")
 
-    observed = json.loads(psql(container, """
+    observed = json.loads(psql(container, f"""
 select jsonb_build_object(
-  'observed_at',clock_timestamp(),
-  'settlement_date',(clock_timestamp() at time zone 'Asia/Seoul')::date
-);
+  'observed_at',intent.eligible_at,
+  'settlement_date',(intent.eligible_at at time zone 'Asia/Seoul')::date
+)
+from private.order_intents as intent
+where intent.id='{intent_id}';
 """).stdout.strip())
+    install_paper_fill_bar_evidence(
+        container,
+        intent_id=intent_id,
+        filled_at=observed["observed_at"],
+        label="partial-resume-accounting",
+    )
     observation_hash = psql(container, f"""
 select encode(digest(convert_to(concat_ws('|',
   '{intent_id}','1','partial_filled','paper:{intent_id}',
@@ -1933,7 +3161,7 @@ select concat_ws('|',
 
     expect_failure(
         container,
-        f"""
+        """
 begin;
 update private.execution_controls
 set execution_enabled=false,control_epoch=3,effective_at=clock_timestamp(),
@@ -1950,7 +3178,7 @@ rollback;
     )
     expect_failure(
         container,
-        f"""
+        """
 begin;
 update private.execution_controls
 set execution_enabled=false,control_epoch=3,effective_at=clock_timestamp(),
@@ -1965,7 +3193,7 @@ rollback;
 """,
         "paper_checkpoint_control_revalidation_failed",
     )
-    stopped_duplicate = psql(container, f"""
+    stopped_duplicate = psql(container, """
 begin;
 update private.execution_controls
 set execution_enabled=false,control_epoch=3,effective_at=clock_timestamp(),
@@ -2038,11 +3266,17 @@ set state='pending',next_reconcile_at=clock_timestamp()-interval '1 second',
     lease_owner=null,lease_expires_at=null
 where intent_id='{intent_id}';
 """ + jwt_claim_sql(worker_b, role="service_role") + f"""
+create temp table partial_resume_lease as
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{worker_b}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
 select concat_ws('|',intent_id,lease_fencing_token,reservation_fencing_token,
   latest_sequence,latest_status,latest_cumulative_quantity,
   observation_history_sha256,recovery_disposition,control_epoch)
 from worker_api.claim_execution_reconciliation_batch(
-  '{worker_b}','{RELEASE_SHA}',clock_timestamp(),1,null,null,120
+  'paper-primary','{worker_b}','{RELEASE_SHA}',
+  (select fencing_token from partial_resume_lease),
+  clock_timestamp(),1,null,null,120
 );
 """).stdout.strip().splitlines()[-1].split("|")
     if claim[:6] != [
@@ -2243,6 +3477,12 @@ select jsonb_build_object(
   )
 );
 """).stdout.strip())
+        install_paper_fill_bar_evidence(
+            container,
+            intent_id=intent_id,
+            filled_at=observed["observed_at"],
+            label=f"cash-settlement-{intent_id}",
+        )
         observation_hash = psql(container, f"""
 select encode(digest(convert_to(concat_ws('|',
   '{intent_id}','1','filled','paper:{intent_id}',
@@ -2685,6 +3925,13 @@ from worker_api.mark_dispatch_started(
             raise VerificationError(
                 f"unknown V2 {case['name']} reserve/dispatch mismatch: {prepared}"
             )
+        if case["fill_quantity"]:
+            install_paper_fill_bar_evidence(
+                container,
+                intent_id=case["intent"],
+                filled_at=values["boundary_filled_at"],
+                label=f"unknown-v2-{case['name']}",
+            )
 
     for case in cases:
         observed_at = psql(container, f"""
@@ -2881,7 +4128,8 @@ from draft,grant_value;
             container,
             jwt_claim_sql(worker, role="service_role") + f"""
 select count(*) from worker_api.claim_operation_command_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),25
+  'paper-primary','{worker}','{RELEASE_SHA}',{fencing_token},
+  clock_timestamp(),25
 ) where command_id='{case['request']}';
 """,
         ).stdout.strip().splitlines()[-1]
@@ -2921,21 +4169,23 @@ from worker_api.claim_unknown_resolution_v2(
                 container,
                 jwt_claim_sql(worker, role="service_role") + f"""
 select * from worker_api.acknowledge_operation_command(
-  '{case['request']}','applied','{worker}','{RELEASE_SHA}',clock_timestamp(),
+  '{case['request']}','applied','paper-primary','{worker}','{RELEASE_SHA}',
+  {fencing_token},{command_revision},clock_timestamp(),
   '{{}}'::jsonb,null
 );
 """,
-                "operation_command_account_id_required",
+                "operation_command_not_worker_applicable",
             )
             expect_failure(
                 container,
                 jwt_claim_sql(worker, role="service_role") + f"""
 select * from worker_api.acknowledge_operation_command(
-  '{case['request']}','failed','{worker}','{RELEASE_SHA}',clock_timestamp(),
+  '{case['request']}','failed','paper-primary','{worker}','{RELEASE_SHA}',
+  {fencing_token},{command_revision},clock_timestamp(),
   '{{}}'::jsonb,'generic_ack_bypass_attempt'
 );
 """,
-                "unknown_resolution_v2_command_transition_invalid",
+                "operation_command_not_worker_applicable",
             )
             for token_value, fence_value, epoch_value, expected_fragment in (
                 (
@@ -2968,6 +4218,25 @@ select worker_api.apply_unknown_resolution_v2(
 """,
                     expected_fragment,
                 )
+
+        if case["side"] == "sell":
+            expect_failure(
+                container,
+                f"""
+begin;
+update private.position_projection
+set average_cost_krw=average_cost_krw+1
+where account_id='paper-primary' and symbol='{case['symbol']}';
+{jwt_claim_sql(worker, role="service_role")}
+select worker_api.apply_unknown_resolution_v2(
+  '{case['request']}','{claim_token}','{worker}','{RELEASE_SHA}',
+  {fencing_token},{command_revision},{work_revision},{resolution_epoch},
+  clock_timestamp()
+);
+rollback;
+""",
+                "sell_fill_position_cost_not_pinned",
+            )
 
         before_counts = psql(container, f"""
 select concat_ws('|',
@@ -3091,6 +4360,62 @@ select concat_ws('|',
     if outcome_state != "2|0|0|0":
         raise VerificationError(
             f"unknown V2 buy/sell/no-fill outcomes mismatch: {outcome_state}"
+        )
+
+    sell_case = cases[1]
+    sell_checkpoint_state = psql(container, f"""
+select concat_ws('|',
+  intent.position_cost_basis_method='moving_weighted_average_v1',
+  intent.position_quantity_snapshot >= intent.quantity,
+  intent.position_total_cost_krw = round(
+    intent.position_quantity_snapshot * intent.position_average_cost_krw
+  )::bigint,
+  intent.position_cost_basis_sha256 = pg_catalog.encode(
+    public.digest(
+      pg_catalog.convert_to(
+        jsonb_build_object(
+          'method','moving_weighted_average_v1',
+          'account_id',intent.account_id,
+          'symbol',intent.symbol,
+          'quantity',intent.position_quantity_snapshot,
+          'average_cost_krw_4dp',to_char(
+            intent.position_average_cost_krw,
+            'FM99999999999999999999.0000'
+          ),
+          'total_cost_krw',intent.position_total_cost_krw,
+          'projection_version',intent.position_projection_version
+        )::text,
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  ),
+  exists (
+    select 1
+    from private.accounting_transactions as transaction
+    join private.accounting_postings as posting
+      on posting.journal_entry_id=transaction.id
+    join private.ledger_accounts as ledger
+      on ledger.id=posting.ledger_account_id
+    where transaction.correlation_id=intent.id
+      and transaction.source_type='fill'
+      and ledger.ledger_code='POSITION_COST'
+      and posting.side='credit'
+      and posting.amount_krw = floor(
+        intent.position_total_cost_krw::numeric
+          * {sell_case['fill_quantity']}
+          / intent.position_quantity_snapshot
+      )
+  )
+)
+from private.order_intents as intent
+where intent.id='{sell_case['intent']}';
+""").stdout.strip()
+    if sell_checkpoint_state != "t|t|t|t|t":
+        raise VerificationError(
+            "unknown V2 sell checkpoint accounting mismatch: "
+            f"{sell_checkpoint_state}"
         )
 
     expected_cases = {case["intent"]: case for case in cases}
@@ -3389,7 +4714,7 @@ where existing_intent.id='{intent_id}';
     final_state = psql(container, jwt_claim_sql(worker, role="service_role") + f"""
 create temp table unknown_claim as
 select * from worker_api.claim_operation_command_batch(
-  '{worker}','{RELEASE_SHA}',clock_timestamp(),25
+  'paper-primary','{worker}','{RELEASE_SHA}',{token},clock_timestamp(),25
 );
 reset role;
 select concat_ws('|',
@@ -3538,7 +4863,16 @@ def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
         )
     auth = jwt_token("authenticated", VIEWER)
     operator = jwt_token("authenticated", OPERATOR)
-    service = jwt_token("service_role", "00000000-0000-4000-8000-000000000099")
+    service_holder = "00000000-0000-4000-8000-000000000099"
+    service = jwt_token("service_role", service_holder)
+    service_fencing_token = psql(
+        pg,
+        jwt_claim_sql(service_holder, role="service_role") + f"""
+select fencing_token from worker_api.acquire_worker_lease(
+  'paper-primary','{service_holder}',clock_timestamp(),120,'{RELEASE_SHA}'
+);
+""",
+    ).stdout.strip().splitlines()[-1]
     status, _ = http_post(f"{root}/rpc/get_desktop_operations_snapshot_v1", auth)
     if status != 200:
         raise VerificationError(f"authenticated snapshot failed through PostgREST: {status}")
@@ -3571,15 +4905,21 @@ def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
         )
     status, _ = http_post(
         f"{root}/rpc/claim_operation_command_batch", auth, profile="worker_api",
-        body={"p_holder_id": str(uuid4()), "p_release_sha": RELEASE_SHA,
-              "p_now": "2026-07-14T12:00:00Z", "p_limit": 1},
+        body={"p_account_id": "paper-primary", "p_holder_id": service_holder,
+              "p_release_sha": RELEASE_SHA,
+              "p_fencing_token": int(service_fencing_token),
+              "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "p_limit": 1},
     )
     if status not in (401, 403, 404):
         raise VerificationError(f"authenticated worker RPC unexpectedly allowed: {status}")
     status, _ = http_post(
         f"{root}/rpc/claim_operation_command_batch", service, profile="worker_api",
-        body={"p_holder_id": str(uuid4()), "p_release_sha": RELEASE_SHA,
-              "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "p_limit": 1},
+        body={"p_account_id": "paper-primary", "p_holder_id": service_holder,
+              "p_release_sha": RELEASE_SHA,
+              "p_fencing_token": int(service_fencing_token),
+              "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "p_limit": 1},
     )
     if status != 200:
         raise VerificationError(f"service worker RPC failed through PostgREST: {status}")
@@ -3591,6 +4931,12 @@ def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
         raise VerificationError(
             f"service unknown V2 projection unexpectedly allowed: {status}"
         )
+    psql(pg, jwt_claim_sql(service_holder, role="service_role") + f"""
+select idempotent from worker_api.release_worker_lease(
+  'paper-primary','{service_holder}',{service_fencing_token},
+  clock_timestamp(),'{RELEASE_SHA}'
+);
+""")
     print(
         "PASS actual PostgREST anon/authenticated/service boundary and unknown "
         "V2 role projection"
@@ -3621,11 +4967,15 @@ def main() -> int:
         verify_strict_auth(pg)
         verify_access_maker_checker(pg)
         verify_account_opening(pg)
+        verify_qualification_suite_upgrade_retry(pg)
         verify_command_claim_allowlist(pg)
         verify_command_ack_expiry(pg)
+        verify_command_claim_generation_fencing(pg)
         verify_qualification_expiry_at_application(pg)
         verify_reconciliation_keyset(pg)
         canonical = verify_semantic_dedupe_concurrency(pg)
+        verify_single_active_sell_reservation(pg, canonical)
+        verify_aggregate_paper_bar_participation(pg, canonical)
         verify_execution_transition_guards(pg)
         verify_pre_dispatch_recovery(pg, canonical)
         verify_partial_resume_accounting_and_expiry(pg)

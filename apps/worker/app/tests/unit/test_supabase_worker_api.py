@@ -1008,7 +1008,10 @@ async def test_worker_api_uses_exact_reconciliation_claim_and_completion_contrac
             client=client,
         )
         claims = await adapter.claim_execution_reconciliation_batch(
+            account_id=account_id,
             worker_id=worker_id,
+            release_sha="a" * 40,
+            fencing_token=7,
             now=now,
             limit=50,
             after_priority=None,
@@ -1037,6 +1040,7 @@ async def test_worker_api_uses_exact_reconciliation_claim_and_completion_contrac
         (
             "/rest/v1/rpc/claim_execution_reconciliation_batch",
             {
+                "p_account_id": account_id,
                 "p_worker_id": worker_id,
                 "p_now": now.isoformat(),
                 "p_limit": 50,
@@ -1044,6 +1048,7 @@ async def test_worker_api_uses_exact_reconciliation_claim_and_completion_contrac
                 "p_after_intent_id": None,
                 "p_lease_seconds": 30,
                 "p_release_sha": "a" * 40,
+                "p_fencing_token": 7,
             },
         ),
         (
@@ -1164,7 +1169,10 @@ async def test_worker_api_rejects_empty_reconciliation_account_slug(
         )
         with pytest.raises(ExecutionInvariantError, match="response_field_is_invalid"):
             await adapter.claim_execution_reconciliation_batch(
+                account_id="paper-primary",
                 worker_id="00000000-0000-4000-8000-000000000050",
+                release_sha="a" * 40,
+                fencing_token=7,
                 now=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
                 limit=50,
                 after_priority=None,
@@ -1377,7 +1385,10 @@ async def test_worker_api_claims_operation_commands_with_release_pin() -> None:
             client=client,
         )
         commands = await adapter.claim_operation_command_batch(
+            account_id="paper-primary",
             holder_id=holder_id,
+            release_sha="a" * 40,
+            fencing_token=7,
             now=now,
             limit=25,
         )
@@ -1386,12 +1397,67 @@ async def test_worker_api_claims_operation_commands_with_release_pin() -> None:
     assert commands[0].claim_expires_at == now + timedelta(seconds=30)
     assert seen_payloads == [
         {
+            "p_account_id": "paper-primary",
             "p_holder_id": holder_id,
             "p_release_sha": "a" * 40,
+            "p_fencing_token": 7,
             "p_now": now.isoformat(),
             "p_limit": 25,
         }
     ]
+
+
+async def test_worker_api_acknowledges_exact_operation_claim_generation() -> None:
+    seen_payloads: list[object] = []
+    holder_id = "00000000-0000-4000-8000-000000000001"
+    command_id = "00000000-0000-4000-8000-000000000002"
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json=[{
+                "command_id": command_id,
+                "state": "applied",
+                "claimed_at": "2026-07-14T08:59:30+00:00",
+                "applied_at": now.isoformat(),
+                "post_control_epoch": 4,
+                "failure_code": None,
+            }],
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SupabaseWorkerApi(
+            _enabled_settings(),
+            release_sha="a" * 40,
+            client=client,
+        )
+        receipt = await adapter.acknowledge_operation_command(
+            command_id=command_id,
+            phase="applied",
+            account_id="paper-primary",
+            holder_id=holder_id,
+            release_sha="a" * 40,
+            fencing_token=7,
+            expected_revision=4,
+            now=now,
+            result_summary={"schema_version": 1, "claimed_revision": 4},
+        )
+
+    assert receipt.state == "applied"
+    assert seen_payloads == [{
+        "p_command_id": command_id,
+        "p_phase": "applied",
+        "p_account_id": "paper-primary",
+        "p_holder_id": holder_id,
+        "p_release_sha": "a" * 40,
+        "p_fencing_token": 7,
+        "p_expected_revision": 4,
+        "p_now": now.isoformat(),
+        "p_result_summary": {"schema_version": 1, "claimed_revision": 4},
+        "p_failure_code": None,
+    }]
 
 
 def _enabled_settings() -> Settings:

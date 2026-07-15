@@ -11,7 +11,7 @@ from app.application.use_cases.reconcile_execution_v2 import (
     FailClosedExecutionReconciliationHandler,
     ReconcileExecutionV2,
 )
-from app.domain.execution_v2.models import ExecutionInvariantError
+from app.domain.execution_v2.models import ExecutionInvariantError, WorkerLease
 from app.domain.execution_v2.reconciliation import (
     ExecutionReconciliationClaim,
     ExecutionReconciliationCompletion,
@@ -60,22 +60,78 @@ async def test_priority_keyset_pages_past_fifty_without_starvation() -> None:
     claims = [_claim(index, now) for index in range(60)]
     port = FakeReconciliationPort(claims)
     handler = IdempotentHandler()
+    lease = _lease(now)
 
     result = await ReconcileExecutionV2(
         port,
         handler,
+        account_id=lease.account_id,
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: lease,
         clock=lambda: now,
     ).run_once()
 
     assert result == ExecutionReconciliationRunResult(60, 60, 0, 0)
     assert port.claim_cursors == [(None, None), (0, claims[49].intent_id)]
+    assert set(port.claim_gates) == {
+        (lease.account_id, WORKER_A, "a" * 40, lease.fencing_token)
+    }
     assert len(handler.effects) == 60
     assert claims[-1].intent_id in handler.effects
     assert {
         (release_sha, fencing_token)
         for _, release_sha, fencing_token in port.completion_claims
     } == {("a" * 40, 7)}
+
+
+async def test_reconciliation_claim_requires_current_configured_account_lease() -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeReconciliationPort([_claim(0, now)])
+    expired_lease = _lease(now - timedelta(minutes=1))
+
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="reconciliation_worker_lease_is_not_current",
+    ):
+        await ReconcileExecutionV2(
+            port,
+            IdempotentHandler(),
+            account_id=expired_lease.account_id,
+            worker_id=WORKER_A,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: expired_lease,
+            clock=lambda: now,
+        ).run_once()
+
+    assert port.claim_gates == []
+
+
+async def test_reconciliation_rejects_cross_account_claim_before_handler() -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    lease = _lease(now)
+    cross_account = replace(
+        _claim(0, now),
+        account_id=str(UUID(int=10_002)),
+    )
+    port = FakeReconciliationPort([cross_account])
+    handler = IdempotentHandler()
+
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="reconciliation_claim_gate_mismatch",
+    ):
+        await ReconcileExecutionV2(
+            port,
+            handler,
+            account_id=lease.account_id,
+            worker_id=WORKER_A,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: lease,
+            clock=lambda: now,
+        ).run_once()
+
+    assert handler.calls == []
 
 
 async def test_poison_handler_is_manualized_without_starving_next_claim() -> None:
@@ -88,7 +144,10 @@ async def test_poison_handler_is_manualized_without_starving_next_claim() -> Non
     result = await ReconcileExecutionV2(
         port,
         crashing_handler,
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -112,7 +171,10 @@ async def test_completion_crash_replays_idempotent_effect_after_restart() -> Non
     first_result = await ReconcileExecutionV2(
         port,
         handler,
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -123,7 +185,10 @@ async def test_completion_crash_replays_idempotent_effect_after_restart() -> Non
     result = await ReconcileExecutionV2(
         port,
         handler,
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_B,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(restarted_at, holder_id=WORKER_B),
         clock=lambda: restarted_at,
     ).run_once()
 
@@ -144,7 +209,10 @@ async def test_reserve_only_crash_uses_atomic_pre_dispatch_failure_recovery() ->
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -178,7 +246,10 @@ async def test_old_release_reserve_only_is_taken_over_by_current_release() -> No
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -201,7 +272,10 @@ async def test_paper_partial_reschedules_until_next_bar_or_expiry() -> None:
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -236,7 +310,10 @@ async def test_paper_open_reschedules_to_next_eligible_bar_without_manualizing()
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -257,7 +334,10 @@ async def test_paper_partial_atomically_expires_remainder_after_window() -> None
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -291,13 +371,22 @@ async def test_old_release_dispatch_is_manualized_without_automatic_replay() -> 
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
     assert result == ExecutionReconciliationRunResult(1, 0, 0, 1)
     assert port.expiry_calls == []
-    assert port.completion_reasons == []
+    assert port.completion_reasons == [
+        (
+            claim.intent_id,
+            "manual",
+            "paper_dispatch_release_takeover_requires_manual",
+        )
+    ]
 
 
 async def test_contract_dispatch_started_claim_remains_manual_without_replay_evidence() -> None:
@@ -316,7 +405,10 @@ async def test_contract_dispatch_started_claim_remains_manual_without_replay_evi
             worker_id=WORKER_A,
             current_release_sha="a" * 40,
         ),
+        account_id=str(UUID(int=10_001)),
         worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
         clock=lambda: now,
     ).run_once()
 
@@ -428,6 +520,7 @@ class FakeReconciliationPort:
         self.pending = {item.intent_id: item for item in claims}
         self.completion_crash_once = completion_crash_once
         self.claim_cursors: list[tuple[int | None, str | None]] = []
+        self.claim_gates: list[tuple[str, str, str, int]] = []
         self.completions: list[str] = []
         self.completion_claims: list[tuple[str, str, int]] = []
         self.completion_reasons: list[tuple[str, str, str]] = []
@@ -438,14 +531,19 @@ class FakeReconciliationPort:
     async def claim_execution_reconciliation_batch(
         self,
         *,
+        account_id: str,
         worker_id: str,
+        release_sha: str,
+        fencing_token: int,
         now: datetime,
         limit: int,
         after_priority: int | None,
         after_intent_id: str | None,
         lease_ttl: timedelta,
     ) -> tuple[ExecutionReconciliationClaim, ...]:
-        del worker_id
+        self.claim_gates.append(
+            (account_id, worker_id, release_sha, fencing_token)
+        )
         self.claim_cursors.append((after_priority, after_intent_id))
         cursor = (
             (after_priority, after_intent_id)
@@ -459,7 +557,6 @@ class FakeReconciliationPort:
             replace(item, lease_expires_at=now + lease_ttl)
             for item in eligible[:limit]
         )
-
     async def complete_execution_reconciliation(
         self,
         *,
@@ -555,3 +652,13 @@ class FakeReconciliationPort:
             reason_code=reason_code,
             idempotent=False,
         )
+
+
+def _lease(now: datetime, *, holder_id: str = WORKER_A) -> WorkerLease:
+    return WorkerLease(
+        account_id=str(UUID(int=10_001)),
+        holder_id=holder_id,
+        fencing_token=7,
+        acquired_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(seconds=30),
+    )

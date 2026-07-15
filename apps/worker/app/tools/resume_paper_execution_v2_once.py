@@ -111,6 +111,7 @@ class MinuteBarInput(_StrictInput):
     low_krw: StrictInt
     close_krw: StrictInt
     volume: StrictInt
+    other_intent_filled_quantity: StrictInt
 
     def to_domain(self) -> MinuteBar:
         return MinuteBar(**self.model_dump())

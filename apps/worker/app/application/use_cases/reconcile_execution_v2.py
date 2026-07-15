@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,11 +12,17 @@ from app.application.ports.execution_reconciliation_port import (
     PreDispatchFailurePort,
 )
 from app.domain.common.time import now_utc
-from app.domain.execution_v2.models import ExecutionInvariantError, next_full_minute
+from app.domain.execution_v2.models import (
+    ExecutionInvariantError,
+    WorkerLease,
+    next_full_minute,
+)
 from app.domain.execution_v2.reconciliation import (
     ExecutionReconciliationClaim,
     ExecutionReconciliationDecision,
 )
+
+_RELEASE_SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +48,10 @@ class ReconcileExecutionV2:
         port: ExecutionReconciliationPort,
         handler: ExecutionReconciliationHandlerPort,
         *,
+        account_id: str,
         worker_id: str,
+        current_release_sha: str,
+        lease_provider: Callable[[], WorkerLease | None],
         clock: Callable[[], datetime] = now_utc,
         lease_ttl: timedelta = timedelta(seconds=30),
     ) -> None:
@@ -53,9 +63,16 @@ class ReconcileExecutionV2:
             raise ExecutionInvariantError("reconciliation_worker_id_is_invalid")
         if lease_ttl <= timedelta(0):
             raise ExecutionInvariantError("reconciliation_lease_ttl_is_invalid")
+        if not account_id.strip():
+            raise ExecutionInvariantError("reconciliation_account_id_is_required")
+        if _RELEASE_SHA_RE.fullmatch(current_release_sha) is None:
+            raise ExecutionInvariantError("reconciliation_release_sha_is_invalid")
         self.port = port
         self.handler = handler
+        self.account_id = account_id
         self.worker_id = worker_id
+        self.current_release_sha = current_release_sha
+        self.lease_provider = lease_provider
         self.clock = clock
         self.lease_ttl = lease_ttl
 
@@ -77,8 +94,12 @@ class ReconcileExecutionV2:
         while claimed_count < max_items:
             page_limit = min(50, max_items - claimed_count)
             claimed_at = self._now()
+            lease = self._current_lease(claimed_at)
             page = await self.port.claim_execution_reconciliation_batch(
+                account_id=self.account_id,
                 worker_id=self.worker_id,
+                release_sha=self.current_release_sha,
+                fencing_token=lease.fencing_token,
                 now=claimed_at,
                 limit=page_limit,
                 after_priority=cursor[0] if cursor is not None else None,
@@ -96,6 +117,13 @@ class ReconcileExecutionV2:
                 raise ExecutionInvariantError("reconciliation_claim_was_duplicated")
             if any(item.lease_expires_at <= claimed_at for item in page):
                 raise ExecutionInvariantError("reconciliation_claim_lease_is_expired")
+            if any(
+                item.account_id != self.account_id
+                or item.lease_release_sha != self.current_release_sha
+                or item.lease_fencing_token != lease.fencing_token
+                for item in page
+            ):
+                raise ExecutionInvariantError("reconciliation_claim_gate_mismatch")
 
             for claim in page:
                 seen.add(claim.intent_id)
@@ -162,6 +190,17 @@ class ReconcileExecutionV2:
             raise ExecutionInvariantError("reconciliation_clock_must_be_timezone_aware")
         return value
 
+    def _current_lease(self, now: datetime) -> WorkerLease:
+        lease = self.lease_provider()
+        if (
+            lease is None
+            or lease.account_id != self.account_id
+            or lease.holder_id != self.worker_id
+            or not lease.is_active(now)
+        ):
+            raise ExecutionInvariantError("reconciliation_worker_lease_is_not_current")
+        return lease
+
 
 def _safe_reconciliation_failure_code(stage: str, exc: Exception) -> str:
     return f"{stage}_{type(exc).__name__.lower()}"[:120]
@@ -206,7 +245,6 @@ class FailClosedExecutionReconciliationHandler:
             return ExecutionReconciliationDecision(
                 "manual",
                 f"{claim.environment}_dispatch_release_takeover_requires_manual",
-                completion_persisted=True,
             )
         if claim.attempt_id is None and claim.latest_observation_id is None:
             reason_code = (

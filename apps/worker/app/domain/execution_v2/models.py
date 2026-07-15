@@ -420,6 +420,7 @@ class MinuteBar:
     low_krw: int
     close_krw: int
     volume: int
+    other_intent_filled_quantity: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.symbol, "bar_symbol")
@@ -440,6 +441,10 @@ class MinuteBar:
         _require_positive_int(self.low_krw, "bar_low_krw")
         _require_positive_int(self.close_krw, "bar_close_krw")
         _require_nonnegative_int(self.volume, "bar_volume")
+        _require_nonnegative_int(
+            self.other_intent_filled_quantity,
+            "bar_other_intent_filled_quantity",
+        )
         if self.high_krw < max(self.open_krw, self.close_krw, self.low_krw):
             raise ExecutionInvariantError("bar_high_is_inconsistent")
         if self.low_krw > min(self.open_krw, self.close_krw, self.high_krw):

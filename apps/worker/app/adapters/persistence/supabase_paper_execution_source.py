@@ -439,6 +439,7 @@ def _parse_bar(row: Mapping[str, object]) -> MinuteBar:
             "low_krw",
             "close_krw",
             "volume",
+            "other_intent_filled_quantity",
         },
     )
     return MinuteBar(
@@ -453,6 +454,10 @@ def _parse_bar(row: Mapping[str, object]) -> MinuteBar:
         low_krw=_required_positive_int(row, "low_krw"),
         close_krw=_required_positive_int(row, "close_krw"),
         volume=_required_nonnegative_int(row, "volume"),
+        other_intent_filled_quantity=_required_nonnegative_int(
+            row,
+            "other_intent_filled_quantity",
+        ),
     )
 
 

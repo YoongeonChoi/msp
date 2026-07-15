@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import ROUND_CEILING, Decimal
 from math import isfinite
 from typing import Literal, assert_never
 from uuid import uuid4
@@ -9,9 +11,13 @@ from uuid import uuid4
 from app.application.ports.broker_port import BrokerOrderRequest, BrokerOrderResult, BrokerPort
 from app.application.ports.execution_kernel_port import ContractDispatchPort
 from app.application.ports.repository_port import RepositoryPort
+from app.application.services.paper_execution_v2 import (
+    build_fill_accounting_transaction,
+)
 from app.application.services.risk_service import RiskService
 from app.domain.common.errors import (
     KnownFailClosedError,
+    ProviderSchemaError,
 )
 from app.domain.execution_v2.models import (
     ExecutionCostSchedule,
@@ -19,6 +25,8 @@ from app.domain.execution_v2.models import (
     ExecutionObservation,
     ExecutionStatus,
     PaperExecutionEvidence,
+    PaperFill,
+    PaperPositionCostBasis,
 )
 from app.domain.risk.entities import RiskResult
 from app.domain.risk.value_objects import RiskInput
@@ -124,6 +132,7 @@ class ExecutionService:
         *,
         cost_schedule: ExecutionCostSchedule,
         execution_evidence: PaperExecutionEvidence,
+        position_cost_basis: PaperPositionCostBasis | None = None,
         now: datetime,
     ) -> BrokerOrderResult:
         """Dispatch only to the zero-network local contract broker.
@@ -153,6 +162,27 @@ class ExecutionService:
                 "execution_v2",
                 "contract_dispatch_execution_evidence_is_invalid",
             )
+        if intent.side == "sell" and (
+            position_cost_basis is None
+            or position_cost_basis.symbol != intent.symbol
+            or position_cost_basis.quantity < intent.quantity
+        ):
+            await coordination.record_execution_observation(
+                intent,
+                _contract_nonfill_observation(
+                    intent,
+                    status="failed_pre_dispatch",
+                    observed_at=now,
+                    provider_order_id=f"pre-dispatch:{intent.semantic_key}",
+                    reason="contract_dispatch_sell_cost_basis_is_invalid",
+                ),
+                accounting_transaction=None,
+                now=now,
+            )
+            raise KnownFailClosedError(
+                "execution_v2",
+                "contract_dispatch_sell_cost_basis_is_invalid",
+            )
         if (
             getattr(self.broker, "execution_environment", None) != "contract_test"
             or getattr(self.broker, "network_enabled", True) is not False
@@ -165,19 +195,19 @@ class ExecutionService:
         if self.shutdown_requested():
             await coordination.record_execution_observation(
                 intent,
-                _contract_observation(
+                _contract_nonfill_observation(
                     intent,
                     status="failed_pre_dispatch",
                     observed_at=now,
                     provider_order_id=f"pre-dispatch:{intent.semantic_key}",
-                    provider_execution_id=None,
-                    settlement_date=None,
                     reason="shutdown_requested",
                 ),
+                accounting_transaction=None,
                 now=now,
             )
             raise KnownFailClosedError("execution_v2", "shutdown_requested")
         await coordination.mark_dispatch_started(intent, now=now)
+        result: BrokerOrderResult | None = None
         try:
             result = await self.broker.place_order(
                 BrokerOrderRequest(
@@ -189,60 +219,73 @@ class ExecutionService:
                     limit_price_krw=intent.limit_price_krw,
                 )
             )
-        except KnownFailClosedError:
-            await coordination.record_execution_observation(
+            placement = _validate_contract_placement(
                 intent,
-                _contract_observation(
-                    intent,
-                    status="unknown_requires_manual_check",
-                    observed_at=now,
-                    provider_order_id=f"unresolved:{intent.semantic_key}",
-                    provider_execution_id=None,
-                    settlement_date=None,
-                    reason="contract_dispatch_result_ambiguous",
-                ),
+                result,
+                cost_schedule=cost_schedule,
+                execution_evidence=execution_evidence,
+                position_cost_basis=position_cost_basis,
                 now=now,
             )
-            raise
-        status: ExecutionStatus
-        if result.status == "sent":
-            status = "open"
-        elif result.status == "filled":
-            status = "filled"
-        elif result.status == "rejected":
-            status = "rejected"
-        else:
-            status = "unknown_requires_manual_check"
-        provider_order_id = result.provider_order_id or f"unresolved:{intent.semantic_key}"
-        provider_execution_id_value = result.raw_summary.get("provider_execution_id")
-        provider_execution_id = (
-            provider_execution_id_value
-            if isinstance(provider_execution_id_value, str)
-            and provider_execution_id_value.strip()
-            else None
-        )
-        settlement_date = (
-            execution_evidence.settlement_date_for(now, cost_schedule.settlement_days)
-            if status == "filled"
-            else None
-        )
-        await coordination.record_execution_observation(
-            intent,
-            _contract_observation(
+        except KnownFailClosedError:
+            provider_order_id = _contract_provider_order_id_or_synthetic(
                 intent,
-                status=status,
-                observed_at=now,
-                provider_order_id=provider_order_id,
-                provider_execution_id=provider_execution_id,
-                settlement_date=settlement_date,
-                reason=(
-                    "contract_dispatch_result_ambiguous"
-                    if status == "unknown_requires_manual_check"
-                    else None
-                ),
-            ),
-            now=now,
+                result,
+            )
+            try:
+                await coordination.record_execution_observation(
+                    intent,
+                    _contract_nonfill_observation(
+                        intent,
+                        status="unknown_requires_manual_check",
+                        observed_at=now,
+                        provider_order_id=provider_order_id,
+                        reason="contract_dispatch_result_ambiguous",
+                    ),
+                    accounting_transaction=None,
+                    now=now,
+                )
+            except Exception as record_error:
+                raise KnownFailClosedError(
+                    "execution_v2",
+                    "contract_dispatch_manual_blocking_record_failed",
+                ) from record_error
+            raise
+        accounting_transaction = (
+            build_fill_accounting_transaction(intent, placement.fill, 1)
+            if placement.fill is not None
+            else None
         )
+        try:
+            await coordination.record_execution_observation(
+                intent,
+                placement.observation,
+                accounting_transaction=accounting_transaction,
+                now=now,
+            )
+        except Exception as record_error:
+            try:
+                await coordination.record_execution_observation(
+                    intent,
+                    _contract_nonfill_observation(
+                        intent,
+                        status="unknown_requires_manual_check",
+                        observed_at=now,
+                        provider_order_id=placement.observation.provider_order_id,
+                        reason="contract_dispatch_record_failed",
+                    ),
+                    accounting_transaction=None,
+                    now=now,
+                )
+            except Exception as manual_record_error:
+                raise KnownFailClosedError(
+                    "execution_v2",
+                    "contract_dispatch_record_and_manual_blocking_failed",
+                ) from manual_record_error
+            raise KnownFailClosedError(
+                "execution_v2",
+                "contract_dispatch_record_failed_manual_check_required",
+            ) from record_error
         return result
 
     async def propose_live_order(
@@ -326,32 +369,190 @@ def _paper_decision_price(decision: DecisionSnapshot) -> int | None:
     return int(numeric)
 
 
-def _contract_observation(
+@dataclass(frozen=True, slots=True)
+class _ValidatedContractPlacement:
+    observation: ExecutionObservation
+    fill: PaperFill | None
+
+
+def _contract_provider_order_id_or_synthetic(
+    intent: ExecutionIntent,
+    result: BrokerOrderResult | None,
+) -> str:
+    provider_order_id = result.provider_order_id if result is not None else None
+    if isinstance(provider_order_id, str) and provider_order_id.strip():
+        return provider_order_id
+    return f"unresolved:{intent.semantic_key}"
+
+
+def _validate_contract_placement(
+    intent: ExecutionIntent,
+    result: BrokerOrderResult,
+    *,
+    cost_schedule: ExecutionCostSchedule,
+    execution_evidence: PaperExecutionEvidence,
+    position_cost_basis: PaperPositionCostBasis | None,
+    now: datetime,
+) -> _ValidatedContractPlacement:
+    expected_keys = {
+        "contract_outcome",
+        "cumulative_quantity",
+        "fill_price_krw",
+        "provider_execution_id",
+    }
+    if set(result.raw_summary) != expected_keys:
+        raise ProviderSchemaError(
+            "contract_test",
+            "contract_test_create_response_fields_invalid",
+        )
+    provider_order_id = result.provider_order_id
+    if (
+        provider_order_id is None
+        or not isinstance(provider_order_id, str)
+        or not provider_order_id.strip()
+    ):
+        raise ProviderSchemaError(
+            "contract_test",
+            "contract_test_create_response_identity_invalid",
+        )
+    contract_outcome = result.raw_summary["contract_outcome"]
+    cumulative_quantity = result.raw_summary["cumulative_quantity"]
+    fill_price_krw = result.raw_summary["fill_price_krw"]
+    provider_execution_id = result.raw_summary["provider_execution_id"]
+    if contract_outcome != result.status or isinstance(cumulative_quantity, bool) or not isinstance(
+        cumulative_quantity,
+        int,
+    ):
+        raise ProviderSchemaError(
+            "contract_test",
+            "contract_test_create_response_values_invalid",
+        )
+    status: ExecutionStatus
+    fill: PaperFill | None = None
+    if result.status == "filled":
+        if (
+            cumulative_quantity != intent.quantity
+            or isinstance(fill_price_krw, bool)
+            or not isinstance(fill_price_krw, int)
+            or fill_price_krw != intent.limit_price_krw
+            or not isinstance(provider_execution_id, str)
+            or not provider_execution_id.strip()
+        ):
+            raise ProviderSchemaError(
+                "contract_test",
+                "contract_test_create_fill_values_invalid",
+            )
+        gross_amount = cumulative_quantity * fill_price_krw
+        commission_rate = (
+            cost_schedule.buy_commission_rate
+            if intent.side == "buy"
+            else cost_schedule.sell_commission_rate
+        )
+        commission = _ceil_contract_cost(gross_amount, commission_rate)
+        tax = (
+            _ceil_contract_cost(gross_amount, cost_schedule.sell_tax_rate)
+            if intent.side == "sell"
+            else 0
+        )
+        position_cost_relief = 0
+        if intent.side == "sell":
+            if position_cost_basis is None:
+                raise ProviderSchemaError(
+                    "contract_test",
+                    "contract_test_sell_cost_basis_missing",
+                )
+            position_cost_relief = (
+                position_cost_basis.total_cost_krw
+                if cumulative_quantity == position_cost_basis.quantity
+                else position_cost_basis.total_cost_krw
+                * cumulative_quantity
+                // position_cost_basis.quantity
+            )
+        settlement_date = execution_evidence.settlement_date_for(
+            now,
+            cost_schedule.settlement_days,
+        )
+        fill = PaperFill(
+            sequence=1,
+            filled_at=now,
+            quantity=cumulative_quantity,
+            price_krw=fill_price_krw,
+            commission_krw=commission,
+            tax_krw=tax,
+            settlement_date=settlement_date,
+            position_cost_relief_krw=position_cost_relief,
+            realized_pnl_krw=(
+                gross_amount - position_cost_relief - commission - tax
+                if intent.side == "sell"
+                else 0
+            ),
+        )
+        status = "filled"
+    else:
+        if (
+            cumulative_quantity != 0
+            or fill_price_krw is not None
+            or provider_execution_id is not None
+        ):
+            raise ProviderSchemaError(
+                "contract_test",
+                "contract_test_create_nonfill_values_invalid",
+            )
+        if result.status == "sent":
+            status = "open"
+        elif result.status == "rejected":
+            status = "rejected"
+        else:
+            status = "unknown_requires_manual_check"
+    observation = ExecutionObservation.create(
+        intent_id=intent.id,
+        sequence=1,
+        status=status,
+        observed_at=now,
+        provider_order_id=provider_order_id,
+        provider_execution_id=(
+            provider_execution_id if isinstance(provider_execution_id, str) else None
+        ),
+        cumulative_quantity=cumulative_quantity,
+        cumulative_gross_krw=(fill.gross_amount_krw if fill is not None else 0),
+        cumulative_commission_krw=(fill.commission_krw if fill is not None else 0),
+        cumulative_tax_krw=(fill.tax_krw if fill is not None else 0),
+        last_fill_quantity=(fill.quantity if fill is not None else None),
+        last_fill_price_krw=(fill.price_krw if fill is not None else None),
+        last_fill_settlement_date=(fill.settlement_date if fill is not None else None),
+        reason=(
+            "contract_dispatch_result_ambiguous"
+            if status == "unknown_requires_manual_check"
+            else None
+        ),
+    )
+    return _ValidatedContractPlacement(observation=observation, fill=fill)
+
+
+def _contract_nonfill_observation(
     intent: ExecutionIntent,
     *,
     status: ExecutionStatus,
     observed_at: datetime,
     provider_order_id: str,
-    provider_execution_id: str | None,
-    settlement_date: date | None,
-    reason: str | None,
+    reason: str,
 ) -> ExecutionObservation:
-    is_filled = status == "filled"
     return ExecutionObservation.create(
         intent_id=intent.id,
         sequence=1,
         status=status,
         observed_at=observed_at,
         provider_order_id=provider_order_id,
-        provider_execution_id=provider_execution_id,
-        cumulative_quantity=intent.quantity if is_filled else 0,
-        cumulative_gross_krw=(
-            intent.quantity * intent.limit_price_krw if is_filled else 0
-        ),
+        provider_execution_id=None,
+        cumulative_quantity=0,
+        cumulative_gross_krw=0,
         cumulative_commission_krw=0,
         cumulative_tax_krw=0,
-        last_fill_quantity=intent.quantity if is_filled else None,
-        last_fill_price_krw=intent.limit_price_krw if is_filled else None,
-        last_fill_settlement_date=settlement_date,
         reason=reason,
+    )
+
+
+def _ceil_contract_cost(gross_amount_krw: int, rate: Decimal) -> int:
+    return int(
+        (Decimal(gross_amount_krw) * rate).to_integral_value(rounding=ROUND_CEILING)
     )

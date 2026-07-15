@@ -109,6 +109,7 @@ class ExecutionKernelPort(Protocol):
         intent: ExecutionIntent,
         observation: ExecutionObservation,
         *,
+        accounting_transaction: AccountingTransaction | None = None,
         now: datetime,
     ) -> None:
         ...
@@ -131,6 +132,7 @@ class ContractDispatchPort(Protocol):
         intent: ExecutionIntent,
         observation: ExecutionObservation,
         *,
+        accounting_transaction: AccountingTransaction | None = None,
         now: datetime,
     ) -> None:
         ...

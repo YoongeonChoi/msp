@@ -83,7 +83,16 @@ class DeterministicPaperExecutionSimulator:
         transactions: list[AccountingTransaction] = []
 
         for bar in eligible_bars:
-            available_quantity = _floor_decimal(Decimal(bar.volume) * PAPER_PARTICIPATION_RATE)
+            participation_capacity = _floor_decimal(
+                Decimal(bar.volume) * PAPER_PARTICIPATION_RATE
+            )
+            if bar.other_intent_filled_quantity > participation_capacity:
+                raise ExecutionInvariantError(
+                    "paper_bar_participation_usage_exceeds_capacity"
+                )
+            available_quantity = (
+                participation_capacity - bar.other_intent_filled_quantity
+            )
             if available_quantity <= 0:
                 continue
             fill_price = _limit_fill_price(
@@ -158,7 +167,13 @@ class DeterministicPaperExecutionSimulator:
                 last_fill_settlement_date=settlement_date,
             )
             observations.append(observation)
-            transactions.append(_accounting_transaction(intent, fill, observation.sequence))
+            transactions.append(
+                build_fill_accounting_transaction(
+                    intent,
+                    fill,
+                    observation.sequence,
+                )
+            )
             if remaining == 0:
                 break
 
@@ -247,7 +262,7 @@ def _limit_fill_price(
     return max(intent.limit_price_krw, adverse_price)
 
 
-def _accounting_transaction(
+def build_fill_accounting_transaction(
     intent: ExecutionIntent,
     fill: PaperFill,
     observation_sequence: int,
