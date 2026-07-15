@@ -1,127 +1,122 @@
 # Security
 
-Principles:
+## Release security boundary
 
-- Least privilege.
-- Defense in depth.
-- Fail closed.
-- Explicit trust boundaries.
-- No secrets in client.
-- No direct order execution from UI.
-- Full audit trail for dangerous changes.
+This repository implements an internal, single-entity control system for one
+proprietary-capital account. The G1+G2 release supports only `paper` and local
+`contract_test` execution environments.
 
-## CI Security
+Production order create, cancel, modify, and order-capable credentials are
+prohibited. `public.bot_settings.mode` is fixed to `paper` and
+`live_order_allowed=false`. No UI, database command, deployment setting, or
+network route may weaken that rule. A new external-write requirement reopens
+the G0 business, regulatory, and security review.
 
-GitHub Actions default permissions must stay minimal:
+Security principles are least privilege, defense in depth, fail closed,
+explicit trust boundaries, immutable evidence, and no secret or execution
+authority in the desktop.
 
-```yaml
-permissions:
-  contents: read
-```
+## Identity and access
 
-Allowed job-level exceptions:
+Operational users authenticate with Supabase Auth TOTP MFA and must operate at
+AAL2. Authorization is assigned by UUID, not email or display name, with these
+roles:
 
-- CodeQL may use `security-events: write`.
-- Dependency Review may use `pull-requests: read`.
+- `platform_admin`: identity and role administration; cannot approve trading
+  controls.
+- `operator`: Paper operations, pause, emergency stop, and change requests.
+- `risk_approver`: resume, policy changes, and unknown-state resolution.
+- `strategy_reviewer`: strategy promotion review.
+- `auditor`: read-only evidence access.
+- `release_manager`: release and provider-contract artifact registration.
+- `viewer`: minimum status access.
 
-Disallowed:
+Risk-increasing commands and access changes require a fresh TOTP challenge. The
+resulting `step_up_grant` expires after five minutes and is bound to the command
+hash. Requester and reviewer must be different Auth user UUIDs. Self-approval,
+expired grants, stale compare-and-set versions, and AAL1 sessions fail closed.
 
-- `pull_request_target` without a written security rationale.
-- Production secrets in PR workflows.
-- Printing secrets or environment dumps.
-- Automatic Render deploys.
-- Workflow steps that enable live trading.
+`emergency_stop` is the only single-actor exception. One AAL2 `operator` may
+atomically set `enabled=false` and increment `control_epoch`. This exception can
+only reduce risk. It is never queued offline or retried automatically by the UI.
 
-Security workflow coverage:
+## Data API and database boundary
 
-- CodeQL for Python and TypeScript.
-- Dependency Review on pull requests.
-- Gitleaks-compatible secret scanning.
-- Built-in common secret pattern scanning for OpenAI, GitHub, Slack, AWS-style keys, private keys, and configured provider secret assignments.
-- Committed `.env` blocking, with `.env.example` as the only allowed env-shaped file.
-- Blocking `npm audit`, `pip-audit`, and Bandit gates.
-- Third-party GitHub Actions pinned to immutable full commit SHAs.
-- Workflow policy guard for unsafe patterns.
+- `private` is the source of truth for execution, accounting, control, incident,
+  outbox, access, and audit records. It is not exposed through the Data API.
+- `api` contains only minimal desktop projections and authenticated user RPCs.
+- `worker_api` contains the fixed Worker RPC surface and is unavailable to
+  `anon` and ordinary `authenticated` users.
+- Every exposed table or view has RLS and explicit `GRANT`/`REVOKE` statements.
+- Functions use `SECURITY INVOKER` by default. An unavoidable
+  `SECURITY DEFINER` function lives in a non-exposed schema, has
+  `search_path=''`, schema-qualified objects, and a restricted `EXECUTE` grant.
+- `private.audit_events` is append-only. Ordinary users and Worker credentials
+  cannot update or delete audit rows.
+- Legacy `public.orders`, `public.positions`, `public.manual_commands`, and
+  `public.audit_logs` are `legacy_unreconciled`. They are not a V2 ledger and
+  cannot be backfilled into cash, positions, or performance with invented data.
 
-Secret scans must print only file paths, not matched secret values. CI must fail if either `.yml` or `.yaml` workflow files reference production trading/API secrets such as `SUPABASE_SECRET_KEY`, `TOSS_CLIENT_SECRET`, `OPENAI_API_KEY`, `NAVER_CLIENT_SECRET`, `KRX_API_KEY`, `OPENDART_API_KEY`, `ALERT_WEBHOOK_URL`, `RENDER_DEPLOY_HOOK_URL`, `SUPABASE_LIVE_REQUESTER_JWT`, or `SUPABASE_LIVE_REVIEWER_JWT`. The same centralized repository-safety command is used by CI and migration/security workflows.
+The Worker may call only the reviewed `worker_api` RPC allowlist. Intent
+reservation atomically checks account, `control_epoch`, strategy/policy version,
+semantic key, available cash/quantity, and fencing token. Dispatch rechecks the
+epoch and fencing token. An observation, event, balanced postings, projections,
+and alert enqueue commit in one transaction.
 
-## Secrets
+## Network and provider boundary
 
-- `.env` files stay ignored.
-- `.env`, `.env.local`, and any non-example env file must not be tracked by Git.
-- Render owns Worker secrets.
-- Desktop may use only `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
-- Hosted Supabase verifier scripts may read `SUPABASE_SECRET_KEY` from a
-  worker/operator shell or an explicitly supplied ignored env file, but they
-  must not print secret values or env file paths. They are not desktop tools.
-- Hosted Supabase verifier scripts must reject anything other than an official
-  `https://<project_ref>.supabase.co` project origin, plus URL credentials, path,
-  query, and fragment values, before making network calls.
-- Hosted live-enable verifier failures must redact configured publishable/secret keys
-  and requester/reviewer JWTs.
-- Supabase secret/service role key is Worker-only.
-- Toss, Naver, OpenAI, KRX, and OpenDART keys are never stored in Git or Desktop.
-- Logs must redact keys, tokens, credentials, authorization headers, and account identifiers where feasible.
+Real Toss connectivity is read-only. The worker startup guard rejects a
+production order endpoint or order-capable credential. The local
+`contract_test` simulator performs create/status/cancel qualification without
+network access and must never be described as an official sandbox.
 
-## Desktop/Tauri
+Provider contract artifacts record source URL, retrieval time, and SHA-256.
+Unknown or mismatched contracts block execution. OpenAI output has no direct or
+indirect trade execution authority and may create only reviewable research
+candidates.
 
-- No broker secrets.
-- No Supabase secret key.
-- Minimal Tauri capabilities.
-- Strict CSP.
-- No shell command exposure.
-- Validate UI input before writing to Supabase.
-- Desktop writes only through Supabase RLS.
+## Secrets and sensitive data
 
-## Supabase
+- `.env`, `.env.local`, and all non-example environment files remain ignored
+  and untracked.
+- Render owns Worker secrets. Desktop may contain only
+  `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
+- Supabase secret/service keys and all provider secrets are Worker-only.
+- Webhook secrets, account numbers, authorization headers, session tokens, and
+  provider raw payloads are excluded from audit and outbox payloads.
+- Logs, verifier errors, and CI scan output redact values and identify only the
+  affected file or field class.
 
-- RLS on all exposed tables.
-- Admin role via `user_roles`.
-- No anon writes.
-- No public write policies.
-- Worker secret key server-side only.
-- Live enable requests require non-empty provider contract, risk report, release evidence, and a 5-240 minute expiry.
-- Accepted/rejected live enable rows are immutable at the database trigger layer; approval evidence cannot be edited after review.
-- Live control RLS policies use cached `select public.is_admin()` checks for the hottest control tables.
-- Live order placement must not treat mock/static or unready strategy features
-  as live-ready evidence. Live mode feature snapshots use `provider_live_v1`
-  with retained quote, fundamentals, news, positive PER/PBR valuation inputs,
-  and market/sector provenance; broker placement requires
-  `feature_snapshot.raw.live_trading_ready=true` and a non-mock `feature_source`
-  after final risk evaluation.
-- Release evidence artifact/report URIs must be retained remote HTTPS references with a valid DNS host or global IP; local, test, private-IP, non-global-IP, localhost, invalid-host, invalid-port, credential-bearing, query/fragment, raw or percent-decoded path traversal, encoded slash/backslash path separators, and ad hoc inline evidence are not accepted.
-- Published provider lifecycle artifacts must pass `--verify-remote-artifacts`, which fetches retained HTTPS artifact bytes, rejects GitHub `blob` pages, caps response size, and compares the downloaded bytes to the declared SHA-256 without leaking URI, body, or hash values in failures.
-- Provider contract gap release evidence must include a retained `provider_gap_evidence` manifest binding the exact `docs/API_GAPS.md` SHA-256, every parsed provider gap id in order, provider-matching retained source artifacts, unique retained URI/SHA-256 pairs, and non-future capture timestamps; final bundle verification requires `provider_gap_evidence=1`.
-- Published incident-channel proof must pass `--verify-remote-channel-evidence`, and published system-order-scope proof must pass `--verify-remote-evidence`; both fetch retained HTTPS evidence bytes, reject GitHub `blob` pages, cap response size, and compare downloaded bytes to the declared SHA-256 without leaking URI, body, or hash values in failures.
-- Final bundle release evidence must show `feature_evidence=1`, `remote_provider_artifacts=1`, `remote_incident_evidence=1`, `remote_system_order_scope_evidence=1`, and `remote_feature_artifacts=1`; any `0` remote flag means the bundle was only locally validated and is not post-publication release evidence.
-- Retained security report `report_path` values must be relative paths under the security summary directory; absolute, drive-qualified, and `..`-escaping paths are not accepted.
-- Provider lifecycle evidence must not show provider or local order status regression after terminal status has been observed.
-- Incident evidence `channel_name` values must be logical identifiers, not webhook URLs, paths, raw payloads, or retained artifact endpoints.
-- Security scan `scan_id` values must be lowercase logical identifiers, not URLs, filesystem paths, drive-qualified paths, email/contact values, or retained artifact references.
-- Release evidence operator identities such as `operator_ack_by`, `accepted_by`, provider `operator_reviewed_by`, and audit `reviewed_by` must be internal logical handles, not email addresses, URLs, paths, raw contact values, or retained artifact references. Provider unknown-recovery review and repository audit review must use distinct normalized logical handles; unknown-recovery review must be recorded after provider status evidence, and repository audit review must be recorded after the unknown-recovery operator review.
-- Release evidence timestamps must not be in the future beyond five minutes of clock skew.
-- Migration PRs must preserve RLS and include rollback notes for destructive changes.
+## Audit, alerts, and evidence
 
-## OpenAI
+Each audit event includes actor, session, release, correlation, reason, and the
+previous event hash. A local export is not considered complete until an external
+immutable archive receipt is verified against the DB hash.
 
-- No secrets, credentials, or unnecessary private account data.
-- Validate structured output.
-- Never route model output directly to execution.
-- Monthly candidates are stored only as `ai_upgrade_candidates.status='proposed'`.
+`delivery_outbox` provides at-least-once delivery with lease, retry/backoff,
+dedupe, and dead-letter handling. Consumers must deduplicate. Critical events
+create incidents and require human ACK within five minutes; the audit trail must
+distinguish delivery, human ACK, mitigation, and two-person closure.
 
-## Trading Safety Boundary
+## CI and supply-chain controls
 
-CI and security tooling do not authorize live trading. Live remains blocked unless runtime settings and risk gates explicitly allow it later:
+GitHub Actions use `contents: read` by default. CodeQL may receive
+`security-events: write` and dependency review may receive
+`pull-requests: read`. Third-party Actions are pinned to full commit SHAs.
+`pull_request_target`, production secrets in PR workflows, environment dumps,
+automatic deployment, and any step that enables external order execution are
+prohibited.
 
-- `bot_settings.enabled=true`
-- `mode='live'`
-- `live_order_allowed=true`
-- a non-expired `request_live_enable` manual command accepted by an authenticated admin different from the requester
-- unchanged live approval evidence captured before review
-- market/quote/account/provider/risk/idempotency gates pass
+Required checks cover Python/TypeScript lint, typecheck, tests and builds,
+Tauri/Rust checks, migration application, RLS/GRANT assertions, secret scanning,
+dependency review, CodeQL, and production-order network denial. Scanners report
+only masked findings and never print suspected secret values.
 
-The accepted live-enable command is one-time evidence. The database trigger consumes the selected row by
-moving it to `applied` when `live_order_allowed` changes from false to true, so re-enabling live after an
-Emergency Stop requires a new request and a different reviewer.
+## Residual operational conditions
 
-Default and release states must keep `live_order_allowed=false`.
+Repository implementation and local verification do not prove hosted G2. Final
+approval also requires two enrolled human users, external alert delivery and ACK
+evidence, immutable archive receipt, independent failure-domain monitoring,
+24-hour fault soak, ten consecutive Paper/Shadow trading days, and an isolated
+restore drill meeting RTO 30 minutes. A hosted database unable to prove the
+required disaster-scope RPO keeps G2 closed.

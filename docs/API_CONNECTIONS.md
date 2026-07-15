@@ -24,9 +24,9 @@ Official documentation consulted or linked for implementation verification:
 | OpenAI Structured Outputs | https://platform.openai.com/docs/guides/structured-outputs | Responses API JSON schema output is guarded by a verified model allowlist |
 | OpenAI Batch API | https://platform.openai.com/docs/guides/batch | reserved for monthly offline jobs |
 | OpenAI data controls | https://platform.openai.com/docs/guides/your-data | no secrets and data minimization |
-| Toss Securities Open API | https://developers.tossinvest.com/docs | read adapter plus guarded worker-only live order create/cancel and status reconciliation; modify disabled |
+| Toss Securities Open API | https://developers.tossinvest.com/docs | real-provider integration is read-only; every production order write is disabled |
 | Toss Securities llms index | https://developers.tossinvest.com/llms.txt | official index for Markdown docs and canonical OpenAPI JSON |
-| Toss Securities OpenAPI JSON | https://openapi.tossinvest.com/openapi-docs/latest/openapi.json | verified `oauth2/token`, `accounts`, `buying-power`, `holdings`, `prices`, `candles`, `market-calendar/KR`, order status schemas, guarded `POST /api/v1/orders`, and guarded `POST /api/v1/orders/{orderId}/cancel` schema |
+| Toss Securities OpenAPI JSON | https://openapi.tossinvest.com/openapi-docs/latest/openapi.json | retained contract artifact for read contracts and local create/status/cancel qualification; production write paths remain quarantined |
 
 No provider-specific endpoint, parameter, auth flow, rate limit, or response schema is implemented unless represented by a typed placeholder, mock adapter, and `API_GAPS.md` entry.
 
@@ -45,19 +45,33 @@ Verified from the official Toss Securities OpenAPI document:
   - `GET /api/v1/prices`
   - `GET /api/v1/candles`
   - `GET /api/v1/market-calendar/KR`
-  - `GET /api/v1/orders`
-  - `GET /api/v1/orders/{orderId}`
+- Production order URLs, including `GET /api/v1/orders` and
+  `GET /api/v1/orders/{orderId}`, are contract evidence only and are not called by
+  this release.
 
-Scheduled live cycles now derive cash buying power and holdings value from Toss read-only endpoints, and derive market-open state from Toss KR regular-session calendar. `GET /api/v1/orders status=CLOSED` remains documented as `400 closed-not-supported`, so broker-wide or externally placed daily order history is still not verified through Toss. The worker verifies only system-created live order count from local `orders` rows for the current KST trading day (`mode='live'` and `status <> 'blocked'`), and only after the operator explicitly accepts that system-originated scope with `LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED=true`. Without runtime acceptance, or if the repository count cannot be read, live risk fails closed with `daily_order_count_unverified` before any broker call. For live readiness, that runtime flag is not sufficient by itself: the release evidence bundle must also include retained `system_order_scope_evidence.json` proving the exact scope, Toss limitation, deployment environment, operator, `LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED=true` confirmation, evidence URI, and SHA-256 hash, and missing or weak retained evidence blocks bundle creation. The final bundle also rejects environment mixing: `staging` requires `deployment_environment=staging`, and `production-readiness` requires `deployment_environment=production`.
+The G1+G2 release boundary is intentionally stricter than the provider contract. The
+worker may use the read-only endpoints above for observation, but no data returned by
+them authorizes a write. Production create, cancel, and modify operations are
+quarantined even though their schemas exist in the official OpenAPI document.
 
-Implemented live write and reconciliation scope:
+Order lifecycle qualification is local only:
 
-- `POST /api/v1/orders`: worker-only, quantity-based KRX `LIMIT` order payload, `clientOrderId` idempotency key, `X-Tossinvest-Account` header
-- `POST /api/v1/orders/{orderId}/cancel`: worker-only manual cancellation for one local open live order. It must be invoked by local `orders.id`, never by a free-form provider ID. The response `orderId` is treated as the cancel operation id, not final cancellation proof; the worker then reads the original order with `GET /api/v1/orders/{orderId}` and marks local `canceled` only after confirmed `CANCELED`. Timeout, unknown provider result, or a non-`CANCELED` confirmation marks the order `unknown_requires_manual_check`.
-- `GET /api/v1/orders/{orderId}`: worker reconciliation maps confirmed `FILLED`, `PARTIAL_FILLED`, `CANCELED`, and `REJECTED` statuses back to local `orders`; unknown status codes require manual review
+- Environment name is `contract_test`; it is never presented as an official sandbox.
+- The simulator implements deterministic create/status/cancel and explicit fault
+  injection without network access.
+- The registered OpenAPI URL, retrieval time, and SHA-256 identify the contract being
+  qualified. A hash mismatch blocks qualification.
+- A test asserting zero requests to the production order host is a release gate.
+- Production order endpoint or order-capable credential detection fails worker startup.
 
-Not implemented:
+The public Toss source of truth currently identifies the single API server
+`https://openapi.tossinvest.com`. Before any external write adapter is considered, the
+provider must supply and the release manager must retain a separate sandbox contract,
+credential scope, account-isolation guarantee, and artifact hash. Even then, enabling
+external writes requires a new G0 business/regulatory decision and explicit user
+approval; it is not an extension of the current release.
 
-- order modify
-
-`TOSS_ACCOUNT_ID` is kept for env compatibility and for multi-account deployments. When set, it must contain the server-side `accountSeq`, not a raw account number. When omitted, the worker may infer a single returned account; ambiguous account lists fail closed. Never put Toss credentials in Desktop or Git.
+`TOSS_ACCOUNT_ID` is kept for read-only compatibility. When set, it must contain the
+server-side `accountSeq`, not a raw account number. When omitted, the worker may infer
+a single returned account; ambiguous account lists fail closed. Toss credentials are
+worker-only and must never appear in Desktop, Git, audit payloads, or alert outbox rows.

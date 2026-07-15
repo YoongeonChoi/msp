@@ -30,11 +30,19 @@ Jobs:
   - `npm run desktop:lint`
   - `npm run desktop:typecheck`
   - `npm run desktop:test`
+  - install Chromium and `npm run desktop:e2e`
   - `npm run desktop:build`
+- Desktop native
+  - Tauri system dependencies
+  - `cargo check --locked`
+  - `cargo test --locked`
+  - `cargo build --locked`
 - Migrations
   - migration filename/order check
   - required migration presence
-  - RLS coverage for public tables
+  - RLS coverage for `public`/`api` tables and invoker-security API views
+  - fixed `worker_api` function allowlist and no desktop/public execution grants
+  - disposable PostgreSQL fresh/retained-0015 apply and invariant assertions
   - no anon/public write policy patterns
   - singleton seed keeps `enabled=false`, `mode='paper'`, `live_order_allowed=false`
   - destructive migration patterns require rollback note
@@ -80,7 +88,8 @@ Triggers only when Supabase migration/seed files or the migration workflow chang
 Checks:
 
 - sequential migration filenames
-- RLS enabled for every public table created in `0001_schema.sql`
+- RLS/invoker security for every exposed table/view
+- actual disposable PostgreSQL migration application and G1/G2 assertions
 - no anon/public writes
 - no destructive migration without rollback note or explicit destructive migration approval text
 - singleton paper safety seed
@@ -109,6 +118,6 @@ Before any deploy:
 4. Deploy manually in Render.
 5. Verify heartbeat after deploy.
 6. Run paper mode first.
-7. Consider live only through a separate manual release checklist.
+7. Keep Production Live unavailable in UI, DB, settings, credentials, and network.
 
-No GitHub Actions workflow should deploy the worker automatically before live trading readiness is formally approved.
+No GitHub Actions workflow may deploy the worker or change an execution control automatically.

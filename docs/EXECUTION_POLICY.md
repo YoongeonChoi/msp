@@ -1,90 +1,122 @@
 # Execution Policy
 
-Only `ExecutionService` may call `BrokerPort.place_order`.
+## Approved execution boundary
 
-Live sequence:
+이 release train의 실행 환경은 `paper | contract_test`뿐이다. Production Live 주문은
+DB, Worker configuration, Desktop action, network boundary에서 모두 금지한다.
 
-1. Load persisted decision snapshot.
-2. Verify snapshot freshness and active strategy.
-3. Refresh account and quote.
-4. Run final risk check immediately before broker call.
-5. Generate idempotency key and reject duplicates before any broker call.
-6. Persist blocked rows for failed evidence/risk checks, or persist an allowed live order as
-   `unknown_requires_manual_check` with `reason='live_broker_order_result_pending'` immediately
-   before broker submission.
-7. Call broker through `BrokerPort`.
-8. Update the same order row with provider status, provider order id, and provider payload summary.
-9. Sync account and positions.
-10. Write audit log and engine event.
+- `paper`: 외부 broker write를 호출하지 않는 영속 모의 체결
+- `contract_test`: 고정 OpenAPI 계약을 따르는 로컬 simulator와 fault injection
+- 실제 Toss API: 인증, 시세, calendar, 계좌·보유의 명시적으로 허용된
+  read-only 검증만 사용. Production order create/status/cancel URL은 호출하지 않는다.
 
-If broker result is uncertain, status becomes `unknown_requires_manual_check`, blind retry is forbidden, and further orders for that symbol are blocked until reconciled.
+`contract_test`는 공식 broker sandbox가 아니며 UI, log, evidence에서 sandbox로
+표시하지 않는다. 별도 공식 sandbox host와 계정 계약이 검증되기 전에는 외부 주문
+write를 추가하지 않는다.
 
-The pre-broker `unknown_requires_manual_check` row is mandatory for allowed live orders. It records the
-final idempotency key before `BrokerPort.place_order`, so a worker crash, timeout, or unknown provider
-result cannot be retried as a fresh live order. Successful broker responses update that existing row;
-deterministic pre-broker validation failures are persisted or updated as `failed` without broker
-submission.
+## V2 execution sequence
 
-Live order creation is implemented only for the guarded worker path. It is limited to KRX quantity-based
-`LIMIT` orders derived from the final fresh quote, after `RiskService` passes and database live-enable
-approval controls are satisfied. Live enable approval requires a fresh `request_live_enable` manual command
-accepted by an authenticated admin different from the requester; self-review is invalid at the database layer.
-The approval row must carry non-empty provider contract, risk report, and release evidence; reviewed rows are
-immutable, so changing evidence requires a new approval request. Enabling `live_order_allowed` consumes one
-fresh accepted approval by moving it to `applied`; the same approval cannot be reused after live is disabled.
-The scheduled worker cycle does not use simulated account data for live orders. It reads Toss cash buying
-power and holdings for live account state. Broker-wide or externally placed daily order history remains
-unverified because the official `GET /api/v1/orders status=CLOSED` response is documented as
-`400 closed-not-supported`. For the enforceable live limit, the worker counts system-created live orders
-from local `orders` rows for the current KST trading day before final risk evaluation. Production live
-operation must be limited to system-originated orders unless a broker-wide closed-order history source is
-proven. That limitation requires two controls: the runtime gate must be set with
-`LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED=true`, and live-readiness release evidence must retain
-`system_order_scope_evidence.json` proving the exact scope, Toss limitation, deployment environment,
-operator, runtime env confirmation, evidence URI, and SHA-256 hash. The default runtime value is `false`.
-The final release bundle binds this evidence to the target environment: a `staging` bundle requires
-`deployment_environment=staging`, and a `production-readiness` bundle requires
-`deployment_environment=production`. Any mismatch blocks the bundle.
-Without runtime acceptance, live cycles record `live_external_order_history_scope_not_accepted`, persist blocked orders with
-`daily_order_count_unverified`, and never call the broker. If the repository count cannot be read, live
-cycles also persist blocked orders with `daily_order_count_unverified` before any broker call.
+`ExecutionService`만 execution adapter의 create 동작을 호출할 수 있다. V2 sequence는
+다음 순서를 벗어날 수 없다.
 
-Each worker cycle first reconciles existing live orders in `sent`, `partial_filled`, or
-`unknown_requires_manual_check` status by reading Toss order status through the broker adapter. Confirmed
-`FILLED`, `PARTIAL_FILLED`, `CANCELED`, and `REJECTED` states are persisted back to `orders`; unknown Toss
-codes, missing provider order IDs, and non-timeout provider failures require manual review instead of blind retry.
-Once a local order is already `unknown_requires_manual_check`, reconciliation must not automatically clear it to
-`sent`, `partial_filled`, `filled`, `canceled`, or `rejected` based on a later provider status read. It records
-`live_order_manual_check_provider_status_observed`, preserves the manual-check status, and requires operator
-review before the order can leave the manual recovery path.
-If any live order remains in `sent`, `partial_filled`, or
-`unknown_requires_manual_check` after that reconciliation pass, the worker records
-`live_pending_reconciliation_blocks_new_live_orders` and stops before creating new
-live order proposals or broker calls. Decision snapshots may still be written so
-provider health, features, and signals remain observable while execution is gated.
+1. DB-backed worker lease와 fencing token을 얻는다.
+2. 현재 account, execution environment, strategy/policy version, `control_epoch`를
+   포함한 `ExecutionGate`를 읽는다.
+3. decision과 `RiskService` 결과를 저장한다. Risk 정책을 우회하지 않는다.
+4. `reserve_order_intent`가 동일 transaction에서 다음을 검사한다.
+   - active lease와 fencing token
+   - 동일 `control_epoch`
+   - `paper | contract_test` environment
+   - 허용된 whole-share quantity와 `LIMIT DAY` 주문
+   - semantic duplicate 부재
+   - 매수 reserve 또는 매도 가능 수량
+   - 유효한 execution/cost/tick/settlement policy
+5. `mark_dispatch_started`가 adapter 호출 직전에 lease와 `control_epoch`를 다시
+   검사한다.
+6. Paper simulator 또는 local contract simulator를 한 번 호출한다. create blind
+   retry는 금지한다.
+7. execution observation, order event, balanced accounting postings, cash/position
+   projection, alert outbox를 하나의 transaction으로 기록한다.
 
-## Toss Adapter Boundary
+Semantic identity는 다음 값의 canonical JSON SHA-256이다.
 
-The worker may use the Toss adapter only for verified read-only operations:
+```text
+account + environment + strategy + symbol + side
++ signal_valid_from + signal_valid_until + execution_policy_version
+```
 
-- token issue through `POST /oauth2/token`
-- account list through `GET /api/v1/accounts`
-- cash buying power through `GET /api/v1/buying-power`
-- holdings through `GET /api/v1/holdings`
-- current prices through `GET /api/v1/prices`
-- candles through `GET /api/v1/candles`
-- KR market calendar through `GET /api/v1/market-calendar/KR`
-- order status/history reads through `GET /api/v1/orders` and `GET /api/v1/orders/{orderId}`
+Cooldown과 semantic idempotency는 별도 통제다. 동일 semantic key에는 최대 하나의
+active intent와 create attempt만 존재할 수 있다.
 
-The adapter may call `POST /api/v1/orders` only from `ExecutionService.propose_live_order` after final
-risk approval, quote-to-quantity validation, idempotency check, and the pre-broker manual-check row
-has been durably persisted. The adapter may call `POST /api/v1/orders/{orderId}/cancel` only from the worker
-manual cancellation service, using a local `orders.id` for an existing `sent` or `partial_filled`
-live order. The cancel response is not treated as final cancellation proof; the service must confirm
-the original order status through `GET /api/v1/orders/{orderId}` and mark local `canceled` only after
-official `CANCELED`. Timeout, unknown cancel results, or non-`CANCELED` confirmation must mark the
-local order `unknown_requires_manual_check` and require manual reconciliation before retry. The adapter
-must not call modify endpoints until price/quantity policy and rollback workflows exist. Paper Trading may create only local `paper` or
-`blocked` rows; it must never create `sent`, `filled`, or live-like rows from Toss read-only checks.
+## Paper execution policy v1
 
-The Desktop app must not call Toss directly. It only reads and writes through Supabase under RLS.
+- Currency: KRW
+- Quantity: positive whole-share only
+- Side: buy/sell
+- Order type: `LIMIT`
+- Time in force: `DAY`
+- Unsupported: market, IOC/FOK, modify, short, margin, credit, derivative
+- Earliest fill: decision 이후 첫 완전한 1분 bar
+- Maximum participation: bar volume의 1%
+- Slippage: 불리한 방향 10 bps, 단 limit 가격을 침범하지 않음
+- Missing volume, tick rule, cost schedule, settlement rule, corporate-action state:
+  fail closed
+
+Buy fill:
+
+- bar open이 limit 이하이면 adverse slippage를 적용하되 limit 이하로 제한한다.
+- open이 limit보다 높지만 low가 limit에 닿으면 limit에서 체결한다.
+
+Sell fill:
+
+- bar open이 limit 이상이면 adverse slippage를 적용하되 limit 이상으로 제한한다.
+- open이 limit보다 낮지만 high가 limit에 닿으면 limit에서 체결한다.
+
+각 bar의 fill quantity는 다음 값의 최솟값이다.
+
+```text
+remaining_quantity, floor(bar_volume * 0.01)
+```
+
+비용·세금·결제일은 effective period와 SHA-256 evidence가 있는 승인 schedule만
+사용한다. Schedule이 없거나 만료되면 체결하지 않는다. Position cost basis는
+`moving_weighted_average_v1`로 계산한다.
+
+## Accounting invariants
+
+- `paper-primary` opening capital 10,000,000 KRW는 한 번만 balanced journal로
+  기록한다.
+- 매수 주문은 limit notional과 최대 비용을 reserve한다.
+- 매도 주문은 settled available quantity를 reserve하며 허구 매도는 거부한다.
+- partial fill은 체결분만 회계 처리하고 cancel/reject/expire 시 잔여 reserve만
+  해제한다.
+- DAY 잔량은 `evaluated_at >= expires_at`일 때만 만료한다. 그 전에는 예약을
+  유지하며 미래 `expired` observation을 미리 기록하지 않는다. Fill/partial fill의
+  완전한 bar와 observation 시각은 intent 만료 시각을 넘을 수 없다.
+- 같은 observation/fill을 반복 적용해도 cash, quantity, PnL은 한 번만 변한다.
+- 모든 accounting transaction은 debit 합계와 credit 합계가 같아야 한다.
+- cash, reserved cash, quantity는 승인되지 않은 음수가 될 수 없다.
+
+## Unknown and reconciliation
+
+Timeout, response loss, identity mismatch, cumulative fill 감소, terminal regression은
+자동으로 정상 상태로 보정하지 않는다.
+
+- `unknown_requires_manual_check` 또는 `quarantined`로 격리한다.
+- 자동 create retry와 자동 terminal 전환을 금지한다.
+- operator가 immutable evidence를 제출하고 다른 `risk_approver`가 검토해야 한다.
+- keyset pagination과 `next_reconcile_at`을 사용해 오래된 row가 이후 case를
+  starvation시키지 않게 한다.
+
+## Legacy evidence
+
+기존 `public.orders`, `public.positions`, `manual_commands`, `audit_logs`는 추정 fill이나
+현금분개로 변환하지 않는다. Cutover 이후 `legacy_unreconciled` 읽기 전용 evidence로
+보존하며 신규 V2 cash, position, performance 계산에 합산하지 않는다.
+
+## Reopening external order writes
+
+외부 주문 write는 코드 flag 변경으로 열 수 없다. 별도 ADR과 migration에서 공식
+sandbox contract, 전용 credential, endpoint allowlist, 법무·리스크 승인, hosted
+fault test를 모두 검증해야 한다. Production Live는 G0 사업·규제 심사를 다시 열기
+전까지 계속 금지한다.

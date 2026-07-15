@@ -1,48 +1,12 @@
 # Supabase Setup
 
-1. Create Supabase project.
-2. Enable Auth email provider suitable for one admin user.
-3. Run migrations in order.
-4. Run `seed.sql`.
-5. Insert admin user into `user_roles`.
-6. Use publishable key in desktop.
-7. Use secret key only in Render worker env vars.
-8. Verify RLS with non-admin authenticated user.
-9. Enable Realtime only for lightweight control/status tables.
+This procedure covers repository-local verification. Creating or changing a
+hosted Supabase project is a separate change that requires explicit user
+approval and dedicated staging credentials.
 
-Desktop must not use service role or secret key.
+## Migration order
 
-## Desktop Admin Session
-
-The desktop cockpit uses only `VITE_SUPABASE_URL` and
-`VITE_SUPABASE_PUBLISHABLE_KEY`. It still needs a Supabase Auth session for an
-admin user whose `auth.users.id` exists in `public.user_roles` with
-`role='admin'`.
-
-If the cockpit shows `권한 필요`, `모드: 권한 필요`, missing provider health,
-empty-looking feature pages, or a stale-looking worker card while the worker
-health tool shows fresh hosted rows, open `Settings` and sign in with the admin
-Auth account. Without that session, RLS returns empty table results rather than
-a hard query error, so `bot_settings`, `worker_heartbeats`, `api_health`, and
-the feature tables can all look absent.
-
-Worker-side verification remains service-role only:
-
-```bash
-cd apps/worker
-py -m app.tools.paper_health_report
-```
-
-`bot_settings.enabled=false` stops order creation only. The worker cycle still
-records heartbeat/provider health and can persist decision snapshots plus
-feature observations; if those rows are invisible in the cockpit, check the
-Supabase Auth/RLS session before treating it as a bot-stop issue.
-
-## Migration Order
-
-`supabase/README.md` is the canonical migration list. Before a new setup or a
-manual migration apply, confirm this section still matches that list and run
-every migration in this exact order:
+`supabase/README.md` is the canonical list. Apply every file in this exact order:
 
 1. `0001_schema.sql`
 2. `0002_rls.sql`
@@ -59,77 +23,146 @@ every migration in this exact order:
 13. `0013_worker_deployment_lock.sql`
 14. `0014_desktop_audit_summary.sql`
 15. `0015_paper_order_execution_details.sql`
-16. `seed.sql`
+16. `0016_private_foundation.sql`
+17. `0017_execution_accounting_truth.sql`
+18. `0018_control_plane_api.sql`
+19. `0019_rpc_access_contract.sql`
+20. `0020_canonical_operations_contract.sql`
+21. `0021_reconciliation_and_cutover.sql`
+22. `0022_operational_workflows.sql`
+23. `0023_operational_safety_closure.sql`
+24. `0024_operational_upgrade_convergence.sql`
+25. `20260714154520_control_qualification_workflow.sql`
+26. `20260714155117_paper_execution_source.sql`
+27. `20260714155744_cash_settlement_maturity.sql`
+28. `20260714160105_operations_runtime_scheduler.sql`
+29. `20260714161511_unknown_execution_resolution_v2.sql`
+30. `20260714165910_unknown_resolution_desktop_projection.sql`
+31. `20260715020752_kst_trading_date_convergence.sql`
+32. `seed.sql`
 
-`0012_runtime_safety_invariants.sql`는 live 승인 소비와 strategy/runtime 수치
-불변식을 DB 경계에서 강제합니다. `0013_worker_deployment_lock.sql`는 service-role
-RPC만 배포 잠금을 변경할 수 있게 하고, 배포 target을 관찰한 fresh/healthy
-heartbeat 없이는 잠금을 해제하지 않습니다. 잠금 중에는 `enabled`와
-`live_order_allowed`가 모두 false여야 합니다.
-`0014_desktop_audit_summary.sql`은 desktop에서 원본 감사 snapshot을 읽지 못하게 하고,
-admin 전용 `get_audit_log_summaries` RPC로 변경된 필드명만 제공합니다.
-`0015_paper_order_execution_details.sql`은 paper/live 실행에 사용한 정수 `quantity`와
-`price_krw`를 orders에 기록합니다. 두 컬럼은 기존 행 호환을 위해 nullable이며 값이
-있을 때는 양수 제약을 적용합니다.
+The first fifteen migrations are legacy-compatible history. Migration `0016`
+starts the V2 private source of truth. Migrations `0017` through `0024` add the
+balanced ledger, execution RPC boundary, strict Desktop contract, recovery,
+maker-checker workflows, signal-only Realtime publication, cutover grants, and
+DB-clock/fencing/reconciliation fail-closed closure. Migration `0024` also
+converges populated operational rows, adds per-attempt delivery and
+reconciliation fencing, and rejects tokenless legacy completion paths.
+Legacy trading/control rows are frozen as `legacy_unreconciled`; no migration
+may invent fills, cash, or positions for them.
 
-`0005_schema_alignment.sql` fixes known production drift:
+The timestamp migrations extend that boundary in this order:
 
-- `worker_heartbeats.memory_mb`
-- `worker_heartbeats.last_loop_ms`
-- `worker_heartbeats.message`
-- `api_health.message`
-- `api_health.error_code`
-- `api_health.checked_at`
-- `watchlist(symbol, market)` unique upsert target
-- `strategy_versions.version` unique reference
-- operational indexes for paper trading verification
+- `20260714154520` adds reviewed reference bundles and release-bound G1/G2/
+  contract qualification workflows.
+- `20260714155117` adds immutable Paper minute-bar fixtures, candidates, and
+  restart-safe claim/load/complete work items.
+- `20260714155744` reclassifies trade-date cash through settlement clearing,
+  adds KST-dated obligations, pending debit/credit projections, and durable
+  settlement claim/retry/dead-letter state.
+- `20260714160105` records independent command, execution, settlement,
+  reconciliation, and outbox scheduler-stage heartbeat evidence.
+- `20260714161511` adds Unknown V2 evidence, maker/checker review, and the
+  dedicated Worker `list/claim/apply` path; V1 remains evidence-only.
+- `20260714165910` exposes the strict Desktop Unknown V2 case projection without
+  exposing the private evidence tables.
+- `20260715020752` converges reservation, Paper-candidate, Unknown-fill, and
+  qualification calendar comparisons on an explicit `Asia/Seoul` date,
+  including the 00:00-08:59 KST boundary.
 
-## Verification SQL
+## Required project configuration
 
-Check the singleton settings row:
+1. Expose only `api` and `worker_api` through the Data API. `api` is the
+   authenticated Desktop boundary; `worker_api` is callable only with the
+   server-side Worker credential. Do not expose `public` or `private`.
+2. Keep explicit schema/table/function grants under migration control. RLS alone
+   is not an API permission boundary.
+3. Enable Supabase Auth TOTP and require AAL2 for operational mutations.
+4. Enrol at least two distinct operating users and assign only the seven roles
+   documented in `docs/SECURITY.md`.
+5. Desktop receives only project URL and publishable key. Worker secrets stay in
+   the server-side runtime.
+6. Keep `supabase_realtime` limited to `api.control_plane_signal`. It is a
+   monotonic invalidation signal, not a state source; clients refetch the strict
+   snapshot after a signal. Do not publish raw order events, audit payloads,
+   decision snapshots, accounting postings, or legacy `public` tables.
+7. Keep `public.bot_settings.mode='paper'` and
+   `public.bot_settings.live_order_allowed=false`.
 
-```sql
-select id, enabled, mode, live_order_allowed from public.bot_settings;
+## Local verification
+
+With Docker available, run the repository verifier against a disposable
+PostgreSQL instance:
+
+```bash
+python supabase/verify_g1_g2_migration.py
 ```
 
-Check latest worker heartbeat rows:
+It must apply a fresh database through the latest timestamp migration, apply the
+same tail to the retained `0015` fixture path, and converge the retained `0023`
+operational fixture. It then checks schema/grant/RLS assertions, Paper-only
+constraints, ledger invariants, command separation, append-only audit behavior,
+Paper source publication, KST cash settlement, Unknown V2 dedicated
+maker/checker application, and Worker RPC visibility. Also run the Python
+contract tests and repository safety checks.
 
-```sql
-select * from public.worker_heartbeats order by created_at desc limit 10;
+Do not use the service role or a database owner session as evidence for the
+authenticated/anonymous negative matrix. Hosted staging additionally requires
+real Auth JWTs at AAL1/AAL2 for each role, two-person command tests, Supabase
+advisors, and retained output bound to the tested migration SHA.
+
+## Seed and opening journal
+
+`paper-primary` receives one 10,000,000 KRW opening journal only through the
+evidence-bound account-opening request, distinct risk-approver review, Worker
+claim, and atomic ACK/application path. A second journal is rejected. It must
+never be reset on a cycle or redeploy. Contract qualification uses
+`contract-test-primary` and cannot affect Paper projections.
+
+No secret, production account number, provider raw payload, or real customer
+data belongs in seed data.
+
+## Explicit Paper source publication
+
+The Worker does not synthesize strategy candidates or market bars. To publish
+one reviewed local fixture or approved read-evidence artifact, keep the normal
+runtime configured for `paper`, set
+`EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED=true` for that explicit invocation,
+and pass the independently computed artifact SHA-256:
+
+```powershell
+cd apps/worker
+$env:EXECUTION_V2_ENABLED="true"
+$env:EXECUTION_V2_WORKER_API_ENABLED="true"
+$env:EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED="true"
+$env:EXECUTION_V2_ENVIRONMENT="paper"
+$env:EXECUTION_V2_ACCOUNT_ID="paper-primary"
+$env:EXECUTION_V2_WORKER_ID="<active-lease-holder-uuid>"
+$sourceSha = (Get-FileHash -Algorithm SHA256 .\paper-source.json).Hash.ToLowerInvariant()
+py -m app.tools.publish_paper_execution_source_once `
+  --input .\paper-source.json `
+  --input-sha256 $sourceSha
 ```
 
-Check latest API health by provider:
+The publisher accepts only the strict `schema_version=1` shape, rejects an
+unknown or duplicate field, and uses only
+`worker_api.ingest_paper_bar_fixture_v1` and
+`worker_api.enqueue_paper_execution_candidate_v1`. The DB still verifies the
+active lease/fencing token, release, `control_epoch`, qualification, policy,
+cost schedule, calendar, tick, volume, and corporate-action evidence. A local
+file hash proves byte identity, not origin approval. This command is not an
+automatic strategy/data producer.
 
-```sql
-select distinct on (provider) * from public.api_health order by provider, checked_at desc;
+## Local contract qualification
+
+Run the fixed-artifact, zero-network simulator suite separately:
+
+```powershell
+cd apps/worker
+py -m app.tools.run_contract_qualification_once
 ```
 
-Check watchlist upsert:
-
-```sql
-insert into public.watchlist (symbol, market, name, sector, enabled)
-values ('005930', 'KR', '삼성전자', '반도체', true)
-on conflict (symbol, market) do update set
-  name = excluded.name,
-  sector = excluded.sector,
-  enabled = excluded.enabled,
-  updated_at = now()
-returning id, symbol, market, name, enabled;
-```
-
-Check RLS disabled tables:
-
-```sql
-select tablename
-from pg_tables
-where schemaname = 'public'
-  and rowsecurity = false;
-```
-
-Check orders and decisions did not increase unexpectedly while `enabled=false`:
-
-```sql
-select
-  (select count(*) from public.orders) as orders_count,
-  (select count(*) from public.decision_snapshots) as decision_snapshots_count;
-```
+Its JSON manifest covers create replay, partial-to-terminal status, cancel,
+fault injection, and a production-order-network request count of zero. It is
+local evidence only. It does not call an official sandbox, register/finalize a
+qualification in the database, or authorize Hosted Staging.

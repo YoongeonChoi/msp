@@ -2,7 +2,7 @@
 
 Versioning:
 
-- `v0.x.y` until live trading is implemented, externally reviewed, and paper-validated.
+- `v0.x.y` while G1/G2 Paper and operational gates are being qualified.
 
 Branches:
 
@@ -16,7 +16,9 @@ Branches:
 - Worker `ruff` passes.
 - Worker type check passes.
 - Desktop lint/typecheck/build pass.
+- Desktop Playwright E2E and Tauri/Rust check, test, and build pass.
 - Migration check passes.
+- Fresh and retained-0015 migration application/invariant checks pass.
 - Repository safety check passes: no tracked non-example `.env`, no production secrets in workflows, Render auto deploy remains off.
 - Security workflow has no unresolved critical finding.
 - Secret scans have no unresolved finding.
@@ -48,16 +50,10 @@ where id = 'singleton';
 7. Observe decisions/orders.
 8. Keep `live_order_allowed=false`.
 
-## Live Trading Gate
+## External Order Gate
 
-No release may enable live trading automatically. A future live release requires:
-
-- separate live-readiness PR
-- broker endpoint verification
-- contract tests
-- final risk gate evidence
-- manual typed confirmation process
-- rollback target
-- paper validation evidence
-
-Until that exists, release validation ends at paper mode.
+This release train ends at Paper and local `contract_test`. Production order
+create/cancel/modify is prohibited, not conditionally enabled. A future external
+write requirement must reopen G0 business/regulatory review and establish a new
+architecture, credentials, network policy, provider environment contract, and
+approval program. Passing G1/G2 does not authorize that expansion.

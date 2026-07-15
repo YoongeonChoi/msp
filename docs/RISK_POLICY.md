@@ -1,123 +1,83 @@
 # Risk Policy
 
-All live orders require every live policy to pass:
+## Safety boundary
 
-- bot enabled
-- valid settings
-- active strategy version present
-- mode live
-- live permission true
-- market open known true
-- fresh valid quote
-- account sync successful and fresh
-- Toss and Supabase healthy
-- projected position after a buy does not exceed the maximum
-- projected sector exposure after a buy does not exceed the maximum
-- daily loss below limit
-- daily order count below limit and verified
-- order amount within limit
-- cash buying power covers the calculated whole-share buy notional
-- synchronized position quantity covers the calculated sell quantity
-- unique idempotency key
-- no critical negative news risk for buys
-- liquidity sufficient
-- volatility acceptable
-- no cooldown
-- no shutdown in progress
+All execution fails closed. This release has no Production Live path; database,
+UI, settings, credentials, and network controls keep
+`live_order_allowed=false`. Paper and local `contract_test` still require the
+same durable control, lease, reservation, and evidence checks.
 
-For live cycles, time-sensitive settings, provider/calendar state, account,
-positions, active strategy approval, and quote inputs are refreshed after
-feature collection. The final `RiskService` evaluation uses only that refreshed
-snapshot; any failure or state change blocks before a broker call.
+`RiskService` remains the aggregate risk decision point. Database reservation
+repeats the authoritative invariants so a stale process decision cannot dispatch.
 
-Paper orders use a separate policy set:
+## Mandatory execution gate
 
-- bot enabled
-- valid settings
-- active strategy version present
-- fresh valid quote
-- account sync successful and fresh
-- projected simulated position after a buy does not exceed the maximum
-- projected simulated sector exposure after a buy does not exceed the maximum
-- daily loss below limit
-- daily order count below limit
-- order amount within limit
-- simulated account cash covers the calculated whole-share buy notional
-- no duplicate signal in cooldown window
-- no critical negative news risk for buys
-- liquidity sufficient
-- volatility acceptable
-- no cooldown
+Every new intent must prove:
 
-Paper policy excludes `mode_live`, `live_order_allowed`, `market_open`, and provider-health gates so
-safe paper trading can run with `mode='paper'` and `live_order_allowed=false` outside market hours or
-while a broker health probe is degraded. Missing quote/provider data can still prevent a decision from
-being built. Paper position, liquidity, and volatility inputs are explicit simulation assumptions and are
-stored in `feature_snapshot.raw.risk_evidence`; verified critical-news evidence is used when present.
-Paper sell decisions do not reuse broker-synchronized holdings as simulated inventory. The current
-paper engine has no persisted paper position ledger, so it records the simulated order quantity and
-decision price but does not claim inventory enforcement. This limitation applies only to paper mode;
-live sells still fail closed on unknown or insufficient synchronized holdings.
+- account environment is `paper` or `contract_test` and the account is enabled;
+- current `control_epoch`, active strategy version, execution policy version,
+  cost schedule version, and release identity match the command;
+- caller holds the unexpired account lease and current fencing token;
+- semantic key is unique for account + environment + strategy + symbol + side +
+  signal validity window + execution policy version;
+- decision, risk result, quote/bar, calendar, tick, corporate-action, and cost
+  evidence are complete and fresh;
+- quantity is a positive whole share and the order is KRW `LIMIT` `DAY`;
+- buy cash after reservation is non-negative;
+- sell available quantity after reservation is non-negative, with no short or
+  margin behavior;
+- symbol/strategy/account exposure, daily loss, order count, cooldown, and
+  concentration limits pass;
+- no unresolved unknown/quarantined intent blocks the affected account/symbol.
 
-Live buy exposure evidence:
+The dispatch gate rechecks `control_epoch`, enabled state, and fencing token
+immediately before calling an execution adapter. An emergency stop increments
+the epoch, invalidating every stale reservation or claimed command.
 
-- Holdings must be synchronized from the broker and account equity must be positive and fresh.
-- The worker checks current symbol/sector exposure plus the proposed buy amount.
-- Unknown target sector, any unclassified held sector, or missing position sync blocks the buy.
-- Critical-news, liquidity, and volatility inputs must be explicit booleans in the feature evidence.
-- Position/sector maximum and critical-news policies do not block `sell` or `hold` decisions because
-  they do not add exposure; the remaining live policies still apply.
+## Paper fill risk
 
-Paper duplicate order prevention:
+The deterministic policy allows a fill only from the first complete one-minute
+bar after the decision. Fill quantity is the lesser of remaining quantity and
+1% of bar volume. Price uses 10 bps adverse slippage but cannot cross the limit.
+Partial fill and expiry release the correct residual reserve.
 
-- Logical idempotency is based on `paper`, hourly cooldown bucket, strategy version, symbol, action, and order amount.
-- Repeated signals inside the cooldown bucket create a `blocked` order with the duplicate reason instead of another `paper` order.
-- Blocked paper orders write an `engine_events` row with `message='paper_order_blocked'`.
+Missing, expired, or hash-mismatched commission/tax/settlement schedule, tick
+rule, volume, or corporate-action evidence blocks the fill; the engine does not
+substitute zero, `false`, Paper, or another silent default.
 
-Fail-closed matrix:
+## Accounting and observation invariants
 
-| Condition | Paper order | Live order |
-| --- | --- | --- |
-| Missing setting | Block | Block |
-| Invalid setting | Block | Block |
-| Missing strategy version | Block | Block |
-| Unknown market calendar | Does not block paper by itself | Block |
-| Missing quote | Block | Block |
-| Stale quote | Block | Block |
-| Unverified daily order count | Uses simulated paper count | Block |
-| Supabase unavailable | Block | Block |
-| Toss health probe degraded | Does not block paper by itself | Block |
-| Unknown position or sector exposure | Uses recorded paper assumptions | Block new buy |
-| Insufficient cash buying power | Block | Block |
-| Unknown or insufficient sell quantity | Not enforced until a paper position ledger exists | Block |
-| Missing liquidity or volatility evidence | Uses recorded paper assumptions | Block new buy |
-| Critical news risk | Block new buy | Block new buy |
-| Duplicate signal | Block | Block |
-| OpenAI unavailable | Use cached news risk or block affected new buys | Use cached news risk or block affected new buys |
-| DB write failure | Block | Block |
-| Unknown exception | Block | Block |
+- Every accounting transaction has equal debit and credit totals.
+- Opening cash is a one-time 10,000,000 KRW journal for `paper-primary`.
+- Cash, reserved cash, total/available position quantity, and settlement
+  projections cannot be negative.
+- Cost basis is `moving_weighted_average_v1`.
+- Fill identity and observation identity are unique; duplicates are no-ops.
+- Cumulative fill is monotonic and cannot exceed intent quantity.
+- Terminal order state cannot regress and provider identity cannot change.
+- Any violation is quarantined and creates audit/incident evidence in the same
+  domain transaction where applicable.
 
-Every blocked order must persist a reason.
+Unknown state is not terminal and cannot be retried automatically. An operator
+and a different risk approver must review retained evidence before a compensating
+transaction or resolution.
 
-Broker call rule:
+## Command risk
 
-- Paper orders never call `BrokerPort.place_order`.
-- Scheduled live cycles do not use simulated paper account data.
-- Missing live account state blocks with `missing_account_state` before any broker call.
-- Live daily order count is verified from local system-created `orders` for the current KST trading day
-  only after the operator has explicitly accepted the system-originated-order scope with
-  `LIVE_SYSTEM_ORDER_COUNT_SCOPE_ACCEPTED=true`. Live readiness also requires retained
-  `system_order_scope_evidence.json` proving scope, Toss limitation, deployment environment, operator,
-  runtime env confirmation, HTTPS evidence URI, and SHA-256 hash; the env var alone is only the runtime gate,
-  not the release evidence. The final release bundle also binds the evidence to the target environment:
-  `staging` requires `deployment_environment=staging`, and `production-readiness` requires
-  `deployment_environment=production`. The default `false` blocks with
-  `daily_order_count_unverified`, records `live_external_order_history_scope_not_accepted`, and makes no
-  broker call.
-- If the local repository count cannot be read after scope acceptance, risk also blocks with
-  `daily_order_count_unverified` before any broker call.
-- Live orders may call the broker only from `ExecutionService` after final risk passes.
-- OpenAI structured output is research/classification input only and cannot trigger execution.
-- Toss live order creation is limited to guarded KRX `LIMIT` orders. Manual cancel is limited to one
-  existing local open live order through the worker CLI, and local `canceled` requires provider
-  `CANCELED` confirmation. Modify remains disabled.
+Risk-increasing commands require AAL2, a fresh five-minute step-up grant bound to
+the command hash, maker/checker UUID separation, expiry, and compare-and-set
+version. UI permission checks are informative only; the database enforces the
+decision.
+
+`emergency_stop` is the only one-person command because it only reduces risk.
+One AAL2 operator may set `enabled=false` and increment `control_epoch`. Offline
+stop attempts are displayed as not sent and are never queued.
+
+## Release gate
+
+Passing unit tests does not approve operations. G1 requires zero imbalance,
+fictional sell, duplicate intent/journal, and recovery of every tested crash
+point. G2 additionally requires two-person controls, command ACK/postconditions,
+alert delivery and human ACK, fencing, independent monitoring, immutable archive
+receipt, and the isolated RTO/RPO drill. Any uncertainty keeps the account Paper
+disabled.

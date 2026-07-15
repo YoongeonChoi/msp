@@ -1,156 +1,126 @@
 # Paper Trading Operations
 
-Paper Trading 운영 점검은 저장된 Supabase control-plane 데이터만 읽는다. 이 경로는 Toss 주문 생성, live broker execution, `decision_snapshots` 생성, `orders` 생성을 수행하지 않는다.
+Paper V2 is a persistent execution/accounting environment, not a stateless mock.
+It has one `paper-primary` account, one 10,000,000 KRW opening journal, durable
+cash/position reserves, deterministic fills, and restart reconciliation.
 
-## Command
+The required Paper V2 migration tail after `0024` is:
 
-Run from `apps/worker` with server-side Supabase env vars:
+1. `20260714154520_control_qualification_workflow.sql`
+2. `20260714155117_paper_execution_source.sql`
+3. `20260714155744_cash_settlement_maturity.sql`
+4. `20260714160105_operations_runtime_scheduler.sql`
+5. `20260714161511_unknown_execution_resolution_v2.sql`
+6. `20260714165910_unknown_resolution_desktop_projection.sql`
+7. `20260715020752_kst_trading_date_convergence.sql`
+
+## Before resume
+
+1. Confirm `PAPER`, `LIVE 금지`, expected release SHA, fresh heartbeat, valid
+   lease/fencing token, current `control_epoch`, and ledger checkpoint.
+2. Confirm execution/cost policy versions are approved and within their
+   effective windows, with matching evidence SHA-256.
+3. Confirm quote, complete one-minute bar, market calendar, tick rule, bar
+   volume, and corporate-action evidence are present and fresh.
+4. Confirm debit=credit, non-negative cash/reserves/positions, no duplicate
+   source IDs, and no open unknown/quarantine case.
+5. Confirm outbox age/dead-letter and critical incident ACK state are healthy.
+6. Have an operator request resume and a different risk approver approve it with
+   a fresh command-bound step-up grant.
+7. Wait for `applied` and the runtime postcondition. `requested`, `approved`, or
+   `claimed` is not success.
+
+## Fill interpretation
+
+The v1 policy supports KRW whole-share `LIMIT` `DAY` buy/sell only. The first
+complete one-minute bar after the decision is eligible. Participation is capped
+at 1% of volume and price applies 10 bps adverse slippage without crossing the
+limit. Partial fill and residual expiry are expected states.
+
+Buy cash and sell quantity are reserved before dispatch. On partial fill the
+filled portion is consumed and the remainder stays reserved; cancel/expiry
+releases only the remaining reserve. A duplicate observation/fill changes no
+ledger or projection state.
+
+## Explicit source publication
+
+The Worker scheduler does not fabricate bars or strategy candidates. To publish
+one reviewed `local_fixture` or `allowed_read_evidence` artifact, explicitly
+enable the normally disabled input gate and pin the exact file bytes:
+
+```powershell
+cd apps/worker
+$env:EXECUTION_V2_ENABLED="true"
+$env:EXECUTION_V2_WORKER_API_ENABLED="true"
+$env:EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED="true"
+$env:EXECUTION_V2_ENVIRONMENT="paper"
+$env:EXECUTION_V2_ACCOUNT_ID="paper-primary"
+$env:EXECUTION_V2_WORKER_ID="<active-lease-holder-uuid>"
+$sourceSha = (Get-FileHash -Algorithm SHA256 .\paper-source.json).Hash.ToLowerInvariant()
+py -m app.tools.publish_paper_execution_source_once `
+  --input .\paper-source.json `
+  --input-sha256 $sourceSha
+```
+
+The JSON must contain the strict fixture/candidate pair, current fencing token,
+and `control_epoch`. The DB rechecks release, lease, qualification, policy/cost,
+calendar, tick, volume, and corporate-action evidence. The hash proves byte
+identity only. This operator-triggered publisher is not an automatic strategy
+producer or an approval step.
+
+## Cash settlement interpretation
+
+Position quantity, moving-weighted-average cost, and realized PnL are recognized
+on trade date. Cash is reclassified through settlement payable/receivable and
+shown as pending debit/credit until the schedule's `settlement_date` is due in
+`Asia/Seoul`. A future sell receivable is not settled cash and cannot be treated
+as such in the status rail.
+
+Reservation, Paper candidate eligibility/expiry, Unknown fill evidence, and
+qualification windows use that same explicit Korean market date. Do not derive
+those dates with a session-timezone `timestamptz::date` cast, especially between
+00:00 and 08:59 KST.
+
+Settlement is a separate durable scheduler stage with claim, complete,
+retry/backoff, exact replay, and dead-letter evidence. Investigate any stale due
+obligation, projection conflict, retry exhaustion, or cash snapshot mismatch
+before resume.
+
+## Investigation rules
+
+- Do not edit a ledger, projection, reserve, intent, observation, or audit row.
+- Do not resend unknown intent or force it terminal. V1 unknown resolution is
+  evidence-only.
+- Preserve evidence and use the V2 operator request plus distinct risk approver
+  review. The Desktop reads `get_unknown_resolution_cases_v2`; the Worker alone
+  performs dedicated `list/claim/apply` under command/work revision,
+  `control_epoch`, release, lease, and fencing-token CAS.
+- Do not use generic operation-command ACK to close an Unknown V2 case. Apply
+  only the reviewed fill manifest or verified no-fill terminal result; exact
+  replay must not create a second fill, journal, or settlement obligation.
+- Never include `legacy_unreconciled` orders or positions in V2 balance/PnL.
+- Emergency stop control-plane receipt and Worker stop confirmation are separate.
+
+## Local validation
 
 ```bash
-python -m app.tools.paper_health_report
+cd apps/worker
+python -m pytest
+python -m ruff check app
+python -m mypy app
+python -m app.tools.run_contract_qualification_once
+cd ../..
+python supabase/verify_g1_g2_migration.py
 ```
 
-On Windows:
+The contract command uses only the hash-pinned local simulator and must report
+zero production-order network requests. It is not an official sandbox result or
+a completed DB qualification approval.
 
-```bash
-py -m app.tools.paper_health_report
-```
-
-Required env:
-
-```text
-SUPABASE_URL=...
-SUPABASE_SECRET_KEY=...
-PAPER_HEALTH_DB_WARNING_BYTES=450000000
-```
-
-The command prints a safe report and writes one `engine_events` summary row with `component='paper_ops'` and `message='paper_health_report'`. It does not print API keys, provider secrets, account identifiers, or raw provider payload details. Its own `paper_ops` summary events are excluded from the repeated-critical-event count so the report cannot keep itself failing, but operational critical events from worker/provider components still count.
-
-## Report Sections
-
-- `bot_settings`: `enabled`, `mode`, `live_order_allowed`
-- latest worker heartbeat age in seconds
-- latest provider health by provider, including safe failure details when present
-- decisions in the last 24h grouped by `action`
-- orders in the last 24h grouped by `status`
-- live-like order count for `sent`, `filled`, `partial_filled`
-- duplicate `idempotency_key` count
-- missing `reason_json` metrics when the column is present
-- missing feature JSON metrics when `feature_json`, `feature_snapshot_json`, or `feature_snapshot` exists
-- orders missing `idempotency_key`
-- recent `error` and `critical` `engine_events`
-- DB size from the latest `retention_runs.db_size_bytes`, if queryable
-- final `PASS`, `WARN`, or `FAIL`
-
-Provider health detail output is intentionally narrow. When an `api_health`
-row has safe diagnostic fields, the report may print values such as
-`error_type=ProviderAuthError reason=toss_access_denied` on the provider line.
-Only `error_type`, `reason`, `status`, and `code` are summarized, string values
-are single-line normalized and bounded, and the final line still passes through
-secret redaction before it is printed. Raw provider payloads, credentials,
-tokens, account identifiers, and unknown detail keys must remain out of the
-report.
-
-## Exit Codes
-
-- `0`: final result is `PASS` or `WARN`
-- `1`: final result is `FAIL`, Supabase env is missing, or a Supabase query fails
-
-Warnings do not stop the command because they are operational follow-up items, not critical consistency failures.
-
-## Critical Failures
-
-The command returns `FAIL` when any of these are true:
-
-- `bot_settings.live_order_allowed=true`
-- `bot_settings.mode='live'`
-- any `sent`, `filled`, or `partial_filled` order exists
-- duplicate `idempotency_key` exists
-- latest heartbeat is missing or older than 5 minutes
-- two or more recent operational critical `engine_events` exist, excluding
-  `component='paper_ops'` and `message='paper_health_report'`
-- Supabase query fails
-
-## Warnings
-
-The command returns `WARN` when no critical failure exists but one of these conditions is found:
-
-- latest provider health is degraded
-- no decisions were generated during Korean market hours while bot is enabled
-- blocked paper orders are high
-- DB size is above `PAPER_HEALTH_DB_WARNING_BYTES`
-- orders older than the outcome grace window are missing optional outcome rows
-- orders are missing `idempotency_key`
-
-## Manual Verification SQL
-
-Keep Paper Trading fail-closed before running the report:
-
-```sql
-update public.bot_settings
-set mode = 'paper',
-    live_order_allowed = false,
-    updated_at = now()
-where id = 'singleton'
-returning id, enabled, mode, live_order_allowed;
-```
-
-Check the command summary event:
-
-```sql
-select level, component, message, details, created_at
-from public.engine_events
-where component = 'paper_ops'
-  and message = 'paper_health_report'
-order by created_at desc
-limit 5;
-```
-
-Check no live-like order exists:
-
-```sql
-select *
-from public.orders
-where status in ('sent', 'filled', 'partial_filled')
-order by created_at desc
-limit 20;
-```
-
-Check duplicate idempotency keys:
-
-```sql
-select idempotency_key, count(*) as count
-from public.orders
-where idempotency_key is not null
-group by idempotency_key
-having count(*) > 1;
-```
-
-Check latest heartbeat:
-
-```sql
-select *
-from public.worker_heartbeats
-order by created_at desc
-limit 1;
-```
-
-After a manual Render deploy, confirm the report's `[worker]` section shows a
-`release_sha` or `release_source` for the expected commit. The underlying row is:
-
-```sql
-select
-  details->>'release_sha' as release_sha,
-  details->>'release_source' as release_source,
-  created_at
-from public.worker_heartbeats
-order by created_at desc
-limit 1;
-```
-
-## Safety Notes
-
-- Do not run this command from Desktop.
-- Do not copy Supabase secret keys into Vite/Tauri env vars.
-- Do not use this report as approval for live trading.
-- If the report returns `FAIL`, keep `live_order_allowed=false` and inspect the listed finding codes first.
+Local test success does not complete G1/G2. Final approval also needs the
+named G0 responsible people and two operating users, explicit Hosted Staging
+approval/credentials, a 24-hour fault soak, ten consecutive Paper/Shadow trading
+days, external alert ACK/archive evidence, monitoring in a separate failure
+domain, hosted committed-ledger RPO proof, and an isolated restore drill within
+30 minutes. See [Operations Runbook](RUNBOOK.md). None of those external gates
+is completed by the local commands above.

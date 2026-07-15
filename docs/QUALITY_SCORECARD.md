@@ -1,12 +1,20 @@
 # Engineering Quality Scorecard
 
+> **Historical baseline:** 이 문서는 G1+G2 V2 전환 전의 품질 평가를 보존한
+> 자료다. 현재 승인 기준, 검증 결과 또는 Production Live readiness를 나타내지
+> 않는다. 현재 gate는 `ENTERPRISE_PROGRAM_PLAN.md`, ADR-0007 및
+> `TEST_PLAN.md`를 따른다.
+
 평가일: 2026-07-14 KST
 기준선: `c58a7f8`
-개선 후보: 현재 검증된 working tree
+개선 후보: 당시 working tree snapshot (현재 V2 후보와 무관)
 
 ## 이 점수의 의미
 
-이 문서는 코드, 운영성, 테스트, 문서의 **engineering quality**를 비교하기 위한 내부 점수표다. 투자 성과, 수익 가능성, 보안 보증, 배포 승인, live trading readiness를 의미하지 않는다. Live 승인 상태는 `LIVE_READINESS_SCORECARD.md`만 기준으로 삼는다.
+이 문서는 코드, 운영성, 테스트, 문서의 **engineering quality**를 비교하기 위한
+과거 내부 점수표다. 투자 성과, 수익 가능성, 보안 보증, 배포 승인 또는 현재
+gate 통과를 의미하지 않는다. 높은 점수는 어떤 형태의 실주문 승인도 만들지
+않는다.
 
 평가는 각 항목을 0~100으로 채점한 뒤 가중 평균한다.
 
@@ -16,7 +24,7 @@
 - 60~69: 제한적 사용은 가능하지만 운영 리스크가 큰 상태
 - 0~59: 설계 또는 구현이 우선 필요한 상태
 
-## 개선 전후 점수
+## 당시 평가 점수 (현재 gate에 사용 금지)
 
 | 평가 영역 | 가중치 | 개선 전 | 개선 후 | 근거 |
 | --- | ---: | ---: | ---: | --- |
@@ -48,9 +56,10 @@
 
 Desktop test suite가 로컬에만 존재하던 상태에서 `npm run desktop:test`를 CI의 lint/typecheck/build 사이에 추가했다. UI 안전 회귀가 main push와 pull request에서 차단된다.
 
-## 검증 근거
+## 당시 기록된 검증 근거
 
-현재 후보에서 다음 검증을 실행했다.
+당시 후보에서 다음 검증을 실행했다. 아래 결과는 현재 G1+G2 후보의 검증
+결과로 재사용할 수 없다.
 
 | 명령 | 결과 |
 | --- | --- |
@@ -66,11 +75,11 @@ Desktop test suite가 로컬에만 존재하던 상태에서 `npm run desktop:te
 | `python .github/scripts/repository_safety.py workflows` | PASS |
 | `git diff --check` | PASS |
 
-현재 shell에는 `python`, `npm` launcher가 없어 Codex의 bundled Python/Node runtime과 기존 설치된 dependency를 직접 사용했다. 실행한 module과 script body는 repository 명령과 동일하다. Remote CI와 hosted Supabase/provider 검증은 이 점수의 PASS 근거에 포함하지 않는다.
+당시 shell에는 `python`, `npm` launcher가 없어 Codex의 bundled Python/Node runtime과 기존 설치된 dependency를 직접 사용했다. 실행한 module과 script body는 repository 명령과 동일했다. Remote CI와 hosted Supabase/provider 검증은 이 점수의 PASS 근거에 포함하지 않았다.
 
-Docker CLI는 있으나 daemon이 실행 중이지 않아 disposable PostgreSQL migration 적용 검증은 `SKIP`됐다. 인앱 Browser 초기화도 런타임 오류로 실패해 시각적 smoke test는 점수 근거에서 제외했으며, React render fixture와 production build만 포함했다.
+Docker CLI는 있었으나 daemon이 실행 중이지 않아 disposable PostgreSQL migration 적용 검증은 `SKIP`됐다. 인앱 Browser 초기화도 런타임 오류로 실패해 시각적 smoke test는 점수 근거에서 제외했으며, React render fixture와 production build만 포함했다.
 
-## 남은 우선순위
+## 당시 남은 우선순위 (현재 계획으로 대체됨)
 
 | 우선순위 | 남은 기능 | 현재 공백 | 완료 조건 |
 | --- | --- | --- | --- |
@@ -84,4 +93,6 @@ Docker CLI는 있으나 daemon이 실행 중이지 않아 disposable PostgreSQL 
 
 ## 결론
 
-이번 개선은 live 기능을 넓히지 않고 주문 전 안전성, Paper 연구 데이터, 운영자 가시성, 캐시 효율, CI, 문서를 강화했다. 종합 89점은 견고한 개발 기반을 의미하지만, P0 항목과 외부 evidence가 남아 있으므로 무인 live trading 승인이 아니다.
+당시 개선은 주문 전 안전성, Paper 연구 데이터, 운영자 가시성, 캐시 효율,
+CI, 문서를 강화했다. 이 문서의 종합 89점은 현재 구현이나 G1/G2 gate 통과를
+의미하지 않는다. 현재 상태는 binary gate와 최신 검증 증거로만 판정한다.

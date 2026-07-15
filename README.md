@@ -8,7 +8,7 @@
 수익률보다 안전성, 재현성, 설명 가능성, 관측 가능성을 우선합니다. Desktop은 주문 엔진이 아니라 Supabase RLS를 통과한 control plane이며, broker 주문 경로는 Python Worker만 소유합니다.
 
 > [!WARNING]
-> 이 프로젝트는 투자 자문이나 수익을 보장하는 제품이 아닙니다. 기본값은 `enabled=false`, `mode=paper`, `live_order_allowed=false`입니다. 외부 provider·호스팅·사고 대응 증거가 모두 검증되기 전에는 무인 실거래에 사용할 수 없습니다.
+> 이 프로젝트는 투자 자문이나 수익을 보장하는 제품이 아닙니다. G1+G2 릴리스는 내부 전용 `paper`와 로컬 `contract_test`만 지원합니다. 기본값은 `enabled=false`, `mode=paper`, `live_order_allowed=false`이며 Production Live 주문은 UI·DB·설정·네트워크에서 금지됩니다.
 
 ## 현재 상태
 
@@ -16,48 +16,56 @@
 | --- | --- | --- |
 | Worker | 상시 trading cycle, provider health, heartbeat | 구현 |
 | 전략 | 가중치 기반 점수, 결정 근거 snapshot, draft/승인 경계 | 구현 |
-| Paper Trading | 위험 정책, 정수 수량·결정 가격 기록, 중복 방지, outcome·backtest 도구 | 구현 |
-| 주문 안전 | 정수 주 buying power, live 매도 보유수량, 노출·손실·횟수·신선도 gate | 구현 |
-| Desktop | 대시보드, 제어, 관심종목, 포트폴리오, 주문, 시그널, 전략 Lab | 구현 |
-| 운영 가시성 | 수동 확인 주문 안전 큐, engine event, 변경 감사 로그 | 구현 |
-| Supabase | Auth, RLS, Realtime, audit, deployment lock | 구현 |
-| 실주문 | Worker 전용 guarded path와 fail-closed gate | 외부 증거 완료 전 사용 금지 |
+| Paper Trading V2 | 영속 계좌, 결정론적 부분체결, 예약, 복식부기 원장, 재시작 복구 커널 | 로컬 구현·검증 단계 |
+| 주문 안전 | lease/fencing, `control_epoch`, semantic dedupe, 현금·수량 원자 예약 | 로컬 구현·검증 단계 |
+| Desktop | 운영 상태, 명령/ACK, 승인함, incident, stale/offline 차단, 수동 reconciliation | 로컬 구현·검증 단계 |
+| 운영 통제 | MFA/RBAC, maker/checker, append-only audit, transactional outbox | 로컬 구현·검증 단계 |
+| Supabase | `private` 원장, 최소 `api` projection, Worker 전용 `worker_api` RPC | migration 검증 단계 |
+| 실주문 | Production order write 경로와 credential | 금지 (`NO-LIVE`) |
 
-현재 구현 범위와 남은 제한은 [Live Readiness Scorecard](docs/LIVE_READINESS_SCORECARD.md), [작업 현황](docs/LIVE_READINESS_WORK_SUMMARY.md), [품질 점수표](docs/QUALITY_SCORECARD.md)에서 확인할 수 있습니다.
+현재 승인 범위와 남은 제한은 [G0 운영 경계](docs/G0_OPERATING_BOUNDARY.md), [기업 프로그램 계획](docs/ENTERPRISE_PROGRAM_PLAN.md), [ADR-0007](docs/00_DECISIONS/ADR-0007-execution-safety-kernel.md), [실행 정책](docs/EXECUTION_POLICY.md)에서 확인할 수 있습니다. 과거 Live readiness 문서는 추적성만을 위해 보존되며 현재 운영 또는 승인 기준이 아닙니다.
+
+사업·규제·원장·데이터·운영을 함께 다루는 다음 단계의 실행 기준은
+[Enterprise Trading Program Plan](docs/ENTERPRISE_PROGRAM_PLAN.md)입니다. 이 계획은
+숫자형 준비도와 별도로 binary stage gate를 적용하며, 현재 live 상태를 `NO-GO`로
+판정합니다.
 
 ## 주요 특징
 
 - **Fail-closed 위험 통제**: 설정, market, quote freshness, provider health, account sync, 현금, 보유수량, 종목·섹터 노출, 일일 손실·주문 수, 중복·cooldown을 `RiskService`에서 평가합니다.
-- **Paper-first 실행**: Paper mode는 `BrokerPort.place_order`를 호출하지 않으며, 허용 주문은 정수 수량과 결정 가격을, 차단 주문은 이유와 risk snapshot을 남깁니다.
+- **Paper Truth 실행**: Paper mode는 결정론적 1분 bar 체결, 현금·수량 예약, 부분체결·만료, 균형 복식부기와 idempotent replay를 사용합니다.
 - **설명 가능한 결정**: component score, feature snapshot, strategy version, risk 결과를 하나의 decision snapshot으로 보존합니다.
-- **운영자 중심 Cockpit**: heartbeat, provider 상태, 위험 설정, 정확한 미해결 주문 수와 페이지형 안전 큐, 값이 제거된 audit 요약을 한국어 UI로 제공합니다.
+- **운영자 중심 Cockpit**: heartbeat/lease/release/ledger checkpoint, 요청·승인·Worker ACK·postcondition, incident와 stale/offline 경계를 한국어 UI로 제공합니다.
 - **AI와 주문의 분리**: OpenAI는 연구·분류·후보 제안에만 사용하며, 출력이 주문 실행이나 live 전략 승격으로 연결되지 않습니다.
-- **최소 권한 데이터 경계**: Desktop은 publishable key와 authenticated admin 세션만 사용하고, Worker secret key는 서버에만 둡니다.
-- **수동 배포 원칙**: Render 자동 배포는 꺼져 있으며, 배포 잠금과 새 heartbeat 증거 없이는 live 상태를 복원할 수 없습니다.
+- **최소 권한 데이터 경계**: Desktop은 publishable key와 AAL2 역할 세션만 사용하고, Worker는 검토된 `worker_api` RPC만 호출합니다.
+- **수동 배포 원칙**: Render 자동 배포는 꺼져 있으며, hosted staging 적용도 별도 사용자 승인 전에는 수행하지 않습니다.
 
 ## 아키텍처
 
 ```text
 Tauri + React Desktop Cockpit
-        │  publishable key + authenticated admin session
+        │  publishable key + AAL2 role session
         ▼
-Supabase Auth / RLS / Realtime Control Plane
+Supabase Auth / api projections + operation RPC
+        │
+        ▼
+private ledger/control source of truth
         ▲
-        │  server-side secret key
+        │  worker_api RPC allowlist
         │
 Python Render Background Worker
-  ├─ Application: cycle, risk, execution, research
+  ├─ Application: cycle, risk, execution kernel, reconciliation
   ├─ Domain: entities, policies, value objects
-  ├─ Adapters: Toss, KRX, OpenDART, Naver, OpenAI
+  ├─ Adapters: deterministic Paper, local contract_test, read-only providers
   └─ Infrastructure: logging, metrics, redaction, shutdown
 ```
 
 핵심 trust boundary는 다음과 같습니다.
 
 1. Desktop은 broker API를 호출하지 않습니다.
-2. `ExecutionService`만 `BrokerPort.place_order`를 호출할 수 있습니다.
-3. 모든 live proposal은 `RiskService`의 최종 평가를 다시 통과해야 합니다.
-4. 알 수 없거나 오래되었거나 mock인 증거는 live 주문을 허용하지 않습니다.
+2. `ExecutionService`만 execution adapter의 create operation을 호출할 수 있습니다.
+3. intent 예약과 dispatch 직전에 risk/control/lease/fencing 조건을 다시 확인합니다.
+4. 실제 Toss는 read-only이며, 주문 lifecycle은 네트워크 없는 `contract_test`에서만 검증합니다.
 
 자세한 구성은 [Architecture](docs/ARCHITECTURE.md)와 [Context Map](docs/CONTEXT_MAP.md)을 참고하세요.
 
@@ -66,7 +74,7 @@ Python Render Background Worker
 - Python 3.12 이상
 - Node.js 22 이상과 npm
 - Desktop native 앱 실행 시 Rust stable 및 [Tauri 2 OS prerequisites](https://v2.tauri.app/start/prerequisites/)
-- 실제 Cockpit 데이터 연동 시 Supabase project와 admin Auth 계정
+- 실제 Cockpit 데이터 연동 시 Supabase project와 서로 다른 운영 Auth 계정 2개 이상
 - 선택 사항: Docker가 실행 중인 환경은 disposable PostgreSQL migration 검증에 사용됩니다.
 
 실제 API key 없이도 Worker mock one-shot과 Desktop build/test를 실행할 수 있습니다.
@@ -127,7 +135,9 @@ Bash:
 MOCK_PROVIDERS=true RUN_ONCE=true python -m app.main
 ```
 
-초기 설정은 `enabled=false`이므로 provider health와 heartbeat를 확인하고 주문은 만들지 않는 것이 정상입니다. 주문·decision을 Supabase에 남기는 Paper smoke는 server-side Supabase 환경이 필요하며, 다음 절의 설정을 마친 뒤 `run_paper_cycle_once`를 사용합니다.
+초기 설정은 `enabled=false`이므로 provider health와 heartbeat를 확인하고 주문은
+만들지 않는 것이 정상입니다. 이 legacy one-shot은 V2 원장 smoke test가 아닙니다.
+V2 Paper 실행에는 다음 절의 control-plane migration과 승인 evidence가 필요합니다.
 
 ### 4. Desktop 설치 및 실행
 
@@ -148,11 +158,15 @@ Supabase 값을 비워 둔 경우 UI는 연결 설정 안내를 표시합니다.
 
 ## Supabase 연결
 
+> Hosted staging에 아래 절차를 적용하는 작업은 별도 사용자 승인이 필요합니다. 기본 구현·검증은 disposable local PostgreSQL에서 수행합니다.
+
 1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 migration과 `seed.sql`을 순서대로 적용합니다.
-2. Supabase Auth에서 운영자 계정을 만든 뒤 `public.user_roles.role='admin'`으로 등록합니다.
+2. Supabase Auth TOTP를 켜고 서로 다른 운영 사용자 두 명 이상을 AAL2로 등록한 뒤 V2 역할을 UUID에 할당합니다.
 3. `apps/desktop/.env.local`에는 URL과 publishable key만 넣습니다.
-4. Worker가 Supabase에 기록해야 할 때만 `apps/worker/.env`에 서버용 URL과 secret key를 넣고 `USE_SUPABASE_REPOSITORY=true`로 설정합니다.
-5. Desktop의 **설정** 화면에서 admin 계정으로 로그인합니다.
+4. 별도 hosted-staging 승인을 받은 뒤에만 Worker에 서버용 URL과 secret key를
+   제공하고 `EXECUTION_V2_ENABLED=true`, `EXECUTION_V2_WORKER_API_ENABLED=true`를
+   함께 설정합니다. 기존 `USE_SUPABASE_REPOSITORY` 경로는 V2 원장이 아닙니다.
+5. Desktop의 **설정** 화면에서 개인 운영 계정으로 로그인하고 TOTP challenge를 완료합니다.
 
 ```dotenv
 # apps/desktop/.env.local — 공개 가능한 client 설정만
@@ -162,21 +176,16 @@ VITE_SUPABASE_PUBLISHABLE_KEY=<publishable-key>
 
 ```dotenv
 # apps/worker/.env — 서버 전용, 절대 커밋 금지
-USE_SUPABASE_REPOSITORY=true
+EXECUTION_V2_ENABLED=true
+EXECUTION_V2_WORKER_API_ENABLED=true
+EXECUTION_V2_ENVIRONMENT=paper
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SECRET_KEY=<server-secret-key>
 ```
 
-안전한 demo 데이터를 준비하고 Supabase-backed mock cycle을 실행할 수 있습니다. `run_paper_cycle_once`는 `SUPABASE_URL`과 `SUPABASE_SECRET_KEY`가 설정된 Worker 환경에서만 사용합니다.
-
-```bash
-cd apps/worker
-python -m app.tools.seed_strategy_v1
-python -m app.tools.seed_watchlist_demo
-python -m app.tools.run_paper_cycle_once
-```
-
-`MOCK_PROVIDERS=true`와 `USE_SUPABASE_REPOSITORY=false` 조합은 in-memory repository를 사용하므로 해당 cycle의 데이터가 Desktop에 보이지 않는 것이 정상입니다.
+`seed_strategy_v1`, `seed_watchlist_demo`, `run_paper_cycle_once`는 legacy 연구
+fixture이며 신규 V2 원장이나 G1 검증 증거를 만들지 않습니다. V2 계좌는 승인된
+opening command, execution/cost evidence, worker lease를 갖춘 뒤에만 실행합니다.
 
 ## 환경 설정 요약
 
@@ -184,25 +193,36 @@ python -m app.tools.run_paper_cycle_once
 | --- | --- | --- |
 | `MOCK_PROVIDERS` | Worker | `true`, 외부 provider 대신 안전한 mock 사용 |
 | `RUN_ONCE` | Worker | `false`, 한 cycle 후 종료 여부 |
-| `USE_SUPABASE_REPOSITORY` | Worker | mock 실행 데이터를 Supabase에 기록할 때만 `true` |
+| `USE_SUPABASE_REPOSITORY` | Worker | legacy compatibility only; V2 source of truth로 사용 금지 |
 | `BOT_DEFAULT_MODE` | Worker | `paper` |
 | `SUPABASE_URL` | Worker | server-side repository URL |
 | `SUPABASE_SECRET_KEY` | Worker | 서버 전용 secret, Desktop 금지 |
+| `TOSS_CREDENTIAL_SCOPE` | Worker | Toss credential 사용 시 반드시 `read_only` |
+| `TOSS_ORDER_CAPABLE_CREDENTIALS` | Worker | 반드시 `false`; `true`/미확인은 startup 차단 |
+| `LIVE_ORDER_EXECUTION_ENABLED` | Worker | 반드시 `false` |
+| `TOSS_ORDER_ENDPOINT_ENABLED` | Worker | 반드시 `false` |
+| `EXECUTION_V2_ENABLED` | Worker | V2 runtime을 명시적으로 구성했을 때만 `true` |
+| `EXECUTION_V2_ENVIRONMENT` | Worker | `paper` 또는 로컬 `contract_test` |
+| `EXECUTION_V2_WORKER_API_ENABLED` | Worker | migration/RPC 검증 후에만 `true` |
 | `VITE_SUPABASE_URL` | Desktop | Supabase project URL |
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | Desktop | client publishable key |
-| `VITE_SUPABASE_REALTIME_DISABLED` | Desktop | `true`이면 Realtime을 끄고 polling만 사용 |
+| `VITE_SUPABASE_REALTIME_DISABLED` | Desktop | `true`이면 polling 조회 전용; 모든 mutation 차단 |
 
 Provider별 변수는 [Worker `.env.example`](apps/worker/.env.example)에서 확인하세요. 검증되지 않은 endpoint, parameter, rate limit은 구현하지 않고 [API Gaps](docs/API_GAPS.md)에 기록합니다.
 
 ## 권장 Paper Trading 운영 흐름
 
-1. `enabled=false`, `mode=paper`, `live_order_allowed=false`를 확인합니다.
-2. provider와 Supabase 연결 상태를 확인합니다.
-3. 관심종목과 paper strategy를 준비합니다.
-4. `run_paper_cycle_once`로 한 cycle을 실행합니다.
-5. Desktop에서 decision, 주문 차단 이유, 수동 확인 큐, engine event, audit log를 검토합니다.
-6. outcome update와 backtest를 실행해 전략 성능을 별도로 검증합니다.
-7. `paper_health_report`가 경고·실패한 이유를 해소하기 전에는 다음 단계로 진행하지 않습니다.
+1. `enabled=false`, `mode=paper`, `live_order_allowed=false`와 `LIVE 금지`를 확인합니다.
+2. 두 운영 사용자의 TOTP AAL2와 역할 분리를 확인합니다.
+3. `paper-primary` opening command를 maker/checker로 승인하고 opening journal이 한
+   번만 기록됐는지 확인합니다.
+4. 승인된 execution/cost/calendar/tick/volume/corporate-action evidence와 release
+   qualification을 확인합니다.
+5. Worker lease/fencing과 `control_epoch`가 일치한 상태에서 Paper command를
+   요청·승인하고 Worker ACK와 runtime postcondition을 확인합니다.
+6. Desktop에서 원장 checkpoint, 부분체결, reserve, reconciliation, incident와
+   audit archive receipt를 검토합니다.
+7. outcome/backtest는 실행 원장과 분리된 연구 절차로 수행합니다.
 
 ```bash
 cd apps/worker
@@ -217,17 +237,18 @@ python -m app.tools.paper_health_report
 
 | 화면 | 용도 |
 | --- | --- |
-| 대시보드 | 봇·heartbeat·provider 상태, 오늘 decision/order, 수동 확인 주문 경고 |
-| 제어 | Paper 시작/정지, Emergency Stop, 별도 검토가 필요한 live 승인 요청 |
-| 관심종목 | 분석 universe와 종목별 제한 관리 |
-| 포트폴리오 | 동기화된 보유수량, 평가금액, 손익, 섹터 확인 |
-| 주문 | Paper/blocked/live 상태와 `unknown_requires_manual_check` 안전 큐 |
-| 시그널 | component score, feature/risk snapshot 확인 |
-| 전략 Lab | paper 성과, backtest, draft, AI 후보 검토 |
-| 로그 | engine event와 DB 변경 감사 이력 확인 |
-| 설정 | Supabase admin 로그인과 안전 설정 관리 |
+| Operations Control | PAPER/CONTRACT TEST 상태, `LIVE 금지`, heartbeat, lease, release, ledger checkpoint |
+| Safety Command Center | 요청·승인·claim·Worker ACK·postcondition timeline과 Emergency Stop |
+| Approval Inbox | maker/checker, 변경 diff, MFA/step-up, 만료 상태 |
+| Incident Center | ACK, 담당자, 완화, 서로 다른 risk approver의 종결 |
+| Manual Reconciliation | `unknown_requires_manual_check`의 증거와 fail-closed 대사 상태(읽기 전용) |
+| Access & MFA | 개인 세션, TOTP AAL2, 역할과 접근 변경 요청/검토 |
 
-Desktop의 변경은 Supabase RLS와 DB trigger를 다시 통과합니다. UI의 성공 표시만으로 live readiness를 판단하지 마세요.
+기존 연구용 Dashboard, Watchlist, Portfolio, Orders, Signals, Strategy Lab, Logs
+페이지와 관대한 row adapter는 G1+G2 release source에서 제거됐으며 Git 이력에서만
+보존됩니다.
+
+Desktop mutation은 strict schema v1, stale/offline/session 경계, Supabase RLS/RPC를 통과합니다. `applied`와 runtime postcondition 전에는 완료로 표시하지 않습니다.
 
 ## 검증
 
@@ -260,7 +281,7 @@ Migration·repository safety:
 ```bash
 python .github/scripts/repository_safety.py migrations
 python .github/scripts/repository_safety.py workflows
-python supabase/verify_live_enable_migration.py
+python supabase/verify_g1_g2_migration.py
 ```
 
 마지막 명령은 Docker daemon과 disposable PostgreSQL container가 필요합니다. CI와 검증 정책은 [CI/CD](docs/CI_CD.md)와 [Test Plan](docs/TEST_PLAN.md)에 정리되어 있습니다.
@@ -283,7 +304,7 @@ render.yaml     수동 배포 Render Background Worker blueprint
 
 ## Render 배포
 
-Render는 Background Worker 한 개를 실행하며 `autoDeployTrigger: "off"`를 유지합니다. 배포 전후에는 반드시 bot과 live permission을 끄고, target commit을 보고하는 새 heartbeat를 확인해야 합니다.
+Render는 fencing qualification 전까지 Background Worker 한 개만 실행하며 `autoDeployTrigger: "off"`를 유지합니다. 배포·복구 환경은 Paper disabled, order credential 없음으로 시작하고 target commit을 보고하는 새 heartbeat를 확인해야 합니다.
 
 실제 절차는 [Render Deployment](docs/RENDER_DEPLOYMENT.md), [Release Process](docs/RELEASE_PROCESS.md), [Rollback](docs/ROLLBACK.md)을 따르세요. README는 의도적으로 live 활성화 절차나 secret 값을 제공하지 않습니다.
 
@@ -295,32 +316,36 @@ Render는 Background Worker 한 개를 실행하며 `autoDeployTrigger: "off"`�
 
 ### Desktop에 `권한 필요`가 표시됨
 
-**설정** 화면에서 Supabase Auth admin 계정으로 로그인했는지, 해당 user id가 `public.user_roles`에 등록됐는지 확인하세요. RLS는 권한이 없는 조회에 빈 결과를 반환할 수 있습니다.
+**Access & MFA** 화면에서 개인 Supabase Auth 계정으로 로그인하고 TOTP AAL2를
+완료했는지, UUID에 필요한 V2 역할이 할당됐는지 확인하세요. 권한이 없는 mutation은
+안전하게 차단되어야 합니다.
 
 ### Worker는 실행됐는데 Desktop에 데이터가 없음
 
-mock 기본값은 in-memory repository입니다. Desktop에서 보려면 Worker에 `USE_SUPABASE_REPOSITORY=true`와 서버 전용 Supabase 설정이 필요합니다.
+mock 기본값은 in-memory kernel입니다. Desktop에서 보려면 별도 승인된 환경에서
+V2 migration을 적용하고 Worker에 서버 전용 Supabase 설정과
+`EXECUTION_V2_WORKER_API_ENABLED=true`가 필요합니다. legacy
+`USE_SUPABASE_REPOSITORY` 데이터는 V2 snapshot에 합산되지 않습니다.
 
 ### 주문이 생성되지 않음
 
-기본값 `enabled=false`는 의도된 안전 상태입니다. Paper cycle은 설정·quote·simulated cash·노출·중복 gate를 적용하고, live cycle은 여기에 동기화된 보유수량과 provider 증거를 추가합니다. gate가 실패하면 `blocked` 주문과 이유가 남습니다. 별도 Paper position ledger가 아직 없으므로 Paper 매도는 실계좌 보유수량을 재사용하지 않습니다.
+기본값 `enabled=false`는 의도된 안전 상태입니다. Paper V2는 설정·정책 version·bar/cost/tick/corporate-action evidence·lease/fencing·현금·보유수량·semantic duplicate gate를 적용합니다. 누락된 증거를 기본값으로 보정하지 않으며, Paper 매도는 V2 원장의 available quantity만 사용합니다.
 
 ### `unknown_requires_manual_check` 주문이 보임
 
 자동 재시도하거나 UI에서 강제로 완료 처리하지 마세요. 주문 안전 큐와 [Runbook](docs/RUNBOOK.md)의 reconciliation 절차로 provider 상태와 감사 증거를 확인해야 합니다.
 
-### Live mode가 계속 차단됨
+### Live mode를 선택할 수 없음
 
-정상 동작일 수 있습니다. hosted Supabase, provider lifecycle, incident ACK, system-order scope, retained artifact, 배포 freshness 증거가 하나라도 없으면 live는 fail-closed 상태를 유지합니다.
+정상 동작입니다. 현재 릴리스는 Production Live를 지원하지 않으며 활성화 절차도 제공하지 않습니다. 외부 주문 요구가 생기면 기존 설정을 확장하지 않고 G0 사업·규제 심사를 다시 엽니다.
 
 ## 남은 주요 작업
 
-- 체결에 따라 현금과 보유수량이 변하는 지속형 Paper 가상계좌
 - 검증된 candle 기반 technical feature 자동 적재
 - 목표 비중·no-trade band·현금 reserve·비용을 포함한 rebalance planner
 - outcome, backtest, 월간 연구, retention의 안전한 무인 scheduling
-- 권위 있는 일일 계좌 PnL snapshot과 독립적인 worker dead-man monitor
-- 실제 hosted/provider 환경에서의 최종 live-readiness evidence
+- 독립 failure domain의 worker dead-man monitor 운영 배치
+- hosted staging RLS/MFA/alert/archive/restore 증거와 10거래일 Paper/Shadow gate
 
 기능이 없다는 이유로 가짜 live endpoint나 mock 성공 응답을 추가하지 않습니다. provider 계약의 불확실성은 구현 차단 사유입니다.
 
