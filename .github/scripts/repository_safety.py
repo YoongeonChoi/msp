@@ -82,6 +82,21 @@ _WORKFLOW_ACTION_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _FULL_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_GITLEAKS_FINGERPRINT_PATTERN = re.compile(
+    r"^[0-9a-f]{40}:[^:\r\n]+:[a-z0-9][a-z0-9-]*:[1-9][0-9]*$"
+)
+APPROVED_GITLEAKS_FINGERPRINTS = frozenset(
+    {
+        "731556ab70f0e434a062f43e974049aa9953bf27:apps/desktop/playwright.config.ts:generic-api-key:19",
+        "836840973aae66189e78f4ff855dccf9505a0d37:render.yaml:generic-api-key:67",
+        "836840973aae66189e78f4ff855dccf9505a0d37:render.yaml:generic-api-key:69",
+        "b958e605633f6d6e933eef88859ec113cd0e4713:supabase/verify_g1_g2_migration.py:generic-api-key:52",
+        "f43029dc833718ef79087f0c8eeb1359616d7f36:apps/desktop/playwright.config.ts:generic-api-key:16",
+        "f43029dc833718ef79087f0c8eeb1359616d7f36:apps/worker/app/tests/unit/test_webhook_alert_notifier.py:generic-api-key:27",
+        "f43029dc833718ef79087f0c8eeb1359616d7f36:apps/worker/app/tests/unit/test_redaction.py:generic-api-key:8",
+        "8904120101ec6bec62b8585f3e3341f66930edcd:apps/worker/app/tests/unit/test_redaction.py:generic-api-key:5",
+    }
+)
 
 RENDER_NO_LIVE_ENV = {
     "BOT_DEFAULT_MODE": "paper",
@@ -120,6 +135,7 @@ WORKER_API_ALLOWLIST = frozenset(
         "claim_operation_command_batch",
         "capture_qualification_snapshot_v1",
         "register_qualification_run_v1",
+        "register_qualification_run_v2",
         "get_dead_man_snapshot_v1",
         "list_due_cash_settlement_accounts",
         "ingest_paper_bar_fixture_v1",
@@ -367,6 +383,30 @@ def check_workflow_safety(repo_root: Path) -> list[str]:
                 findings.append(
                     f"render.yaml: {key} must remain {expected} until hosted approval"
                 )
+    findings.extend(_check_gitleaks_ignore(repo_root))
+    return findings
+
+
+def _check_gitleaks_ignore(repo_root: Path) -> list[str]:
+    """Allow only finding-specific history exceptions, never broad scan bypasses."""
+
+    path = repo_root / ".gitleaksignore"
+    if not path.is_file():
+        return []
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
+    findings = [
+        f".gitleaksignore:{index}: fingerprint must be exact"
+        for index, line in enumerate(lines, start=1)
+        if _GITLEAKS_FINGERPRINT_PATTERN.fullmatch(line) is None
+    ]
+    findings.extend(
+        f".gitleaksignore:{index}: fingerprint is not approved"
+        for index, line in enumerate(lines, start=1)
+        if _GITLEAKS_FINGERPRINT_PATTERN.fullmatch(line) is not None
+        and line not in APPROVED_GITLEAKS_FINGERPRINTS
+    )
+    if len(lines) != len(set(lines)):
+        findings.append(".gitleaksignore: duplicate fingerprint")
     return findings
 
 

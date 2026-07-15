@@ -207,6 +207,25 @@ def test_worker_api_function_must_be_allowlisted(tmp_path: Path) -> None:
     assert "worker_api function outside allowlist: place_live_order" in findings
 
 
+def test_contract_qualification_v2_worker_rpc_is_allowlisted(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "create function worker_api.register_qualification_run_v2(jsonb) "
+        "returns jsonb language sql security invoker set search_path = '' "
+        "as $$ select '{}'::jsonb; $$;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert not any(
+        "worker_api function outside allowlist: register_qualification_run_v2"
+        in finding
+        for finding in findings
+    )
+
+
 def test_worker_api_execute_cannot_be_granted_to_authenticated(
     tmp_path: Path,
 ) -> None:
@@ -397,6 +416,54 @@ def test_workflow_action_accepts_full_commit_sha(tmp_path: Path) -> None:
     findings = module.check_workflow_safety(root)
 
     assert not any("action not pinned" in finding for finding in findings)
+
+
+def test_gitleaks_ignore_accepts_only_exact_fingerprints(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / ".gitleaksignore").write_text(
+        sorted(module.APPROVED_GITLEAKS_FINGERPRINTS)[0] + "\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert not any(".gitleaksignore" in finding for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "unsafe_entry",
+    (
+        "tests/.*",
+        "a" * 40,
+        "a" * 40 + ":tests/example.py:generic-api-key:*",
+        "# broad fixture exemption",
+    ),
+)
+def test_gitleaks_ignore_rejects_broad_or_malformed_entries(
+    tmp_path: Path,
+    unsafe_entry: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / ".gitleaksignore").write_text(unsafe_entry + "\n", encoding="utf-8")
+
+    findings = module.check_workflow_safety(root)
+
+    assert any("fingerprint must be exact" in finding for finding in findings)
+
+
+def test_gitleaks_ignore_rejects_unreviewed_exact_fingerprint(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / ".gitleaksignore").write_text(
+        "b" * 40 + ":tests/example.py:generic-api-key:12\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert any("fingerprint is not approved" in finding for finding in findings)
 
 
 def test_all_policy_workflows_use_the_central_repository_safety_command() -> None:
