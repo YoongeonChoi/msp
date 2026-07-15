@@ -202,7 +202,7 @@ class InMemoryRepository:
         decision_rows = [decision_to_row(decision) for decision in self.decisions]
         order_rows = [order_to_row(order) for order in self.orders]
         return PaperHealthRows(
-            latest_heartbeats=[json_object(item) for item in self.heartbeats],
+            latest_heartbeats=[json_object(item) for item in reversed(self.heartbeats[-20:])],
             api_health=[json_object(item) for item in self.api_health],
             decisions_last_24h=decision_rows,
             orders_last_24h=order_rows,

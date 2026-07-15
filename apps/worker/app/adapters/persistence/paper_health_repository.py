@@ -46,7 +46,7 @@ class SupabasePaperHealthRepository:
         since_time = quote(since.isoformat(), safe="")
         return PaperHealthRows(
             latest_heartbeats=await self._select_rows(
-                "worker_heartbeats", "select=*&order=created_at.desc&limit=1"
+                "worker_heartbeats", "select=*&order=created_at.desc&limit=20"
             ),
             api_health=await self._select_rows(
                 "api_health", "select=*&order=checked_at.desc&limit=100"

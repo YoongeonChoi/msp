@@ -62,7 +62,7 @@ def _build_report(
     now: datetime,
     db_warning_threshold_bytes: int,
 ) -> PaperHealthReport:
-    latest_heartbeat = rows.latest_heartbeats[0] if rows.latest_heartbeats else None
+    latest_heartbeat = _latest_completed_heartbeat(rows.latest_heartbeats)
     heartbeat_age = age_seconds(latest_heartbeat, "created_at", now)
     heartbeat_release_sha = _heartbeat_detail_string(latest_heartbeat, "release_sha")
     heartbeat_release_source = _heartbeat_detail_string(
@@ -217,6 +217,23 @@ def _heartbeat_detail_string(
     if not isinstance(value, str):
         return None
     return value[:80]
+
+
+def _latest_completed_heartbeat(
+    heartbeats: Sequence[JsonObject],
+) -> JsonObject | None:
+    for heartbeat in heartbeats:
+        if heartbeat.get("status") != "ok":
+            continue
+        details = heartbeat.get("details")
+        if not isinstance(details, Mapping):
+            continue
+        if details.get("checkpoint") not in {"cycle_completed", "operations_completed"}:
+            continue
+        if not isinstance(details.get("completed_at"), str):
+            continue
+        return heartbeat
+    return None
 
 
 def _operational_critical_event_count(events: Sequence[EngineEventSummary]) -> int:

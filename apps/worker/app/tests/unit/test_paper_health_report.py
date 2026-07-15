@@ -97,6 +97,26 @@ async def test_report_fails_if_heartbeat_timestamp_is_future() -> None:
     assert "heartbeat_future" in _finding_codes(report)
 
 
+async def test_report_does_not_treat_running_heartbeat_as_completed_cycle() -> None:
+    rows = _normal_rows()
+    rows.latest_heartbeats[:] = [
+        {
+            "status": "warning",
+            "created_at": (NOW - timedelta(seconds=5)).isoformat(),
+            "details": {
+                "checkpoint": "cycle_started",
+                "started_at": (NOW - timedelta(seconds=5)).isoformat(),
+            },
+        }
+    ]
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+
+    assert report.result == PaperHealthResult.FAIL
+    assert "heartbeat_missing" in _finding_codes(report)
+
+
 async def test_report_output_does_not_print_secrets() -> None:
     rows = _normal_rows(
         api_health=[
@@ -215,12 +235,18 @@ def _normal_rows(
     order_key_rows: list[JsonObject] | None = None,
     recent_engine_events: list[JsonObject] | None = None,
 ) -> PaperHealthRows:
+    completed_heartbeat_details: JsonObject = {
+        "checkpoint": "cycle_completed",
+        "completed_at": (NOW - heartbeat_age).isoformat(),
+    }
+    if heartbeat_details is not None:
+        completed_heartbeat_details.update(heartbeat_details)
     return PaperHealthRows(
         latest_heartbeats=[
             {
                 "status": "ok",
                 "created_at": (NOW - heartbeat_age).isoformat(),
-                "details": heartbeat_details or {},
+                "details": completed_heartbeat_details,
             }
         ],
         api_health=api_health or [_api_health("toss"), _api_health("supabase")],
