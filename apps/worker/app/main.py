@@ -4,14 +4,27 @@ import asyncio
 
 import structlog
 
-from app.bootstrap import bootstrap
+from app.bootstrap import bootstrap, bootstrap_operations_v2
+from app.config import Settings, load_settings
 from app.domain.common.errors import KnownFailClosedError
 
 logger = structlog.get_logger()
 
 
-async def async_main() -> None:
-    container = bootstrap()
+async def async_main(settings: Settings | None = None) -> None:
+    resolved_settings = settings or load_settings()
+    if resolved_settings.execution_v2_worker_api_enabled:
+        runtime = bootstrap_operations_v2(resolved_settings)
+        try:
+            await runtime.operations_loop.run()
+        except Exception:
+            logger.exception("operations_v2_runtime_failed")
+            raise
+        finally:
+            await runtime.close()
+        return
+
+    container = bootstrap(resolved_settings)
     try:
         await container.trading_loop.run()
     except KnownFailClosedError as exc:
