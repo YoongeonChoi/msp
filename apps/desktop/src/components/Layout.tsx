@@ -1,19 +1,8 @@
-import { AlertTriangle, CircleStop, Database } from "lucide-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  fetchApiHealth,
-  fetchBotSettings,
-  fetchLatestHeartbeat,
-  fetchManualCheckOrderCount,
-  fetchTodayDecisions,
-  fetchTodayOrders,
-  updateBotSettings
-} from "../lib/supabaseData";
-import { formatAge, isOlderThan } from "../lib/formatters";
-import { useAdminAccess } from "../lib/useAdminAccess";
+import { AlertTriangle, Database } from "lucide-react";
 import { brandIcon, getPageLabel, navItems, parsePageKey } from "../lib/navigation";
 import type { PageKey } from "../lib/navigation";
-import { pageButtonClass, Pill } from "./ui";
+import { OperationsStatusRail } from "./operations/OperationsStatusRail";
+import { Pill } from "./ui";
 
 const BrandIcon = brandIcon;
 
@@ -31,22 +20,22 @@ export function AppLayout({
       <div className="flex min-h-screen">
         <Sidebar page={page} setPage={setPage} />
         <main className="min-w-0 flex-1">
-          <StatusBar />
+          <OperationsStatusRail />
           <MobileNav page={page} setPage={setPage} />
           <div className="mx-auto max-w-7xl p-4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h1 className="text-xl font-semibold text-ink">{getPageLabel(page)}</h1>
-                <p className="text-sm text-muted">KST 기준 · Desktop은 Supabase RLS를 통한 control plane입니다.</p>
+                <p className="text-sm text-muted">KST 기준 · Desktop은 엄격한 Supabase RPC/read model control plane입니다.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Pill tone="danger">
                   <AlertTriangle size={13} aria-hidden="true" />
-                  실주문 기본 차단
+                  LIVE 영구 금지
                 </Pill>
                 <Pill tone="info">
                   <Database size={13} aria-hidden="true" />
-                  Supabase
+                  Supabase control plane
                 </Pill>
               </div>
             </div>
@@ -66,15 +55,17 @@ function Sidebar({ page, setPage }: { readonly page: PageKey; readonly setPage: 
           <BrandIcon size={20} aria-hidden="true" />
           KR Trading Lab
         </div>
-        <p className="mt-1 text-xs text-slate-300">Paper Trading monitoring cockpit</p>
+        <p className="mt-1 text-xs text-slate-300">PAPER · CONTRACT TEST operations cockpit</p>
       </div>
-      <nav className="space-y-1 px-2">
+      <nav className="space-y-1 px-2" aria-label="주 탐색">
         {navItems.map((item) => {
           const Icon = item.icon;
           return (
             <button
               key={item.key}
+              type="button"
               onClick={() => setPage(item.key)}
+              aria-current={page === item.key ? "page" : undefined}
               className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm focus:outline-none focus:ring-2 focus:ring-white ${
                 page === item.key ? "bg-white text-slate-950" : "text-slate-200 hover:bg-slate-800"
               }`}
@@ -110,110 +101,5 @@ function MobileNav({ page, setPage }: { readonly page: PageKey; readonly setPage
         ))}
       </select>
     </div>
-  );
-}
-
-function StatusBar() {
-  const queryClient = useQueryClient();
-  const settings = useQuery({ queryKey: ["bot_settings"], queryFn: fetchBotSettings, refetchInterval: 30_000 });
-  const adminAccess = useAdminAccess();
-  const heartbeat = useQuery({ queryKey: ["worker_heartbeats", "latest"], queryFn: fetchLatestHeartbeat, refetchInterval: 30_000 });
-  const apiHealth = useQuery({ queryKey: ["api_health"], queryFn: fetchApiHealth, refetchInterval: 60_000 });
-  const todayDecisions = useQuery({ queryKey: ["decision_snapshots", "today"], queryFn: fetchTodayDecisions, refetchInterval: 60_000 });
-  const todayOrders = useQuery({ queryKey: ["orders", "today"], queryFn: fetchTodayOrders, refetchInterval: 60_000 });
-  const manualCheckCountQuery = useQuery({
-    queryKey: ["orders", "manual_check", "count"],
-    queryFn: fetchManualCheckOrderCount,
-    enabled: adminAccess.isAdmin,
-    refetchInterval: adminAccess.isAdmin ? 30_000 : false
-  });
-
-  const emergencyStop = useMutation({
-    mutationFn: () => updateBotSettings({ enabled: false, liveOrderAllowed: false }),
-    onSuccess: () => queryClient.invalidateQueries()
-  });
-
-  const currentSettings = settings.data;
-  const latestHeartbeat = heartbeat.data;
-  const dataAccessLimited = adminAccess.isLimited;
-  const heartbeatStale = !dataAccessLimited && isOlderThan(latestHeartbeat?.createdAt, 120);
-  const healthyCount = apiHealth.data?.filter((item) => item.healthy).length ?? 0;
-  const unhealthyCount = apiHealth.data ? apiHealth.data.length - healthyCount : 0;
-  const manualCheckCount = adminAccess.isAdmin ? manualCheckCountQuery.data ?? 0 : 0;
-  const manualCheckLabel = !adminAccess.isKnown
-    ? "권한 확인 중"
-    : dataAccessLimited
-      ? "권한 필요"
-      : manualCheckCountQuery.isLoading
-        ? "조회 중"
-        : manualCheckCountQuery.error
-          ? "조회 오류"
-          : `${manualCheckCount}건`;
-  const manualCheckTone =
-    !adminAccess.isKnown || dataAccessLimited || manualCheckCountQuery.isLoading
-      ? "warning"
-      : manualCheckCountQuery.error || manualCheckCount > 0
-        ? "danger"
-        : "safe";
-  const paperOrders =
-    todayOrders.data?.filter((order) => ["paper", "proposed", "blocked"].includes(order.status)).length ?? 0;
-
-  return (
-    <header className="border-b border-line bg-white">
-      <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-        <Pill tone={currentSettings ? (currentSettings.enabled ? "safe" : "danger") : "warning"}>
-          거래 봇: {currentSettings ? (currentSettings.enabled ? "실행" : "정지") : dataAccessLimited ? "권한 필요" : "설정 없음"}
-        </Pill>
-        <Pill tone={currentSettings?.mode === "live" ? "danger" : currentSettings ? "safe" : "warning"}>
-          모드: {currentSettings?.mode ?? (dataAccessLimited ? "권한 필요" : "-")}
-        </Pill>
-        <Pill tone={currentSettings?.liveOrderAllowed ? "danger" : currentSettings ? "safe" : "warning"}>
-          실주문 허용: {currentSettings ? (currentSettings.liveOrderAllowed ? "예" : "아니오") : dataAccessLimited ? "권한 필요" : "아니오"}
-        </Pill>
-        <Pill tone={heartbeatStale || dataAccessLimited ? "warning" : "safe"}>
-          데이터 heartbeat: {dataAccessLimited ? "권한 필요" : formatAge(latestHeartbeat?.createdAt)}
-        </Pill>
-        <Pill tone={unhealthyCount > 0 ? "warning" : "safe"}>
-          {dataAccessLimited ? "API: 권한 필요" : `API: 정상 ${healthyCount} / 이상 ${unhealthyCount}`}
-        </Pill>
-        <Pill tone="neutral">오늘 decision: {todayDecisions.data?.length ?? 0}</Pill>
-        <Pill tone="neutral">오늘 paper/proposed/blocked: {paperOrders}</Pill>
-        <Pill tone={manualCheckTone}>
-          수동 확인 주문: {manualCheckLabel}
-        </Pill>
-        <button
-          className={`${pageButtonClass("danger")} ml-auto`}
-          onClick={() => {
-            if (window.confirm("Emergency stop을 실행할까요? enabled=false, live_order_allowed=false로 변경됩니다.")) {
-              emergencyStop.mutate();
-            }
-          }}
-          disabled={emergencyStop.isPending || !adminAccess.isAdmin || !currentSettings}
-        >
-          <CircleStop size={16} aria-hidden="true" />
-          Emergency Stop
-        </button>
-      </div>
-      {emergencyStop.error ? (
-        <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
-          Emergency Stop 저장에 실패했습니다. Supabase 연결과 admin 권한을 확인하세요.
-        </div>
-      ) : null}
-      {currentSettings?.liveOrderAllowed ? (
-        <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800">
-          위험 배너: live_order_allowed=true 상태입니다. Paper Trading 검증 중에는 즉시 Emergency Stop을 권장합니다.
-        </div>
-      ) : null}
-      {settings.error ? (
-        <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
-          Supabase 설정 또는 RLS 권한 때문에 bot_settings를 읽지 못했습니다.
-        </div>
-      ) : null}
-      {adminAccess.warning ? (
-        <div className="border-t border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
-          {adminAccess.warning} Settings에서 admin 계정으로 로그인하세요.
-        </div>
-      ) : null}
-    </header>
   );
 }

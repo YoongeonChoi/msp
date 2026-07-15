@@ -7,14 +7,16 @@ export default defineConfig({
   reporter: [["list"]],
   use: {
     baseURL: "http://127.0.0.1:1431",
-    trace: "retain-on-failure"
+    trace: "retain-on-failure",
+    launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+      : undefined
   },
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1 --port 1431",
+    command: "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1431",
     env: {
       VITE_SUPABASE_URL: "https://e2e.supabase.test",
-      VITE_SUPABASE_PUBLISHABLE_KEY: "e2e-publishable-key",
-      VITE_SUPABASE_REALTIME_DISABLED: "true"
+      VITE_SUPABASE_PUBLISHABLE_KEY: "e2e-publishable-key"
     },
     reuseExistingServer: false,
     timeout: 120_000,

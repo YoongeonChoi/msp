@@ -6,7 +6,7 @@ export default {
     extend: {
       colors: {
         ink: "#111827",
-        muted: "#6b7280",
+        muted: "#4b5563",
         line: "#d8dee8",
         danger: "#b91c1c",
         safe: "#047857"
