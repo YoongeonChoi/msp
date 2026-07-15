@@ -117,6 +117,28 @@ async def test_report_does_not_treat_running_heartbeat_as_completed_cycle() -> N
     assert "heartbeat_missing" in _finding_codes(report)
 
 
+async def test_report_accepts_continuous_scheduler_heartbeat() -> None:
+    rows = _normal_rows()
+    rows.latest_heartbeats[:] = [
+        {
+            "status": "ok",
+            "created_at": (NOW - timedelta(seconds=5)).isoformat(),
+            "details": {
+                "component": "operations_v2",
+                "checkpoint": "independent_scheduler_running",
+                "completed_at": (NOW - timedelta(seconds=5)).isoformat(),
+            },
+        }
+    ]
+    repository = FakePaperHealthRepository(rows=rows)
+
+    report = await PaperHealthReportService(repository).collect(NOW)
+
+    assert report.heartbeat_age_seconds == 5
+    assert "heartbeat_missing" not in _finding_codes(report)
+    assert "heartbeat_stale" not in _finding_codes(report)
+
+
 async def test_report_output_does_not_print_secrets() -> None:
     rows = _normal_rows(
         api_health=[

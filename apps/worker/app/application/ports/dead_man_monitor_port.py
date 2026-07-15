@@ -21,6 +21,7 @@ class DeadManAlertDestinationPort(Protocol):
         self,
         *,
         account_id: str,
+        episode_id: str,
         event: Literal["unhealthy", "recovered"],
         reason_codes: tuple[str, ...],
         observed_at: datetime,

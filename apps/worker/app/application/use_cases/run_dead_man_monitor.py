@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import UUID, uuid4
 
 from app.application.ports.dead_man_monitor_port import (
     DeadManAlertDestinationPort,
@@ -34,6 +35,7 @@ class RunDeadManMonitor:
         *,
         account_id: str,
         clock: Callable[[], datetime] = now_utc,
+        episode_id_factory: Callable[[], str] | None = None,
     ) -> None:
         if not account_id.strip():
             raise OperationsInvariantError("dead_man_account_id_is_required")
@@ -42,6 +44,11 @@ class RunDeadManMonitor:
         self.evaluator = evaluator
         self.account_id = account_id
         self.clock = clock
+        self.episode_id_factory = episode_id_factory or _new_episode_id
+        # This state intentionally completes process-lifetime semantics only.
+        # Hosted G2 remains blocked until an independent durable episode store
+        # preserves it across monitor restarts and failover.
+        self._active_episode_id: str | None = None
         self._last_unhealthy_reasons: tuple[str, ...] | None = None
 
     async def run_once(self) -> DeadManMonitorRunResult:
@@ -63,21 +70,30 @@ class RunDeadManMonitor:
 
         delivered = False
         if not evaluation.healthy:
+            if self._active_episode_id is None:
+                self._active_episode_id = _validated_episode_id(
+                    self.episode_id_factory()
+                )
+            self._last_unhealthy_reasons = evaluation.reason_codes
             await self.destination.deliver_dead_man_alert(
                 account_id=self.account_id,
+                episode_id=self._active_episode_id,
                 event="unhealthy",
                 reason_codes=evaluation.reason_codes,
                 observed_at=evaluation.evaluated_at,
             )
-            self._last_unhealthy_reasons = evaluation.reason_codes
             delivered = True
         elif self._last_unhealthy_reasons is not None:
+            if self._active_episode_id is None:
+                raise OperationsInvariantError("dead_man_episode_state_is_invalid")
             await self.destination.deliver_dead_man_alert(
                 account_id=self.account_id,
+                episode_id=self._active_episode_id,
                 event="recovered",
                 reason_codes=self._last_unhealthy_reasons,
                 observed_at=evaluation.evaluated_at,
             )
+            self._active_episode_id = None
             self._last_unhealthy_reasons = None
             delivered = True
 
@@ -92,3 +108,19 @@ class RunDeadManMonitor:
         if value.tzinfo is None or value.utcoffset() is None:
             raise OperationsInvariantError("dead_man_clock_must_be_timezone_aware")
         return value
+
+
+def _new_episode_id() -> str:
+    return str(uuid4())
+
+
+def _validated_episode_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise OperationsInvariantError("dead_man_episode_id_is_invalid")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise OperationsInvariantError("dead_man_episode_id_is_invalid") from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise OperationsInvariantError("dead_man_episode_id_is_invalid")
+    return value

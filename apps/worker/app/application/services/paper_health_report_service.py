@@ -228,7 +228,11 @@ def _latest_completed_heartbeat(
         details = heartbeat.get("details")
         if not isinstance(details, Mapping):
             continue
-        if details.get("checkpoint") not in {"cycle_completed", "operations_completed"}:
+        if details.get("checkpoint") not in {
+            "cycle_completed",
+            "operations_completed",
+            "independent_scheduler_running",
+        }:
             continue
         if not isinstance(details.get("completed_at"), str):
             continue

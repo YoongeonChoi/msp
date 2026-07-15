@@ -119,6 +119,77 @@ async def test_stage_failure_cancels_siblings_and_reaches_process_supervisor(
     with pytest.raises(RuntimeError, match="execution_failed"):
         await loop.run()
 
+    assert "error" in operations.heartbeat_statuses
+
+
+@pytest.mark.parametrize(
+    ("execution_blocked", "execution_manual"),
+    ((1, 0), (0, 1)),
+)
+async def test_business_safety_warning_keeps_liveness_heartbeat_ok(
+    monkeypatch: pytest.MonkeyPatch,
+    execution_blocked: int,
+    execution_manual: int,
+) -> None:
+    shutdown = ShutdownFlag()
+    calls: list[str] = []
+    operations = IndependentOperations(
+        shutdown,
+        calls,
+        execution_blocked=execution_blocked,
+        execution_manual=execution_manual,
+        stop_on_running_heartbeat=True,
+    )
+    _install_yielding_sleep(monkeypatch)
+    loop = OperationsLoop(
+        _settings(run_once=False),
+        shutdown,
+        cast(RunOperationsV2, operations),
+        cast(MaintainWorkerLease, FakeLeaseManager()),
+    )
+
+    await loop.run()
+
+    running_index = next(
+        index
+        for index, heartbeat in enumerate(operations.heartbeats)
+        if heartbeat["checkpoint"] == "independent_scheduler_running"
+    )
+    assert operations.heartbeat_statuses[running_index] == "ok"
+    assert operations.heartbeats[running_index]["warning_stages"] == ["execution"]
+    assert operations.heartbeats[running_index]["error_stages"] == []
+    assert operations.heartbeats[running_index]["incomplete_stages"] == []
+
+
+async def test_stage_result_failure_keeps_liveness_heartbeat_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shutdown = ShutdownFlag()
+    calls: list[str] = []
+    operations = IndependentOperations(
+        shutdown,
+        calls,
+        execution_failed=1,
+        stop_on_running_heartbeat=True,
+    )
+    _install_yielding_sleep(monkeypatch)
+    loop = OperationsLoop(
+        _settings(run_once=False),
+        shutdown,
+        cast(RunOperationsV2, operations),
+        cast(MaintainWorkerLease, FakeLeaseManager()),
+    )
+
+    await loop.run()
+
+    running_index = next(
+        index
+        for index, heartbeat in enumerate(operations.heartbeats)
+        if heartbeat["checkpoint"] == "independent_scheduler_running"
+    )
+    assert operations.heartbeat_statuses[running_index] == "error"
+    assert operations.heartbeats[running_index]["error_stages"] == ["execution"]
+
 
 async def test_unacknowledged_repolled_command_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
@@ -188,12 +259,18 @@ class IndependentOperations:
         stop_after_command_count: int | None = None,
         unacknowledged_on_command_count: int | None = None,
         fail_execution: bool = False,
+        execution_blocked: int = 0,
+        execution_manual: int = 0,
+        execution_failed: int = 0,
+        stop_on_running_heartbeat: bool = False,
         outbox_started: asyncio.Event | None = None,
         release_outbox: asyncio.Event | None = None,
     ) -> None:
         self.shutdown = shutdown
         self.calls = calls
         self.heartbeats: list[dict[str, object]] = []
+        self.heartbeat_statuses: list[str] = []
+        self.stop_on_running_heartbeat = stop_on_running_heartbeat
         self.commands = CommandStage(
             shutdown,
             calls,
@@ -204,9 +281,13 @@ class IndependentOperations:
             shutdown,
             calls,
             fail=fail_execution,
+            blocked=execution_blocked,
+            manual=execution_manual,
+            failed=execution_failed,
             stop=stop_after_command_count is None
             and unacknowledged_on_command_count is None
-            and not fail_execution,
+            and not fail_execution
+            and not stop_on_running_heartbeat,
         )
         self.settlement = SettlementStage(calls)
         self.reconciliation = ReconciliationStage(calls)
@@ -217,8 +298,13 @@ class IndependentOperations:
         status: str,
         details: dict[str, object],
     ) -> None:
-        del status
+        self.heartbeat_statuses.append(status)
         self.heartbeats.append(details)
+        if (
+            self.stop_on_running_heartbeat
+            and details.get("checkpoint") == "independent_scheduler_running"
+        ):
+            self.shutdown.request()
 
 
 class CommandStage:
@@ -255,11 +341,17 @@ class ExecutionStage:
         calls: list[str],
         *,
         fail: bool,
+        blocked: int,
+        manual: int,
+        failed: int,
         stop: bool,
     ) -> None:
         self.shutdown = shutdown
         self.calls = calls
         self.fail = fail
+        self.blocked = blocked
+        self.manual = manual
+        self.failed = failed
         self.stop = stop
 
     async def run_once(self) -> ExecutionSupervisorV2RunResult:
@@ -268,7 +360,16 @@ class ExecutionStage:
             raise RuntimeError("execution_failed")
         if self.stop:
             self.shutdown.request()
-        return ExecutionSupervisorV2RunResult(0, 0, 0, 0, 0, 0, 0)
+        return ExecutionSupervisorV2RunResult(
+            0,
+            0,
+            0,
+            0,
+            0,
+            self.blocked,
+            self.manual,
+            self.failed,
+        )
 
 
 class ReconciliationStage:

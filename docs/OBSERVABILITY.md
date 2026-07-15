@@ -29,6 +29,13 @@
   age 초과, incident ACK 초과는 critical 경보다.
 - dead-man monitor는 Worker와 다른 failure domain에서 heartbeat, lease, outbox,
   incident ACK를 감시한다.
+- dead-man alert의 `episode_id`는 한 monitor process 안에서 reason 변화와 recovery를
+  동일 장애로 묶고, recovery 이후 재발에는 새 UUID를 사용한다. Recovery 전송은 같은
+  episode를 참조하지만 unhealthy 전송과 별도의 idempotency key를 사용해야 닫힘 전이가
+  수신측 dedupe에 막히지 않는다.
+- process 재시작을 넘는 episode 연속성을 보장하는 외부 durable state store와 실제
+  failure-domain 분리 배포가 아직 없다. 해당 저장소·복구 시험·수신측 upsert/dedupe
+  증거가 확보될 때까지 Hosted `G2 Operational Readiness`는 차단 상태다.
 
 UI는 `PAPER`/`CONTRACT TEST`, `LIVE 금지`, source/as-of, stale/offline 상태를 항상
 표시한다. stale/offline 상태에서 mutation은 전송·queue·자동 재시도하지 않는다.

@@ -5,6 +5,7 @@ import json
 import re
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 import httpx
 
@@ -34,23 +35,26 @@ class DeadManWebhookDestination:
         self,
         *,
         account_id: str,
+        episode_id: str,
         event: Literal["unhealthy", "recovered"],
         reason_codes: tuple[str, ...],
         observed_at: datetime,
     ) -> None:
         if not account_id.strip() or event not in {"unhealthy", "recovered"}:
             raise OperationsInvariantError("dead_man_alert_identity_is_invalid")
+        _require_episode_id(episode_id)
         if not reason_codes or any(_REASON_RE.fullmatch(code) is None for code in reason_codes):
             raise OperationsInvariantError("dead_man_alert_reasons_are_invalid")
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise OperationsInvariantError("dead_man_alert_time_must_be_timezone_aware")
-        dedupe_key = _dedupe_key(account_id, event, reason_codes)
+        dedupe_key = _dedupe_key(account_id, episode_id, event, reason_codes)
         response = await self.client.post(
             self.webhook_url,
             headers={"Idempotency-Key": dedupe_key},
             json={
-                "schema_version": 1,
+                "schema_version": 2,
                 "dedupe_key": dedupe_key,
+                "episode_id": episode_id,
                 "event_type": "dead_man_monitor_" + event,
                 "aggregate_type": "trading_account",
                 "aggregate_id": account_id,
@@ -103,18 +107,31 @@ class DeadManWebhookDestination:
 
 def _dedupe_key(
     account_id: str,
+    episode_id: str,
     event: Literal["unhealthy", "recovered"],
     reason_codes: tuple[str, ...],
 ) -> str:
     material = json.dumps(
         {
             "account_id": account_id,
+            "episode_id": episode_id,
             "event": event,
             "reason_codes": sorted(reason_codes),
-            "schema_version": 1,
+            "schema_version": 2,
         },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    return "dead-man-v1:" + hashlib.sha256(material).hexdigest()
+    return "dead-man-v2:" + hashlib.sha256(material).hexdigest()
+
+
+def _require_episode_id(value: object) -> None:
+    if not isinstance(value, str):
+        raise OperationsInvariantError("dead_man_alert_episode_id_is_invalid")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise OperationsInvariantError("dead_man_alert_episode_id_is_invalid") from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise OperationsInvariantError("dead_man_alert_episode_id_is_invalid")

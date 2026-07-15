@@ -25,6 +25,7 @@ ResultT = TypeVar("ResultT")
 class _StageState:
     last_completed_at: datetime | None = None
     warning: bool = False
+    error: bool = False
 
 
 class OperationsLoop:
@@ -92,7 +93,9 @@ class OperationsLoop:
         # execution claim after process start.
         command_result = await self.run_operations.commands.run_once()
         states["commands"].last_completed_at = now_utc()
-        states["commands"].warning = _stage_result_has_warning(command_result)
+        command_error, command_warning = _stage_result_health_flags(command_result)
+        states["commands"].error = command_error
+        states["commands"].warning = command_warning
         _validate_command_result(command_result)
         if self.shutdown.requested:
             return
@@ -212,7 +215,7 @@ class OperationsLoop:
                 result = await runner()
                 if validate is not None:
                     validate(result)
-                warning = _stage_result_has_warning(result)
+                error, warning = _stage_result_health_flags(result)
             except Exception as exc:
                 with suppress(Exception):
                     await self.run_operations.record_scheduler_heartbeat(
@@ -226,6 +229,7 @@ class OperationsLoop:
                     )
                 raise
             state.last_completed_at = now_utc()
+            state.error = error
             state.warning = warning
             if self.shutdown.requested:
                 return
@@ -241,13 +245,29 @@ class OperationsLoop:
             if self.shutdown.requested:
                 return
             completed_at = now_utc()
+            incomplete_stages: list[JsonValue] = [
+                to_json_value(name)
+                for name, state in sorted(states.items())
+                if state.last_completed_at is None
+            ]
             warning_stages: list[JsonValue] = [
                 to_json_value(name)
                 for name, state in sorted(states.items())
-                if state.warning or state.last_completed_at is None
+                if state.warning
+            ]
+            error_stages: list[JsonValue] = [
+                to_json_value(name)
+                for name, state in sorted(states.items())
+                if state.error
             ]
             await self.run_operations.record_scheduler_heartbeat(
-                "warning" if warning_stages else "ok",
+                (
+                    "error"
+                    if error_stages
+                    else "warning"
+                    if incomplete_stages
+                    else "ok"
+                ),
                 {
                     "component": "operations_v2",
                     "checkpoint": "independent_scheduler_running",
@@ -261,6 +281,8 @@ class OperationsLoop:
                         )
                         for name, state in states.items()
                     },
+                    "error_stages": error_stages,
+                    "incomplete_stages": incomplete_stages,
                     "warning_stages": warning_stages,
                 },
             )
@@ -295,11 +317,16 @@ def _validate_command_result(result: object) -> None:
         raise OperationsV2RunError(("commands_unacknowledged",))
 
 
-def _stage_result_has_warning(result: object) -> bool:
+def _stage_result_health_flags(result: object) -> tuple[bool, bool]:
+    has_error = False
+    has_business_warning = False
     for field in ("failed", "unacknowledged", "blocked", "manual"):
         value = getattr(result, field, 0)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RuntimeError("operations_stage_result_is_invalid")
         if value:
-            return True
-    return False
+            if field in {"failed", "unacknowledged"}:
+                has_error = True
+            else:
+                has_business_warning = True
+    return has_error, has_business_warning
