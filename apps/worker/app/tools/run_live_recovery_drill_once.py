@@ -32,8 +32,14 @@ from app.domain.common.time import now_utc
 from app.domain.strategy.entities import FeatureVector
 from app.domain.trading.entities import AccountState, BotSettings, Order, OrderStatus, Quote
 
+HISTORICAL_QUARANTINE_REASON = "legacy_live_recovery_drill_is_quarantined"
+
 
 class RecoveryDrillBroker:
+    execution_environment = "contract_test"
+    network_enabled = False
+    production_order_capable = False
+
     def __init__(
         self,
         statuses: dict[str, BrokerOrderStatusResult],
@@ -79,6 +85,9 @@ class RecoveryDrillBroker:
 
 
 async def main() -> None:
+    raise RuntimeError(HISTORICAL_QUARANTINE_REASON)
+
+    # Historical implementation retained below only for audit archaeology.
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="live", live_order_allowed=True)
     )

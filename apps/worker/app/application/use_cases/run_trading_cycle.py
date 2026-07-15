@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import assert_never
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from app.application.ports.alert_port import AlertNotifierPort
 from app.application.ports.broker_port import BrokerPort
@@ -22,7 +23,13 @@ from app.domain.common.time import KST, now_utc
 from app.domain.portfolio.entities import Position
 from app.domain.risk.value_objects import RiskInput
 from app.domain.strategy.entities import FeatureVector, StrategyContext
-from app.domain.trading.entities import AccountState, DecisionSnapshot, Quote, Signal
+from app.domain.trading.entities import (
+    AccountState,
+    BotSettings,
+    DecisionSnapshot,
+    Quote,
+    Signal,
+)
 from app.domain.trading.policies import settings_validation_reasons
 from app.infrastructure.idempotency import build_idempotency_key
 from app.infrastructure.release_metadata import worker_heartbeat_details
@@ -89,17 +96,57 @@ class RunTradingCycle:
 
     async def execute(self) -> None:
         cycle_id = uuid4()
-        now = now_utc()
-        settings = await self.repository.load_bot_settings()
+        started_at = now_utc()
+        heartbeat_details = worker_heartbeat_details(
+            str(cycle_id),
+            deployment_lock=False,
+            deployment_target_sha=None,
+            mock_providers=self.mock_providers,
+        ) | {
+            "started_at": started_at.isoformat(),
+            "checkpoint": "cycle_started",
+        }
         await self.repository.record_heartbeat(
-            "ok",
-            worker_heartbeat_details(
+            "warning",
+            heartbeat_details,
+        )
+        try:
+            settings = await self.repository.load_bot_settings()
+            heartbeat_details = worker_heartbeat_details(
                 str(cycle_id),
                 deployment_lock=settings.deployment_lock,
                 deployment_target_sha=settings.deployment_target_sha,
                 mock_providers=self.mock_providers,
-            ),
+            ) | {"started_at": started_at.isoformat()}
+            status, checkpoint = await self._execute_cycle(cycle_id, started_at, settings)
+        except Exception as exc:
+            with suppress(Exception):
+                await self.repository.record_heartbeat(
+                    "error",
+                    heartbeat_details
+                    | {
+                        "completed_at": now_utc().isoformat(),
+                        "checkpoint": "cycle_exception",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            raise
+        await self.repository.record_heartbeat(
+            status,
+            heartbeat_details
+            | {
+                "completed_at": now_utc().isoformat(),
+                "checkpoint": checkpoint,
+            },
         )
+
+    async def _execute_cycle(
+        self,
+        cycle_id: UUID,
+        now: datetime,
+        settings: BotSettings,
+    ) -> tuple[str, str]:
+        blocked_checkpoint: str | None = None
         if self.order_reconciliation_service is not None:
             await self.order_reconciliation_service.reconcile_live_orders()
         provider_health = await self.health_service.check()
@@ -111,7 +158,7 @@ class RunTradingCycle:
             await self.repository.record_engine_event(
                 "warning", "settings", "invalid_settings", {"reasons": settings_errors}
             )
-            return
+            return "warning", "invalid_settings"
         live_reconciliation_pending = (
             settings.mode == "live" and await self._has_pending_live_reconciliation()
         )
@@ -128,12 +175,12 @@ class RunTradingCycle:
                 "strategy_version_row_invalid",
                 {},
             )
-            return
+            return "warning", "strategy_version_row_invalid"
         if strategy_version is None:
             await self.repository.record_engine_event(
                 "warning", "strategy", "missing_strategy_version", {}
             )
-            return
+            return "warning", "missing_strategy_version"
         account = await self._account_state_for_mode(settings.mode, now)
         for symbol in symbols:
             quote = quotes.get(symbol)
@@ -153,6 +200,7 @@ class RunTradingCycle:
                         "live_mode_changed_during_cycle",
                         {"symbol": symbol, "mode": risk_settings.mode},
                     )
+                    blocked_checkpoint = "live_mode_changed_during_cycle"
                     break
                 quote = (await self.market_data.get_quotes([symbol])).get(symbol)
             if quote is None:
@@ -187,6 +235,7 @@ class RunTradingCycle:
                         "live_mode_changed_before_final_risk_evaluation",
                         {"symbol": symbol, "mode": risk_settings.mode},
                     )
+                    blocked_checkpoint = "live_mode_changed_before_final_risk_evaluation"
                     break
                 risk_provider_health = await self.health_service.check()
                 risk_market_open = await self.market_data.is_market_open()
@@ -203,6 +252,7 @@ class RunTradingCycle:
                         "live_strategy_row_invalid_during_cycle",
                         {"symbol": symbol},
                     )
+                    blocked_checkpoint = "live_strategy_row_invalid_during_cycle"
                     break
                 if refreshed_strategy is None:
                     await self._record_critical_event(
@@ -210,6 +260,7 @@ class RunTradingCycle:
                         "live_strategy_missing_during_cycle",
                         {"symbol": symbol},
                     )
+                    blocked_checkpoint = "live_strategy_missing_during_cycle"
                     break
                 if refreshed_strategy.id != strategy_version.id:
                     await self._record_critical_event(
@@ -217,6 +268,7 @@ class RunTradingCycle:
                         "live_strategy_changed_during_cycle",
                         {"symbol": symbol},
                     )
+                    blocked_checkpoint = "live_strategy_changed_during_cycle"
                     break
                 risk_strategy_version = refreshed_strategy
             risk_evidence = cycle_risk_evidence(
@@ -314,9 +366,13 @@ class RunTradingCycle:
                         risk_input,
                     )
                     if order.status not in {"blocked", "failed", "rejected"}:
+                        blocked_checkpoint = "legacy_live_order_requires_manual_check"
                         break
                 case unreachable:
                     assert_never(unreachable)
+        if blocked_checkpoint is not None:
+            return "warning", blocked_checkpoint
+        return "ok", "cycle_completed"
 
     async def _account_state_for_mode(
         self,

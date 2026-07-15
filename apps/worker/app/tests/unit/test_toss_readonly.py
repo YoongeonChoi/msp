@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from urllib.parse import parse_qs
@@ -18,7 +17,7 @@ from app.domain.common.errors import (
     ProviderAuthError,
     ProviderRateLimitError,
     ProviderSchemaError,
-    ProviderUnknownError,
+    ProviderUnavailableError,
 )
 from app.domain.common.json import JsonObject
 from app.tools.test_toss_readonly import _mask_identifier
@@ -360,10 +359,8 @@ async def test_toss_provider_error_mapping_uses_safe_error_code() -> None:
     assert exc_info.value.safe_message == "toss_rate-limit-exceeded"
 
 
-async def test_toss_place_order_posts_official_limit_order_payload() -> None:
-    client, requests = _client_with_responses(
-        {"/api/v1/orders": {"result": {"orderId": "order-1", "clientOrderId": "live-key-1"}}}
-    )
+async def test_toss_place_order_is_quarantined_without_network_call() -> None:
+    client, requests = _client_with_responses({})
     request = BrokerOrderRequest(
         symbol="005930",
         side="buy",
@@ -373,123 +370,39 @@ async def test_toss_place_order_posts_official_limit_order_payload() -> None:
         limit_price_krw=75_000,
     )
 
-    result = await client.place_order(request)
-
-    assert result.provider_order_id == "order-1"
-    assert result.status == "sent"
-    order_requests = [
-        http_request for http_request in requests if http_request.url.path == "/api/v1/orders"
-    ]
-    assert len(order_requests) == 1
-    order_request = order_requests[0]
-    assert order_request.method == "POST"
-    assert order_request.headers["x-tossinvest-account"] == "1"
-    payload = json.loads(order_request.content.decode())
-    assert payload == {
-        "clientOrderId": "live-key-1",
-        "symbol": "005930",
-        "side": "BUY",
-        "orderType": "LIMIT",
-        "quantity": "1",
-        "price": "75000",
-        "confirmHighValueOrder": False,
-    }
-
-
-@pytest.mark.parametrize("client_order_id", [None, "different-live-key"])
-async def test_toss_place_order_rejects_unbound_create_response(
-    client_order_id: str | None,
-) -> None:
-    client, _requests = _client_with_responses(
-        {
-            "/api/v1/orders": {
-                "result": {"orderId": "order-1", "clientOrderId": client_order_id}
-            }
-        }
-    )
-    request = BrokerOrderRequest(
-        symbol="005930",
-        side="buy",
-        amount_krw=75_000,
-        idempotency_key="live-key-1",
-        quantity=1,
-        limit_price_krw=75_000,
-    )
-
-    with pytest.raises(ProviderUnknownError, match="toss_order_create_identity_mismatch"):
+    with pytest.raises(ProviderUnavailableError, match="production_live_order_is_quarantined"):
         await client.place_order(request)
+    assert requests == []
 
 
-async def test_toss_get_order_status_maps_official_status_enum() -> None:
-    client, requests = _client_with_responses(
-        {
-            "/api/v1/orders/order-1": _order_payload(
-                order_id="order-1",
-                status="FILLED",
-                filled_quantity="1",
-            ),
-            "/api/v1/orders/order-2": _order_payload(
-                order_id="order-2",
-                status="REPLACED",
-                filled_quantity="0",
-            ),
-        }
-    )
+async def test_toss_order_status_is_quarantined_without_network_call() -> None:
+    client, requests = _client_with_responses({})
 
-    filled = await client.get_order_status("order-1")
-    unknown = await client.get_order_status("order-2")
-
-    assert filled.status == "filled"
-    assert filled.reason is None
-    assert filled.raw_summary["status"] == "FILLED"
-    assert filled.raw_summary["filled_quantity"] == "1"
-    assert unknown.status == "unknown_requires_manual_check"
-    assert unknown.reason == "toss_order_status_REPLACED"
-    order_status_paths = [
-        request.url.path
-        for request in requests
-        if request.url.path.startswith("/api/v1/orders/")
-    ]
-    assert order_status_paths == [
-        "/api/v1/orders/order-1",
-        "/api/v1/orders/order-2",
-    ]
-
-
-async def test_toss_get_order_status_rejects_mismatched_response_order_id() -> None:
-    client, _requests = _client_with_responses(
-        {
-            "/api/v1/orders/order-1": _order_payload(
-                order_id="different-order",
-                status="FILLED",
-                filled_quantity="1",
-            )
-        }
-    )
-
-    with pytest.raises(ProviderSchemaError, match="toss_order_status_identity_mismatch"):
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="production_order_status_network_is_quarantined",
+    ):
         await client.get_order_status("order-1")
+    assert requests == []
 
 
-async def test_toss_cancel_order_posts_official_cancel_endpoint() -> None:
-    client, requests = _client_with_responses(
-        {"/api/v1/orders/order-1/cancel": {"result": {"orderId": "cancel-order-1"}}}
-    )
+async def test_toss_order_listing_and_detail_are_quarantined_without_network_call() -> None:
+    client, requests = _client_with_responses({})
 
-    result = await client.cancel_order("order-1")
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="production_order_status_network_is_quarantined",
+    ):
+        await client.get_order("order-1")
+    assert requests == []
 
-    assert result.original_provider_order_id == "order-1"
-    assert result.cancel_provider_order_id == "cancel-order-1"
-    cancel_requests = [
-        http_request
-        for http_request in requests
-        if http_request.url.path == "/api/v1/orders/order-1/cancel"
-    ]
-    assert len(cancel_requests) == 1
-    cancel_request = cancel_requests[0]
-    assert cancel_request.method == "POST"
-    assert cancel_request.headers["x-tossinvest-account"] == "1"
-    assert json.loads(cancel_request.content.decode()) == {}
+
+async def test_toss_cancel_order_is_quarantined_without_network_call() -> None:
+    client, requests = _client_with_responses({})
+
+    with pytest.raises(ProviderUnavailableError, match="production_live_cancel_is_quarantined"):
+        await client.cancel_order("order-1")
+    assert requests == []
 
 
 def test_toss_readonly_command_masks_account_identifiers() -> None:
@@ -506,6 +419,8 @@ def _settings() -> Settings:
             "TOSS_CLIENT_ID": SecretStr("client-id"),
             "TOSS_CLIENT_SECRET": SecretStr("client-secret"),
             "TOSS_ACCOUNT_ID": SecretStr("1"),
+            "TOSS_CREDENTIAL_SCOPE": "read_only",
+            "TOSS_ORDER_CAPABLE_CREDENTIALS": False,
         }
     )
 
@@ -517,6 +432,8 @@ def _settings_without_account() -> Settings:
             "TOSS_CLIENT_ID": SecretStr("client-id"),
             "TOSS_CLIENT_SECRET": SecretStr("client-secret"),
             "TOSS_ACCOUNT_ID": None,
+            "TOSS_CREDENTIAL_SCOPE": "read_only",
+            "TOSS_ORDER_CAPABLE_CREDENTIALS": False,
         }
     )
 

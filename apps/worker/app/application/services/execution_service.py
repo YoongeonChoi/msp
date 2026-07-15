@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
+from datetime import date, datetime
 from math import isfinite
 from typing import Literal, assert_never
 from uuid import uuid4
 
-from app.application.ports.broker_port import BrokerOrderRequest, BrokerPort
+from app.application.ports.broker_port import BrokerOrderRequest, BrokerOrderResult, BrokerPort
+from app.application.ports.execution_kernel_port import ContractDispatchPort
 from app.application.ports.repository_port import RepositoryPort
 from app.application.services.risk_service import RiskService
 from app.domain.common.errors import (
     KnownFailClosedError,
-    ProviderTimeoutError,
-    ProviderUnknownError,
+)
+from app.domain.execution_v2.models import (
+    ExecutionCostSchedule,
+    ExecutionIntent,
+    ExecutionObservation,
+    ExecutionStatus,
+    PaperExecutionEvidence,
 )
 from app.domain.risk.entities import RiskResult
 from app.domain.risk.value_objects import RiskInput
@@ -110,6 +117,134 @@ class ExecutionService:
             )
         return order
 
+    async def dispatch_contract_test_order(
+        self,
+        intent: ExecutionIntent,
+        coordination: ContractDispatchPort,
+        *,
+        cost_schedule: ExecutionCostSchedule,
+        execution_evidence: PaperExecutionEvidence,
+        now: datetime,
+    ) -> BrokerOrderResult:
+        """Dispatch only to the zero-network local contract broker.
+
+        The durable dispatch marker is written before the only broker call in this
+        execution path. Any ambiguous post-marker error becomes a manual-blocking
+        observation and is re-raised to stop automation.
+        """
+
+        if intent.environment != "contract_test":
+            raise KnownFailClosedError("execution_v2", "contract_dispatch_requires_contract_test")
+        if (
+            cost_schedule.version != intent.cost_schedule_version
+            or cost_schedule.evidence_sha256 != intent.cost_schedule_evidence_sha256
+            or not cost_schedule.covers(intent.eligible_at, intent.expires_at)
+        ):
+            raise KnownFailClosedError(
+                "execution_v2",
+                "contract_dispatch_cost_schedule_is_invalid",
+            )
+        if (
+            execution_evidence.execution_policy_version
+            != intent.execution_policy_version
+            or not execution_evidence.covers(intent.eligible_at, intent.expires_at)
+        ):
+            raise KnownFailClosedError(
+                "execution_v2",
+                "contract_dispatch_execution_evidence_is_invalid",
+            )
+        if (
+            getattr(self.broker, "execution_environment", None) != "contract_test"
+            or getattr(self.broker, "network_enabled", True) is not False
+            or getattr(self.broker, "production_order_capable", True) is not False
+        ):
+            raise KnownFailClosedError(
+                "execution_v2",
+                "contract_dispatch_refuses_order_capable_or_network_broker",
+            )
+        if self.shutdown_requested():
+            await coordination.record_execution_observation(
+                intent,
+                _contract_observation(
+                    intent,
+                    status="failed_pre_dispatch",
+                    observed_at=now,
+                    provider_order_id=f"pre-dispatch:{intent.semantic_key}",
+                    provider_execution_id=None,
+                    settlement_date=None,
+                    reason="shutdown_requested",
+                ),
+                now=now,
+            )
+            raise KnownFailClosedError("execution_v2", "shutdown_requested")
+        await coordination.mark_dispatch_started(intent, now=now)
+        try:
+            result = await self.broker.place_order(
+                BrokerOrderRequest(
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    amount_krw=intent.quantity * intent.limit_price_krw,
+                    idempotency_key=intent.semantic_key,
+                    quantity=intent.quantity,
+                    limit_price_krw=intent.limit_price_krw,
+                )
+            )
+        except KnownFailClosedError:
+            await coordination.record_execution_observation(
+                intent,
+                _contract_observation(
+                    intent,
+                    status="unknown_requires_manual_check",
+                    observed_at=now,
+                    provider_order_id=f"unresolved:{intent.semantic_key}",
+                    provider_execution_id=None,
+                    settlement_date=None,
+                    reason="contract_dispatch_result_ambiguous",
+                ),
+                now=now,
+            )
+            raise
+        status: ExecutionStatus
+        if result.status == "sent":
+            status = "open"
+        elif result.status == "filled":
+            status = "filled"
+        elif result.status == "rejected":
+            status = "rejected"
+        else:
+            status = "unknown_requires_manual_check"
+        provider_order_id = result.provider_order_id or f"unresolved:{intent.semantic_key}"
+        provider_execution_id_value = result.raw_summary.get("provider_execution_id")
+        provider_execution_id = (
+            provider_execution_id_value
+            if isinstance(provider_execution_id_value, str)
+            and provider_execution_id_value.strip()
+            else None
+        )
+        settlement_date = (
+            execution_evidence.settlement_date_for(now, cost_schedule.settlement_days)
+            if status == "filled"
+            else None
+        )
+        await coordination.record_execution_observation(
+            intent,
+            _contract_observation(
+                intent,
+                status=status,
+                observed_at=now,
+                provider_order_id=provider_order_id,
+                provider_execution_id=provider_execution_id,
+                settlement_date=settlement_date,
+                reason=(
+                    "contract_dispatch_result_ambiguous"
+                    if status == "unknown_requires_manual_check"
+                    else None
+                ),
+            ),
+            now=now,
+        )
+        return result
+
     async def propose_live_order(
         self,
         decision: DecisionSnapshot,
@@ -142,199 +277,44 @@ class ExecutionService:
                 status="blocked",
                 amount_krw=decision.signal.order_amount_krw,
                 idempotency_key=key,
-                reason="duplicate_idempotency_key",
+                reason="legacy_live_order_write_quarantined",
                 created_at=decision.created_at,
             )
             await self.repository.record_engine_event(
-                "warning",
+                "critical",
                 "live_execution",
-                "live_order_blocked_duplicate_idempotency_key",
-                {"symbol": blocked.symbol, "existing_order_preserved": True},
+                "legacy_live_order_write_quarantined",
+                {
+                    "symbol": blocked.symbol,
+                    "existing_order_preserved": True,
+                    "broker_dispatch_attempted": False,
+                },
             )
             return blocked, final_risk
-        proposed = Order(
+        blocked = Order(
             id=uuid4(),
             decision_id=decision.id,
             symbol=decision.signal.symbol,
             action=action,
             mode="live",
-            status="proposed" if final_risk.allowed else "blocked",
+            status="blocked",
             amount_krw=decision.signal.order_amount_krw,
             idempotency_key=key,
-            reason=None if final_risk.allowed else final_risk.safe_message,
+            reason="legacy_live_order_write_quarantined",
             created_at=decision.created_at,
         )
-        if not final_risk.allowed:
-            await self.repository.persist_order(proposed, final_risk)
-            await self.repository.record_engine_event(
-                "warning",
-                "live_execution",
-                "live_order_blocked_by_risk",
-                {"symbol": proposed.symbol, "risk_reasons": final_risk.reasons},
-            )
-            return proposed, final_risk
-        evidence_reasons = _live_decision_evidence_reasons(decision)
-        if evidence_reasons:
-            blocked = Order(
-                id=proposed.id,
-                decision_id=proposed.decision_id,
-                symbol=proposed.symbol,
-                action=proposed.action,
-                mode="live",
-                status="blocked",
-                amount_krw=proposed.amount_krw,
-                idempotency_key=proposed.idempotency_key,
-                reason="missing_live_decision_evidence:" + ",".join(evidence_reasons),
-                created_at=proposed.created_at,
-            )
-            await self.repository.persist_order(blocked, final_risk)
-            await self.repository.record_engine_event(
-                "critical",
-                "live_execution",
-                "live_order_blocked_missing_evidence",
-                {"symbol": blocked.symbol, "reasons": evidence_reasons},
-            )
-            return blocked, final_risk
-        broker_dispatch_started = False
-        quantity: int | None = None
-        price_krw: int | None = None
-        try:
-            if risk_input.quote is None:
-                raise KnownFailClosedError("execution", "live_order_missing_quote")
-            if risk_input.quote.price_krw <= 0:
-                raise KnownFailClosedError("execution", "live_order_invalid_quote_price")
-            price_krw = risk_input.quote.price_krw
-            quantity = calculate_order_quantity(
-                proposed.amount_krw,
-                price_krw,
-            )
-            if quantity is None:
-                raise KnownFailClosedError("execution", "live_order_amount_below_quote_price")
-            pending = Order(
-                id=proposed.id,
-                decision_id=proposed.decision_id,
-                symbol=proposed.symbol,
-                action=proposed.action,
-                mode="live",
-                status="unknown_requires_manual_check",
-                amount_krw=proposed.amount_krw,
-                idempotency_key=proposed.idempotency_key,
-                reason="live_broker_order_result_pending",
-                created_at=proposed.created_at,
-                quantity=quantity,
-                price_krw=price_krw,
-            )
-            await self.repository.persist_order(pending, final_risk)
-            if self.shutdown_requested():
-                raise KnownFailClosedError("execution", "shutdown_requested")
-            broker_dispatch_started = True
-            broker_result = await self.broker.place_order(
-                BrokerOrderRequest(
-                    symbol=proposed.symbol,
-                    side=proposed.action,
-                    amount_krw=proposed.amount_krw,
-                    idempotency_key=proposed.idempotency_key,
-                    quantity=quantity,
-                    limit_price_krw=price_krw,
-                )
-            )
-        except KnownFailClosedError as exc:
-            failed_status: Literal["failed", "unknown_requires_manual_check"] = (
-                "unknown_requires_manual_check"
-                if broker_dispatch_started
-                or isinstance(exc, ProviderTimeoutError | ProviderUnknownError)
-                else "failed"
-            )
-            failed = Order(
-                id=proposed.id,
-                decision_id=proposed.decision_id,
-                symbol=proposed.symbol,
-                action=proposed.action,
-                mode="live",
-                status=failed_status,
-                amount_krw=proposed.amount_krw,
-                idempotency_key=proposed.idempotency_key,
-                reason=exc.safe_message,
-                created_at=proposed.created_at,
-                quantity=quantity,
-                price_krw=price_krw,
-            )
-            if await self.repository.idempotency_key_exists(failed.idempotency_key):
-                updated = await self.repository.update_order_status(
-                    order_id=str(failed.id),
-                    status=failed.status,
-                    reason=failed.reason,
-                    provider_payload_summary=failed.provider_payload_summary,
-                    expected_statuses={"unknown_requires_manual_check"},
-                )
-                if not updated:
-                    current = await self.repository.load_order_by_id(str(failed.id))
-                    if current is not None:
-                        failed = current
-            else:
-                await self.repository.persist_order(failed, final_risk)
-            await self.repository.record_engine_event(
-                "critical",
-                "live_execution",
-                "live_broker_order_failed_closed",
-                {
-                    "symbol": failed.symbol,
-                    "status": failed.status,
-                    "component": exc.component,
-                    "reason": exc.safe_message,
-                },
-            )
-            return failed, final_risk
-        sent = Order(
-            id=proposed.id,
-            decision_id=proposed.decision_id,
-            symbol=proposed.symbol,
-            action=proposed.action,
-            mode="live",
-            status=broker_result.status,
-            amount_krw=proposed.amount_krw,
-            idempotency_key=proposed.idempotency_key,
-            reason=None,
-            created_at=proposed.created_at,
-            quantity=quantity,
-            price_krw=price_krw,
-            provider_order_id=broker_result.provider_order_id,
-            provider_payload_summary=broker_result.raw_summary,
-        )
-        updated = await self.repository.update_order_status(
-            order_id=str(sent.id),
-            status=sent.status,
-            reason=sent.reason,
-            provider_payload_summary=sent.provider_payload_summary,
-            provider_order_id=sent.provider_order_id,
-            expected_statuses={"unknown_requires_manual_check"},
-        )
-        if not updated:
-            current = await self.repository.load_order_by_id(str(sent.id))
-            if current is not None:
-                await self.repository.record_engine_event(
-                    "critical",
-                    "live_execution",
-                    "live_broker_order_result_conflicted_with_newer_status",
-                    {
-                        "symbol": current.symbol,
-                        "status": current.status,
-                        "provider_order_id_present": current.provider_order_id is not None,
-                    },
-                )
-                return current, final_risk
+        await self.repository.persist_order(blocked, final_risk)
         await self.repository.record_engine_event(
-            "info",
+            "critical",
             "live_execution",
-            "live_broker_order_result_recorded",
+            "legacy_live_order_write_quarantined",
             {
-                "symbol": sent.symbol,
-                "status": sent.status,
-                "provider_order_id_present": sent.provider_order_id is not None,
+                "symbol": blocked.symbol,
+                "risk_allowed": final_risk.allowed,
+                "broker_dispatch_attempted": False,
             },
         )
-        return sent, final_risk
-
+        return blocked, final_risk
 
 def _paper_decision_price(decision: DecisionSnapshot) -> int | None:
     value = decision.feature_snapshot.get("price_at_decision")
@@ -346,30 +326,32 @@ def _paper_decision_price(decision: DecisionSnapshot) -> int | None:
     return int(numeric)
 
 
-def _live_decision_evidence_reasons(decision: DecisionSnapshot) -> list[str]:
-    reasons: list[str] = []
-    if not decision.signal.reason_json:
-        reasons.append("missing_reason_json")
-    if not decision.feature_snapshot:
-        reasons.append("missing_feature_snapshot")
-    else:
-        reasons.extend(_live_feature_snapshot_reasons(decision.feature_snapshot))
-    if not decision.risk_snapshot:
-        reasons.append("missing_risk_snapshot")
-    return reasons
-
-
-def _live_feature_snapshot_reasons(
-    feature_snapshot: Mapping[str, object],
-) -> list[str]:
-    raw = feature_snapshot.get("raw")
-    if not isinstance(raw, Mapping):
-        return ["missing_feature_raw_snapshot"]
-    feature_source = raw.get("feature_source")
-    if feature_source in {"mock_static", "mock"}:
-        return ["mock_strategy_features_not_live_ready"]
-    if raw.get("live_trading_ready") is not True:
-        return ["feature_snapshot_not_live_ready"]
-    if not isinstance(feature_source, str) or not feature_source.strip():
-        return ["feature_snapshot_source_unverified"]
-    return []
+def _contract_observation(
+    intent: ExecutionIntent,
+    *,
+    status: ExecutionStatus,
+    observed_at: datetime,
+    provider_order_id: str,
+    provider_execution_id: str | None,
+    settlement_date: date | None,
+    reason: str | None,
+) -> ExecutionObservation:
+    is_filled = status == "filled"
+    return ExecutionObservation.create(
+        intent_id=intent.id,
+        sequence=1,
+        status=status,
+        observed_at=observed_at,
+        provider_order_id=provider_order_id,
+        provider_execution_id=provider_execution_id,
+        cumulative_quantity=intent.quantity if is_filled else 0,
+        cumulative_gross_krw=(
+            intent.quantity * intent.limit_price_krw if is_filled else 0
+        ),
+        cumulative_commission_krw=0,
+        cumulative_tax_krw=0,
+        last_fill_quantity=intent.quantity if is_filled else None,
+        last_fill_price_krw=intent.limit_price_krw if is_filled else None,
+        last_fill_settlement_date=settlement_date,
+        reason=reason,
+    )

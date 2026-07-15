@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import Field, SecretStr
+from typing import Literal, Self
+from uuid import UUID
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +13,7 @@ class Settings(BaseSettings):
     env: str = Field(default="local", alias="ENV")
     run_once: bool = Field(default=False, alias="RUN_ONCE")
     mock_providers: bool = Field(default=True, alias="MOCK_PROVIDERS")
-    bot_default_mode: str = Field(default="paper", alias="BOT_DEFAULT_MODE")
+    bot_default_mode: Literal["paper"] = Field(default="paper", alias="BOT_DEFAULT_MODE")
     loop_interval_sec: int = Field(default=30, ge=5, le=3600, alias="LOOP_INTERVAL_SEC")
     heartbeat_interval_sec: int = Field(
         default=30,
@@ -32,6 +35,22 @@ class Settings(BaseSettings):
     toss_client_id: SecretStr | None = Field(default=None, alias="TOSS_CLIENT_ID")
     toss_client_secret: SecretStr | None = Field(default=None, alias="TOSS_CLIENT_SECRET")
     toss_account_id: SecretStr | None = Field(default=None, alias="TOSS_ACCOUNT_ID")
+    toss_credential_scope: Literal["read_only", "order_capable", "unknown"] = Field(
+        default="unknown",
+        alias="TOSS_CREDENTIAL_SCOPE",
+    )
+    toss_order_capable_credentials: bool | None = Field(
+        default=None,
+        alias="TOSS_ORDER_CAPABLE_CREDENTIALS",
+    )
+    live_order_execution_enabled: bool = Field(
+        default=False,
+        alias="LIVE_ORDER_EXECUTION_ENABLED",
+    )
+    toss_order_endpoint_enabled: bool = Field(
+        default=False,
+        alias="TOSS_ORDER_ENDPOINT_ENABLED",
+    )
     opendart_api_key: SecretStr | None = Field(default=None, alias="OPENDART_API_KEY")
     krx_api_key: SecretStr | None = Field(default=None, alias="KRX_API_KEY")
     naver_client_id: SecretStr | None = Field(default=None, alias="NAVER_CLIENT_ID")
@@ -71,6 +90,139 @@ class Settings(BaseSettings):
         le=1_000_000,
         alias="OUTCOME_TRACKING_PRICE_LIMIT",
     )
+    execution_v2_enabled: bool = Field(default=False, alias="EXECUTION_V2_ENABLED")
+    execution_v2_environment: Literal["paper", "contract_test"] = Field(
+        default="paper",
+        alias="EXECUTION_V2_ENVIRONMENT",
+    )
+    execution_v2_worker_api_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_V2_WORKER_API_ENABLED",
+    )
+    execution_v2_paper_resume_input_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_V2_PAPER_RESUME_INPUT_ENABLED",
+    )
+    execution_v2_paper_source_input_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_V2_PAPER_SOURCE_INPUT_ENABLED",
+    )
+    execution_v2_worker_id: str | None = Field(
+        default=None,
+        alias="EXECUTION_V2_WORKER_ID",
+    )
+    execution_v2_account_id: str | None = Field(
+        default=None,
+        alias="EXECUTION_V2_ACCOUNT_ID",
+    )
+    worker_lease_ttl_sec: int = Field(
+        default=30,
+        ge=15,
+        le=300,
+        alias="WORKER_LEASE_TTL_SEC",
+    )
+    worker_lease_renew_interval_sec: int = Field(
+        default=10,
+        ge=5,
+        le=120,
+        alias="WORKER_LEASE_RENEW_INTERVAL_SEC",
+    )
+    operations_command_interval_sec: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        alias="OPERATIONS_COMMAND_INTERVAL_SEC",
+    )
+    operations_execution_interval_sec: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        alias="OPERATIONS_EXECUTION_INTERVAL_SEC",
+    )
+    operations_settlement_interval_sec: int = Field(
+        default=10,
+        ge=1,
+        le=60,
+        alias="OPERATIONS_SETTLEMENT_INTERVAL_SEC",
+    )
+    operations_reconciliation_interval_sec: int = Field(
+        default=10,
+        ge=1,
+        le=60,
+        alias="OPERATIONS_RECONCILIATION_INTERVAL_SEC",
+    )
+    operations_outbox_interval_sec: int = Field(
+        default=1,
+        ge=1,
+        le=60,
+        alias="OPERATIONS_OUTBOX_INTERVAL_SEC",
+    )
+    operations_heartbeat_interval_sec: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        alias="OPERATIONS_HEARTBEAT_INTERVAL_SEC",
+    )
+
+    @model_validator(mode="after")
+    def validate_execution_v2_boundary(self) -> Self:
+        if self.live_order_execution_enabled or self.toss_order_endpoint_enabled:
+            raise ValueError("production_live_order_write_is_quarantined")
+        if self.toss_order_capable_credentials is True:
+            raise ValueError("order_capable_toss_credentials_are_forbidden")
+        toss_credentials_present = any(
+            value is not None
+            for value in (
+                self.toss_client_id,
+                self.toss_client_secret,
+                self.toss_account_id,
+            )
+        )
+        if toss_credentials_present and (
+            self.toss_credential_scope != "read_only"
+            or self.toss_order_capable_credentials is not False
+        ):
+            raise ValueError("toss_credential_scope_must_be_explicitly_read_only")
+        if self.execution_v2_worker_api_enabled and not self.execution_v2_enabled:
+            raise ValueError("execution_v2_worker_api_requires_execution_v2_enabled")
+        if self.execution_v2_paper_resume_input_enabled and (
+            not self.execution_v2_worker_api_enabled
+            or self.execution_v2_environment != "paper"
+        ):
+            raise ValueError(
+                "paper_resume_input_requires_paper_worker_api_enablement"
+            )
+        if self.execution_v2_paper_source_input_enabled and (
+            not self.execution_v2_worker_api_enabled
+            or self.execution_v2_environment != "paper"
+        ):
+            raise ValueError(
+                "paper_source_input_requires_paper_worker_api_enablement"
+            )
+        if self.execution_v2_worker_api_enabled:
+            try:
+                worker_id = UUID(self.execution_v2_worker_id or "")
+            except ValueError as exc:
+                raise ValueError("execution_v2_worker_id_is_required") from exc
+            if (
+                str(worker_id) != self.execution_v2_worker_id
+                or worker_id.version not in {1, 2, 3, 4, 5}
+            ):
+                raise ValueError("execution_v2_worker_id_is_invalid")
+            expected_account_id = {
+                "paper": "paper-primary",
+                "contract_test": "contract-test-primary",
+            }[self.execution_v2_environment]
+            if self.execution_v2_account_id != expected_account_id:
+                raise ValueError("execution_v2_account_id_is_invalid")
+            if self.worker_lease_renew_interval_sec * 2 >= self.worker_lease_ttl_sec:
+                raise ValueError("worker_lease_renewal_window_is_invalid")
+        if self.execution_v2_enabled and self.execution_v2_environment == "contract_test":
+            if self.env.strip().lower() in {"production", "prod"}:
+                raise ValueError("contract_test_execution_is_forbidden_in_production")
+            if not self.mock_providers:
+                raise ValueError("contract_test_execution_requires_mock_providers")
+        return self
 
     def use_supabase_repository(self) -> bool:
         return bool(

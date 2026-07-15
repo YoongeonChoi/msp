@@ -32,6 +32,10 @@ from app.domain.trading.value_objects import StrategyWeights
 
 
 class CountingBroker(TossMock):
+    execution_environment = "contract_test"
+    network_enabled = False
+    production_order_capable = False
+
     def __init__(self, healthy: bool = True) -> None:
         self.healthy = healthy
         self.place_order_calls = 0
@@ -289,7 +293,10 @@ async def test_bot_disabled_still_creates_signal_snapshot_without_orders() -> No
 
     await cycle.execute()
 
-    assert len(repository.heartbeats) == 1
+    assert [heartbeat["status"] for heartbeat in repository.heartbeats] == [
+        "warning",
+        "ok",
+    ]
     assert len(repository.api_health) == 5
     assert len(repository.decisions) == 1
     assert repository.decisions[0].signal.action == "buy"
@@ -311,7 +318,7 @@ async def test_cycle_heartbeat_includes_release_metadata(
 
     await cycle.execute()
 
-    details = repository.heartbeats[0]["details"]
+    details = repository.heartbeats[-1]["details"]
     assert isinstance(details, dict)
     assert details["release_sha"] == "abcdef1234567890"
     assert details["release_sha_short"] == "abcdef123456"
@@ -337,7 +344,7 @@ async def test_cycle_heartbeat_reports_deployment_pause_target(
 
     await cycle.execute()
 
-    details = repository.heartbeats[0]["details"]
+    details = repository.heartbeats[-1]["details"]
     assert isinstance(details, dict)
     assert details["deployment_lock"] is True
     assert details["deployment_target_sha"] == target_sha
@@ -401,7 +408,7 @@ async def test_paper_cycle_uses_critical_news_feature_evidence() -> None:
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
-    assert "critical_negative_news_risk" in repository.orders[0].reason
+    assert "critical_negative_news_risk" in _risk_reasons(repository)
     raw = repository.decisions[0].feature_snapshot["raw"]
     assert isinstance(raw, dict)
     risk_evidence = raw["risk_evidence"]
@@ -421,7 +428,8 @@ async def test_live_mode_is_blocked_when_live_permission_false() -> None:
     assert len(repository.orders) == 1
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
-    assert "live_order_allowed_false" in repository.orders[0].reason
+    assert "live_order_allowed_false" in _risk_reasons(repository)
+    assert repository.orders[0].reason == "legacy_live_order_write_quarantined"
     assert broker.place_order_calls == 0
 
 
@@ -449,7 +457,7 @@ async def test_live_mode_market_closed_keeps_signal_but_blocks_order_before_brok
     assert len(repository.orders) == 1
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
-    assert "market_closed_or_unknown" in repository.orders[0].reason
+    assert "market_closed_or_unknown" in _risk_reasons(repository)
     assert broker.place_order_calls == 0
 
 
@@ -506,7 +514,8 @@ async def test_paper_cycle_refreshes_risk_time_after_quote_fetch(
     cycle_started_at = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
     quote_created_at = cycle_started_at + timedelta(microseconds=500)
     risk_evaluated_at = cycle_started_at + timedelta(seconds=1)
-    timestamps = iter((cycle_started_at, risk_evaluated_at))
+    cycle_completed_at = risk_evaluated_at + timedelta(seconds=1)
+    timestamps = iter((cycle_started_at, risk_evaluated_at, cycle_completed_at))
     monkeypatch.setattr(run_trading_cycle_module, "now_utc", lambda: next(timestamps))
     repository = InMemoryRepository(
         BotSettings(enabled=True, mode="paper", live_order_allowed=False)
@@ -531,6 +540,13 @@ async def test_missing_strategy_blocks_paper_order() -> None:
     await cycle.execute()
 
     assert repository.decisions == []
+    assert [heartbeat["status"] for heartbeat in repository.heartbeats] == [
+        "warning",
+        "warning",
+    ]
+    details = repository.heartbeats[-1]["details"]
+    assert isinstance(details, dict)
+    assert details["checkpoint"] == "missing_strategy_version"
     assert repository.orders == []
     assert repository.engine_events[-1]["message"] == "missing_strategy_version"
 
@@ -596,12 +612,12 @@ async def test_live_allowed_cycle_blocks_without_verified_account_state() -> Non
     assert repository.orders[0].mode == "live"
     assert repository.orders[0].status == "blocked"
     assert repository.orders[0].reason is not None
-    assert "missing_account_state" in repository.orders[0].reason
+    assert "missing_account_state" in _risk_reasons(repository)
     assert any(
         event["message"] == "live_account_state_sync_failed"
         for event in repository.engine_events
     )
-    assert repository.engine_events[-1]["message"] == "live_order_blocked_by_risk"
+    assert repository.engine_events[-1]["message"] == "legacy_live_order_write_quarantined"
 
 
 async def test_live_allowed_cycle_never_uses_simulated_account_for_broker_call() -> None:
@@ -620,7 +636,7 @@ async def test_live_allowed_cycle_never_uses_simulated_account_for_broker_call()
     assert order.status == "blocked"
     assert order.provider_order_id is None
     assert order.reason is not None
-    assert "missing_account_state" in order.reason
+    assert "missing_account_state" in _risk_reasons(repository)
 
 
 async def test_live_allowed_cycle_uses_repository_count_when_broker_history_unverified() -> None:
@@ -634,10 +650,11 @@ async def test_live_allowed_cycle_uses_repository_count_when_broker_history_unve
 
     assert len(repository.orders) == 1
     order = repository.orders[0]
-    assert broker.place_order_calls == 1
+    assert broker.place_order_calls == 0
     assert order.mode == "live"
-    assert order.status == "sent"
-    assert order.provider_order_id == "test-live-order-1"
+    assert order.status == "blocked"
+    assert order.provider_order_id is None
+    assert order.reason == "legacy_live_order_write_quarantined"
     assert not any(
         event["message"] == "live_system_order_count_sync_failed"
         for event in repository.engine_events
@@ -664,7 +681,7 @@ async def test_live_allowed_cycle_blocks_without_system_order_scope_acceptance()
     assert order.mode == "live"
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "daily_order_count_unverified" in order.reason
+    assert "daily_order_count_unverified" in _risk_reasons(repository)
     assert any(
         event["message"] == "live_external_order_history_scope_not_accepted"
         for event in repository.engine_events
@@ -695,7 +712,7 @@ async def test_live_allowed_cycle_blocks_when_system_daily_order_count_reaches_l
     assert order.mode == "live"
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "max_daily_order_count_exceeded" in order.reason
+    assert "max_daily_order_count_exceeded" in _risk_reasons(repository)
 
 
 async def test_live_allowed_cycle_blocks_when_system_daily_order_count_sync_fails() -> None:
@@ -713,7 +730,7 @@ async def test_live_allowed_cycle_blocks_when_system_daily_order_count_sync_fail
     assert order.mode == "live"
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "daily_order_count_unverified" in order.reason
+    assert "daily_order_count_unverified" in _risk_reasons(repository)
     assert any(
         event["message"] == "live_system_order_count_sync_failed"
         for event in repository.engine_events
@@ -757,12 +774,10 @@ async def test_live_allowed_cycle_blocks_mock_strategy_features_before_broker() 
     order = repository.orders[0]
     assert order.mode == "live"
     assert order.status == "blocked"
-    assert order.reason is not None
-    assert "missing_live_decision_evidence" in order.reason
-    assert "mock_strategy_features_not_live_ready" in order.reason
+    assert order.reason == "legacy_live_order_write_quarantined"
     assert any(
-        event["message"] == "live_order_blocked_missing_evidence"
-        and _event_reasons_include(event, "mock_strategy_features_not_live_ready")
+        event["message"] == "live_feature_snapshot_not_ready"
+        and _event_reasons_include(event, "feature_snapshot_not_live_ready")
         for event in repository.engine_events
     )
 
@@ -858,7 +873,7 @@ async def test_live_cycle_blocks_projected_position_over_limit_before_broker() -
     order = repository.orders[0]
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "max_position_pct_exceeded" in order.reason
+    assert "max_position_pct_exceeded" in _risk_reasons(repository)
     raw = repository.decisions[0].feature_snapshot["raw"]
     assert isinstance(raw, dict)
     risk_evidence = raw["risk_evidence"]
@@ -884,7 +899,7 @@ async def test_live_cycle_blocks_buy_when_cash_buying_power_is_insufficient() ->
 
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
-    assert "insufficient_cash_buying_power" in (repository.orders[0].reason or "")
+    assert "insufficient_cash_buying_power" in _risk_reasons(repository)
 
 
 async def test_live_cycle_blocks_sell_when_synced_position_quantity_is_insufficient() -> None:
@@ -910,7 +925,7 @@ async def test_live_cycle_blocks_sell_when_synced_position_quantity_is_insuffici
     assert repository.decisions[0].signal.action == "sell"
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
-    assert "insufficient_sell_position_quantity" in (repository.orders[0].reason or "")
+    assert "insufficient_sell_position_quantity" in _risk_reasons(repository)
 
 
 async def test_live_cycle_blocks_when_position_sync_fails_before_broker() -> None:
@@ -931,8 +946,8 @@ async def test_live_cycle_blocks_when_position_sync_fails_before_broker() -> Non
     order = repository.orders[0]
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "position_exposure_unknown" in order.reason
-    assert "sector_exposure_unknown" in order.reason
+    assert "position_exposure_unknown" in _risk_reasons(repository)
+    assert "sector_exposure_unknown" in _risk_reasons(repository)
 
 
 async def test_live_cycle_blocks_unknown_verified_sector_before_broker() -> None:
@@ -952,7 +967,7 @@ async def test_live_cycle_blocks_unknown_verified_sector_before_broker() -> None
     order = repository.orders[0]
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "sector_exposure_unknown" in order.reason
+    assert "sector_exposure_unknown" in _risk_reasons(repository)
     assert repository.decisions[0].signal.sector == "unknown"
 
 
@@ -973,7 +988,7 @@ async def test_live_cycle_derives_critical_news_risk_from_feature_evidence() -> 
     order = repository.orders[0]
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "critical_negative_news_risk" in order.reason
+    assert "critical_negative_news_risk" in _risk_reasons(repository)
     raw = repository.decisions[0].feature_snapshot["raw"]
     assert isinstance(raw, dict)
     risk_evidence = raw["risk_evidence"]
@@ -998,7 +1013,7 @@ async def test_live_cycle_blocks_missing_risk_boolean_evidence_before_broker() -
     order = repository.orders[0]
     assert order.status == "blocked"
     assert order.reason is not None
-    assert "liquidity_unknown_or_insufficient" in order.reason
+    assert "liquidity_unknown_or_insufficient" in _risk_reasons(repository)
 
 
 async def test_live_allowed_cycle_places_order_with_verified_account_state() -> None:
@@ -1026,10 +1041,11 @@ async def test_live_allowed_cycle_places_order_with_verified_account_state() -> 
 
     assert len(repository.orders) == 1
     order = repository.orders[0]
-    assert broker.place_order_calls == 1
+    assert broker.place_order_calls == 0
     assert order.mode == "live"
-    assert order.status == "sent"
-    assert order.provider_order_id == "test-live-order-1"
+    assert order.status == "blocked"
+    assert order.provider_order_id is None
+    assert order.reason == "legacy_live_order_write_quarantined"
     assert repository.decisions[0].signal.sector == "semiconductors"
 
 
@@ -1051,7 +1067,7 @@ async def test_live_cycle_refreshes_market_state_before_dispatch() -> None:
     assert market_data.market_open_calls >= 2
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
-    assert "market_closed_or_unknown" in (repository.orders[0].reason or "")
+    assert "market_closed_or_unknown" in _risk_reasons(repository)
 
 
 async def test_live_cycle_rechecks_market_after_feature_collection() -> None:
@@ -1072,7 +1088,7 @@ async def test_live_cycle_rechecks_market_after_feature_collection() -> None:
     assert market_data.market_open_calls >= 2
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
-    assert "market_closed_or_unknown" in (repository.orders[0].reason or "")
+    assert "market_closed_or_unknown" in _risk_reasons(repository)
 
 
 async def test_live_cycle_enforces_symbol_cooldown() -> None:
@@ -1091,7 +1107,7 @@ async def test_live_cycle_enforces_symbol_cooldown() -> None:
 
     assert broker.place_order_calls == 0
     assert repository.orders[-1].status == "blocked"
-    assert "symbol_in_cooldown" in (repository.orders[-1].reason or "")
+    assert "symbol_in_cooldown" in _risk_reasons(repository)
 
 
 async def test_live_cycle_limits_each_cycle_to_one_broker_submission() -> None:
@@ -1108,8 +1124,11 @@ async def test_live_cycle_limits_each_cycle_to_one_broker_submission() -> None:
 
     await cycle.execute()
 
-    assert broker.place_order_calls == 1
-    assert len(repository.orders) == 1
+    assert broker.place_order_calls == 0
+    assert len(repository.orders) == 2
+    assert {order.reason for order in repository.orders} == {
+        "legacy_live_order_write_quarantined"
+    }
 
 
 async def test_live_cycle_wires_shutdown_state_into_risk_gate() -> None:
@@ -1128,7 +1147,7 @@ async def test_live_cycle_wires_shutdown_state_into_risk_gate() -> None:
 
     assert broker.place_order_calls == 0
     assert repository.orders[0].status == "blocked"
-    assert "shutdown_requested" in (repository.orders[0].reason or "")
+    assert "shutdown_requested" in _risk_reasons(repository)
 
 
 async def test_live_cycle_rechecks_strategy_authority_before_dispatch() -> None:
@@ -1181,6 +1200,13 @@ def _event_details_value(event: dict[str, object], key: str) -> object:
     if not isinstance(details, dict):
         return None
     return details.get(key)
+
+
+def _risk_reasons(repository: InMemoryRepository, decision_index: int = -1) -> list[str]:
+    reasons = repository.decisions[decision_index].risk_snapshot.get("reasons")
+    assert isinstance(reasons, list)
+    assert all(isinstance(reason, str) for reason in reasons)
+    return reasons
 
 
 def _cycle(

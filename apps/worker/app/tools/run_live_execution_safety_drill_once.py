@@ -19,6 +19,8 @@ from app.domain.common.time import now_utc
 from app.domain.risk.value_objects import RiskInput
 from app.domain.trading.entities import AccountState, BotSettings, DecisionSnapshot, Quote, Signal
 
+HISTORICAL_QUARANTINE_REASON = "legacy_live_execution_drill_is_quarantined"
+
 
 @dataclass(frozen=True, slots=True)
 class LiveExecutionSafetyDrillResult:
@@ -30,6 +32,10 @@ class LiveExecutionSafetyDrillResult:
 
 
 class DrillBroker:
+    execution_environment = "contract_test"
+    network_enabled = False
+    production_order_capable = False
+
     def __init__(self, repository: InMemoryRepository) -> None:
         self.repository = repository
         self.place_order_calls = 0
@@ -75,6 +81,9 @@ class DrillBroker:
 
 
 async def run_live_execution_safety_drill() -> LiveExecutionSafetyDrillResult:
+    raise RuntimeError(HISTORICAL_QUARANTINE_REASON)
+
+    # Historical implementation retained below only for audit archaeology.
     missing_evidence_blocked = await _drill_missing_evidence_block()
     repository = InMemoryRepository(_live_settings())
     broker = DrillBroker(repository)
@@ -130,7 +139,7 @@ def format_live_execution_safety_drill_result(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run local live execution safety invariants without provider I/O."
+        description="Historical legacy-live drill; execution is permanently quarantined."
     )
     parser.parse_args(argv)
     try:

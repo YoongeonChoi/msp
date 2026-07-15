@@ -21,15 +21,12 @@ from app.adapters.broker.toss_models import (
     TossHoldingsOverview,
     TossKrMarketCalendarResponse,
     TossOrder,
-    TossOrderCreateResult,
     TossOrderListQuery,
-    TossOrderOperationResult,
     TossOrderPage,
     TossPriceResponse,
 )
 from app.application.ports.broker_port import (
     BrokerCancelOrderResult,
-    BrokerOrderReconciliationStatus,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatusResult,
@@ -57,14 +54,11 @@ class TossGetRequest:
     account_seq: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class TossPostRequest:
-    path: str
-    json: Mapping[str, str | int | bool]
-    account_seq: int | None = None
-
-
 class TossClient:
+    execution_environment = "production_read_only"
+    network_enabled = True
+    production_order_capable = False
+
     def __init__(
         self,
         settings: Settings,
@@ -231,131 +225,33 @@ class TossClient:
         return envelope.result
 
     async def list_orders(self, query: TossOrderListQuery) -> TossOrderPage:
-        params: dict[str, str | int] = {"status": query.status.value}
-        if query.symbol is not None:
-            params["symbol"] = query.symbol
-        if query.from_date is not None:
-            params["from"] = query.from_date.isoformat()
-        if query.to_date is not None:
-            params["to"] = query.to_date.isoformat()
-        if query.cursor is not None:
-            params["cursor"] = query.cursor
-        if query.limit is not None:
-            params["limit"] = query.limit
-        resolved_account_seq = await self._resolve_account_seq(query.account_seq)
-        envelope = await self._get_model(
-            TossGetRequest(
-                "/api/v1/orders",
-                params=params,
-                account_seq=resolved_account_seq,
-            ),
-            TossApiResponse[TossOrderPage],
+        del query
+        raise ProviderUnavailableError(
+            "toss",
+            "production_order_status_network_is_quarantined",
         )
-        return envelope.result
 
     async def get_order(self, order_id: str, account_seq: int | None = None) -> TossOrder:
-        resolved_account_seq = await self._resolve_account_seq(account_seq)
-        envelope = await self._get_model(
-            TossGetRequest(
-                f"/api/v1/orders/{order_id}",
-                account_seq=resolved_account_seq,
-            ),
-            TossApiResponse[TossOrder],
+        del order_id, account_seq
+        raise ProviderUnavailableError(
+            "toss",
+            "production_order_status_network_is_quarantined",
         )
-        return envelope.result
 
     async def get_order_status(self, provider_order_id: str) -> BrokerOrderStatusResult:
-        order = await self.get_order(provider_order_id)
-        if order.order_id != provider_order_id:
-            raise ProviderSchemaError("toss", "toss_order_status_identity_mismatch")
-        status = _map_toss_order_status(order.status)
-        reason = (
-            None
-            if status != "unknown_requires_manual_check"
-            else f"toss_order_status_{order.status}"
-        )
-        return BrokerOrderStatusResult(
-            provider_order_id=order.order_id,
-            status=status,
-            reason=reason,
-            raw_summary={
-                "order_id": order.order_id,
-                "symbol": order.symbol,
-                "side": order.side,
-                "order_type": order.order_type,
-                "status": order.status,
-                "quantity": str(order.quantity),
-                "filled_quantity": str(order.execution.filled_quantity),
-                "average_filled_price": (
-                    str(order.execution.average_filled_price)
-                    if order.execution.average_filled_price is not None
-                    else None
-                ),
-                "filled_amount": (
-                    str(order.execution.filled_amount)
-                    if order.execution.filled_amount is not None
-                    else None
-                ),
-                "ordered_at": order.ordered_at.isoformat(),
-                "canceled_at": order.canceled_at.isoformat() if order.canceled_at else None,
-            },
+        del provider_order_id
+        raise ProviderUnavailableError(
+            "toss",
+            "production_order_status_network_is_quarantined",
         )
 
     async def cancel_order(self, provider_order_id: str) -> BrokerCancelOrderResult:
-        if not provider_order_id:
-            raise ProviderSchemaError("toss", "toss_cancel_order_id_missing")
-        envelope = await self._post_model(
-            TossPostRequest(
-                f"/api/v1/orders/{provider_order_id}/cancel",
-                json={},
-                account_seq=await self._resolve_account_seq(None),
-            ),
-            TossApiResponse[TossOrderOperationResult],
-        )
-        cancel_order_id = envelope.result.order_id
-        return BrokerCancelOrderResult(
-            original_provider_order_id=provider_order_id,
-            cancel_provider_order_id=cancel_order_id,
-            raw_summary={
-                "original_order_id": provider_order_id,
-                "cancel_order_id": cancel_order_id,
-            },
-        )
+        del provider_order_id
+        raise ProviderUnavailableError("toss", "production_live_cancel_is_quarantined")
 
     async def place_order(self, request: BrokerOrderRequest) -> BrokerOrderResult:
-        _validate_live_order_request(request)
-        envelope = await self._post_model(
-            TossPostRequest(
-                "/api/v1/orders",
-                json={
-                    "clientOrderId": request.idempotency_key,
-                    "symbol": request.symbol,
-                    "side": "BUY" if request.side == "buy" else "SELL",
-                    "orderType": "LIMIT",
-                    "quantity": str(request.quantity),
-                    "price": str(request.limit_price_krw),
-                    "confirmHighValueOrder": request.amount_krw >= 100_000_000,
-                },
-                account_seq=await self._resolve_account_seq(None),
-            ),
-            TossApiResponse[TossOrderCreateResult],
-        )
-        result = envelope.result
-        if result.client_order_id != request.idempotency_key:
-            raise ProviderUnknownError("toss", "toss_order_create_identity_mismatch")
-        return BrokerOrderResult(
-            provider_order_id=result.order_id,
-            status="sent",
-            raw_summary={
-                "order_id": result.order_id,
-                "client_order_id": result.client_order_id,
-                "symbol": request.symbol,
-                "side": request.side,
-                "order_type": "LIMIT",
-                "quantity": request.quantity,
-                "limit_price_krw": request.limit_price_krw,
-            },
-        )
+        del request
+        raise ProviderUnavailableError("toss", "production_live_order_is_quarantined")
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -383,28 +279,6 @@ class TossClient:
             raise ProviderUnavailableError("toss", "toss_read_request_failed") from exc
         except ValidationError as exc:
             raise ProviderSchemaError("toss", "toss_read_schema_invalid") from exc
-
-    async def _post_model(
-        self,
-        request: TossPostRequest,
-        model_type: type[ParsedModel],
-    ) -> ParsedModel:
-        try:
-            response = await self.client.post(
-                f"{self.base_url}{request.path}",
-                json=request.json,
-                headers=await self._headers(request.account_seq),
-            )
-            _raise_for_toss_status(response)
-            return model_type.model_validate_json(response.text)
-        except httpx.TimeoutException as exc:
-            raise ProviderTimeoutError("toss", "toss_write_timeout") from exc
-        except httpx.HTTPStatusError as exc:
-            raise _provider_error_from_response(exc.response) from exc
-        except httpx.RequestError as exc:
-            raise ProviderUnavailableError("toss", "toss_write_request_failed") from exc
-        except ValidationError as exc:
-            raise ProviderSchemaError("toss", "toss_write_schema_invalid") from exc
 
     async def _headers(self, account_seq: int | None = None) -> dict[str, str]:
         token = await self.auth.access_token()
@@ -466,22 +340,6 @@ def _kr_symbol(value: str) -> str | None:
     return None
 
 
-def _map_toss_order_status(status: str) -> BrokerOrderReconciliationStatus:
-    match status:
-        case "PENDING" | "PENDING_CANCEL" | "PENDING_REPLACE":
-            return "sent"
-        case "PARTIAL_FILLED":
-            return "partial_filled"
-        case "FILLED":
-            return "filled"
-        case "CANCELED":
-            return "canceled"
-        case "REJECTED":
-            return "rejected"
-        case _:
-            return "unknown_requires_manual_check"
-
-
 def _decimal_krw_to_int(value: Decimal) -> int:
     if value < 0 or value != value.to_integral_value():
         raise ProviderSchemaError("toss", "toss_krw_amount_not_nonnegative_integer")
@@ -506,17 +364,3 @@ def _daily_loss_pct(holdings: TossHoldingsOverview) -> float:
     if daily_amount >= 0 and daily_rate >= 0:
         return 0.0
     return abs(float(daily_rate))
-
-
-def _validate_live_order_request(request: BrokerOrderRequest) -> None:
-    if not request.idempotency_key or len(request.idempotency_key) > 36:
-        raise ProviderSchemaError("toss", "toss_client_order_id_invalid")
-    if not all(
-        character.isalnum() or character in {"-", "_"}
-        for character in request.idempotency_key
-    ):
-        raise ProviderSchemaError("toss", "toss_client_order_id_invalid")
-    if request.quantity <= 0:
-        raise ProviderSchemaError("toss", "toss_order_quantity_invalid")
-    if request.limit_price_krw <= 0:
-        raise ProviderSchemaError("toss", "toss_order_price_invalid")
