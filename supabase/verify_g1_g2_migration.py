@@ -147,11 +147,180 @@ $$;
 
 def apply_repository(container: str) -> None:
     psql(container, bootstrap_sql())
+    convergence_before: dict[str, object] | None = None
     for migration in sorted(MIGRATIONS.glob("*.sql")):
+        if migration.name == "20260718165749_pgcrypto_schema_convergence.sql":
+            convergence_before = pgcrypto_convergence_snapshot(container)
         psql(container, migration.read_text(encoding="utf-8"))
         print(f"PASS migration {migration.name}")
+        if migration.name == "20260718165749_pgcrypto_schema_convergence.sql":
+            verify_pgcrypto_transition(container, convergence_before)
+    if convergence_before is None:
+        raise VerificationError("pgcrypto convergence migration was not applied")
     psql(container, SEED.read_text(encoding="utf-8"))
     print("PASS seed non-live defaults")
+
+
+def pgcrypto_convergence_snapshot(container: str) -> dict[str, object]:
+    result = psql(container, r"""
+with extension_state as (
+  select
+    n.nspname as schema_name,
+    pg_get_userbyid(e.extowner) as extension_owner,
+    to_regprocedure(format('%I.digest(bytea,text)', n.nspname))::oid
+      as digest_bytea_oid,
+    to_regprocedure(format('%I.digest(text,text)', n.nspname))::oid
+      as digest_text_oid
+  from pg_extension e
+  join pg_namespace n on n.oid=e.extnamespace
+  where e.extname='pgcrypto'
+), application_routines as (
+  select
+    p.oid,
+    p.prosecdef,
+    to_jsonb(p) - 'prosrc' - 'prosqlbody' as metadata,
+    pg_get_functiondef(p.oid) as definition
+  from pg_proc p
+  join pg_namespace n on n.oid=p.pronamespace
+  where n.nspname in ('private','api','worker_api')
+    and p.prokind in ('f','p')
+)
+select jsonb_build_object(
+  'extension_schema', (select schema_name from extension_state),
+  'extension_owner', (select extension_owner from extension_state),
+  'extensions_schema_owner', (
+    select pg_get_userbyid(nspowner) from pg_namespace where nspname='extensions'
+  ),
+  'digest_bytea_oid', (select digest_bytea_oid from extension_state),
+  'digest_text_oid', (select digest_text_oid from extension_state),
+  'digest_metadata_md5', (
+    select md5(coalesce(string_agg(
+      (to_jsonb(p) - 'pronamespace')::text,
+      E'\n' order by p.oid
+    ), ''))
+    from pg_proc p
+    where p.oid in (
+      (select digest_bytea_oid from extension_state),
+      (select digest_text_oid from extension_state)
+    )
+  ),
+  'public_bytea_absent', to_regprocedure('public.digest(bytea,text)') is null,
+  'public_text_absent', to_regprocedure('public.digest(text,text)') is null,
+  'public_reference_count', (
+    select count(*) from application_routines
+    where definition
+      ~* '"?public"?[[:space:]]*\.[[:space:]]*"?digest"?[[:space:]]*\('
+  ),
+  'unqualified_reference_count', (
+    select count(*) from application_routines
+    where definition ~* '(^|[^a-zA-Z0-9_."])"?digest"?[[:space:]]*\('
+  ),
+  'routine_count', (select count(*) from application_routines),
+  'routine_metadata_md5', (
+    select md5(coalesce(string_agg(metadata::text, E'\n' order by oid), ''))
+    from application_routines
+  ),
+  'routine_definition_md5', (
+    select md5(coalesce(string_agg(definition, E'\n' order by oid), ''))
+    from application_routines
+  ),
+  'unsafe_create_count', (
+    select count(*)
+    from pg_roles r
+    where r.rolname in ('anon','authenticated','service_role','authenticator')
+      and has_schema_privilege(
+        r.oid,
+        to_regnamespace('extensions'),
+        'CREATE'
+      )
+  ) + (
+    select count(*)
+    from pg_namespace n
+    cross join lateral aclexplode(
+      coalesce(n.nspacl, acldefault('n', n.nspowner))
+    ) acl
+    where n.nspname='extensions'
+      and acl.grantee<>n.nspowner
+      and lower(acl.privilege_type)='create'
+  ),
+  'unsafe_digest_caller_count', (
+    select count(*)
+    from application_routines p
+    cross join pg_roles r
+    where not p.prosecdef
+      and p.definition
+        ~* '"?extensions"?[[:space:]]*\.[[:space:]]*"?digest"?[[:space:]]*\('
+      and r.rolname in ('anon','authenticated','service_role','authenticator')
+      and has_function_privilege(r.oid, p.oid, 'EXECUTE')
+      and not has_schema_privilege(
+        r.oid,
+        to_regnamespace('extensions'),
+        'USAGE'
+      )
+  )
+);
+""").stdout.strip()
+    return json.loads(result)
+
+
+def require_pgcrypto_converged(snapshot: dict[str, object]) -> None:
+    if (
+        snapshot.get("extension_schema") != "extensions"
+        or snapshot.get("extension_owner") not in ("postgres", "supabase_admin")
+        or snapshot.get("extensions_schema_owner") not in ("postgres", "supabase_admin")
+        or snapshot.get("digest_bytea_oid") is None
+        or snapshot.get("digest_text_oid") is None
+        or snapshot.get("public_bytea_absent") is not True
+        or snapshot.get("public_text_absent") is not True
+        or snapshot.get("public_reference_count") != 0
+        or snapshot.get("unqualified_reference_count") != 0
+        or snapshot.get("unsafe_create_count") != 0
+        or snapshot.get("unsafe_digest_caller_count") != 0
+    ):
+        raise VerificationError(f"pgcrypto convergence mismatch: {snapshot}")
+
+
+def verify_pgcrypto_transition(
+    container: str,
+    before: dict[str, object] | None,
+) -> None:
+    if before is None or before.get("extension_schema") not in ("public", "extensions"):
+        raise VerificationError(f"invalid pre-convergence pgcrypto state: {before}")
+    after = pgcrypto_convergence_snapshot(container)
+    require_pgcrypto_converged(after)
+    stable_keys = (
+        "digest_bytea_oid",
+        "digest_text_oid",
+        "digest_metadata_md5",
+        "routine_count",
+        "routine_metadata_md5",
+    )
+    changed = [key for key in stable_keys if before.get(key) != after.get(key)]
+    if changed:
+        raise VerificationError(
+            f"pgcrypto transition changed stable catalog fields {changed}: "
+            f"before={before}, after={after}"
+        )
+    print("PASS pgcrypto forward convergence preserves OIDs and routine metadata")
+
+
+def verify_pgcrypto_convergence_idempotency(container: str) -> None:
+    before = pgcrypto_convergence_snapshot(container)
+    migration = MIGRATIONS / "20260718165749_pgcrypto_schema_convergence.sql"
+    psql(container, migration.read_text(encoding="utf-8"))
+    after = pgcrypto_convergence_snapshot(container)
+    require_pgcrypto_converged(after)
+    if before != after:
+        raise VerificationError(
+            f"pgcrypto convergence is not idempotent: before={before}, after={after}"
+        )
+    probe = psql(container, """
+select encode(extensions.digest('pgcrypto-convergence-verifier','sha256'),'hex');
+""").stdout.strip()
+    expected = hashlib.sha256(b"pgcrypto-convergence-verifier").hexdigest()
+    if probe != expected:
+        raise VerificationError(f"pgcrypto digest behavior mismatch: {probe}")
+    print("PASS pgcrypto convergence is idempotent and digest output is stable")
 
 
 def verify_populated_0015_upgrade(container: str) -> None:
@@ -613,6 +782,23 @@ set role {role};
 
 
 def verify_catalog(container: str) -> None:
+    extension_boundary = psql(container, """
+select concat_ws('|',
+  (select n.nspname
+   from pg_extension e
+   join pg_namespace n on n.oid = e.extnamespace
+   where e.extname = 'pgcrypto'),
+  to_regprocedure('extensions.digest(bytea,text)') is not null,
+  to_regprocedure('extensions.digest(text,text)') is not null,
+  to_regprocedure('public.digest(bytea,text)') is null,
+  to_regprocedure('public.digest(text,text)') is null
+);
+""").stdout.strip()
+    if extension_boundary != "extensions|t|t|t|t":
+        raise VerificationError(
+            f"pgcrypto extension boundary mismatch: {extension_boundary}"
+        )
+
     result = psql(container, """
 select concat_ws('|',
   (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
@@ -710,8 +896,9 @@ select concat_ws('|',
     ):
         raise VerificationError(f"catalog boundary mismatch: {result}")
     print(
-        "PASS catalog/API allowlists, explicit source/settlement/unknown contracts, "
-        "private definer ACLs and signal-only Realtime"
+        "PASS extensions-owned pgcrypto, catalog/API allowlists, explicit "
+        "source/settlement/unknown contracts, private definer ACLs and "
+        "signal-only Realtime"
     )
 
 
@@ -1790,7 +1977,7 @@ insert into private.order_intents (
 )
 select
   md5('recon-intent-'||value::text)::uuid,
-  encode(digest('recon-semantic-'||value::text,'sha256'),'hex'),
+  encode(extensions.digest('recon-semantic-'||value::text,'sha256'),'hex'),
   'paper-primary','paper','verifier-strategy','{decision}','{risk}',
   md5('recon-intent-'||value::text)::uuid,'005930','buy',1,10000,
   clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '3 minutes',
@@ -2119,7 +2306,7 @@ select
   '{calendar_id}',
   (clock_timestamp() at time zone 'Asia/Seoul')::date + offset_value,
   true,
-  encode(digest(convert_to(
+  encode(extensions.digest(convert_to(
     '{calendar_id}:' || (
       (clock_timestamp() at time zone 'Asia/Seoul')::date + offset_value
     )::text,
@@ -2929,7 +3116,7 @@ insert into private.order_attempts (
 with attack as (
   select clock_timestamp() as observed_at
 ), payload as (
-  select observed_at,encode(digest(convert_to(concat_ws('|',
+  select observed_at,encode(extensions.digest(convert_to(concat_ws('|',
     '{intent_id}','1','filled','provider-order-attack','',
     private.utc_iso8601(observed_at),'1','10000','0','0','','','',
     'terminal_without_fill_attack'
@@ -3098,7 +3285,7 @@ where intent.id='{intent_id}';
         label="partial-resume-accounting",
     )
     observation_hash = psql(container, f"""
-select encode(digest(convert_to(concat_ws('|',
+select encode(extensions.digest(convert_to(concat_ws('|',
   '{intent_id}','1','partial_filled','paper:{intent_id}',
   'paper:{intent_id}:fill:1',private.utc_iso8601('{observed['observed_at']}'::timestamptz),
   '1','9000','9','0','1','9000','{observed['settlement_date']}',
@@ -3484,7 +3671,7 @@ select jsonb_build_object(
             label=f"cash-settlement-{intent_id}",
         )
         observation_hash = psql(container, f"""
-select encode(digest(convert_to(concat_ws('|',
+select encode(extensions.digest(convert_to(concat_ws('|',
   '{intent_id}','1','filled','paper:{intent_id}',
   'paper:{intent_id}:fill:1',
   private.utc_iso8601('{observed['observed_at']}'::timestamptz),
@@ -3939,7 +4126,7 @@ select '{case['boundary_filled_at']}'::timestamptz-interval '30 seconds';
 """).stdout.strip()
         reason_code = "provider_state_ambiguous"
         observation_hash = psql(container, f"""
-select encode(digest(convert_to(concat_ws('|',
+select encode(extensions.digest(convert_to(concat_ws('|',
   '{case['intent']}','1','unknown_requires_manual_check',
   'paper:{case['intent']}','',private.utc_iso8601('{observed_at}'::timestamptz),
   '0','0','0','0','','','', '{reason_code}'
@@ -4371,7 +4558,7 @@ select concat_ws('|',
     intent.position_quantity_snapshot * intent.position_average_cost_krw
   )::bigint,
   intent.position_cost_basis_sha256 = pg_catalog.encode(
-    public.digest(
+    extensions.digest(
       pg_catalog.convert_to(
         jsonb_build_object(
           'method','moving_weighted_average_v1',
@@ -4581,7 +4768,7 @@ from worker_api.mark_dispatch_started(
     observed_at = psql(container, "select clock_timestamp();").stdout.strip()
     reason_code = "provider_state_ambiguous"
     observation_hash = psql(container, f"""
-select encode(digest(convert_to(concat_ws('|',
+select encode(extensions.digest(convert_to(concat_ws('|',
   '{intent_id}','1','unknown_requires_manual_check','paper:{intent_id}',
   '',private.utc_iso8601('{observed_at}'::timestamptz),
   '0','0','0','0','','','',
@@ -4962,6 +5149,7 @@ def main() -> int:
         ])
         wait_for_postgres(pg)
         apply_repository(pg)
+        verify_pgcrypto_convergence_idempotency(pg)
         psql(pg, fixture_sql())
         verify_catalog(pg)
         verify_strict_auth(pg)
