@@ -22,6 +22,26 @@ provider contracts. It is not wired to persistence or features and does not
 claim provider finality, immutability, completeness, corporate-action safety,
 or overall DQ approval.
 
+The pure daily-candle as-of selector keeps that timing evidence attached to
+the selected candle. It admits a candidate only when
+`evidence_available_at <= as_of`, while ordering eligible price corrections by
+the candle observation clock. This separation prevents a late calendar proof
+for an older candle from rolling back a newer correction. Every source is
+revalidated and exact-bound before filtering; same-clock price conflicts,
+historical hash recurrence, and multiple candle identities for one daily key
+fail closed. The selector is deterministic across input order and equivalent
+timezone representations.
+
+This selector operates only on one exact built-in list or tuple supplied by the
+caller, and "selected" means latest only within that canonical candidate
+snapshot. Its result type cannot be directly constructed to bypass the
+snapshot-wide ambiguity checks. The selector does not prove that the snapshot
+is complete, durable, authentic, provider-final, corporate-action safe,
+DQ-approved, feature-ready, or authorized for research promotion or order
+execution. It also does not certify calendar-revision finality or quarantine a
+calendar A-to-B-to-A recurrence. SHA-256 values are integrity and lineage
+checks, not provider signatures.
+
 Append-only candle revision semantics are defined behind a dedicated storage
 port and an in-memory reference adapter. This adapter is not durable and is not
 wired into collection or feature calculation. A repeated latest hash is an

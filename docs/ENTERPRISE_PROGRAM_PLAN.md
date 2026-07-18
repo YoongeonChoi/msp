@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑과 timing-only 결합 gate만 있고 durable persistence·quarantine·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑, evidence-time as-of 선택이 있지만 durable persistence·quarantine·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -118,6 +118,12 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 - daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
   다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
   corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다.
+- daily candle as-of selector는 모든 candle/timing source를 재검증·교차 결합하고
+  `evidence_available_at`으로 조회 시점 적격성을, `candle.observed_at`으로 correction
+  순서를 판단한다. 동일 시각 충돌·historical hash recurrence·daily identity drift는
+  fail closed이지만 "latest"는 caller가 제공한 정확한 in-memory 후보 snapshot
+  내부에만 한정되며 snapshot의 완전성, durability 또는 calendar revision finality는
+  증명하지 않는다.
 - 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
   명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
   복원, lease·fencing 연속성, runtime 시작 경로 연결은 제공하지 않는다.
