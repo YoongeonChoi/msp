@@ -15,8 +15,10 @@ from app.domain.execution_v2.models import (
     ExecutionIntent,
     ExecutionInvariantError,
     MinuteBar,
+    PaperAccountSnapshot,
     PaperExecutionEvidence,
     PaperPositionCostBasis,
+    PaperPositionSnapshot,
     WorkerLease,
 )
 
@@ -433,6 +435,205 @@ async def test_moving_weighted_average_v1_matches_accounting_golden_vector() -> 
             *sell_result.accounting_transactions,
         )
     )
+
+
+async def test_quiescent_snapshot_restore_preserves_subsequent_accounting() -> None:
+    now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
+    original, lease = await _ready_kernel(now)
+    buy = _intent(
+        now,
+        fencing_token=lease.fencing_token,
+        quantity=2,
+        strategy_version="strategy-buy-before-restart",
+    )
+    assert await original.reserve_intent(buy, now=now)
+    await original.mark_dispatch_started(buy, now=buy.eligible_at)
+    buy_bar = _bar(buy.eligible_at, volume=200)
+    await original.execute_paper(
+        buy,
+        [buy_bar],
+        cost_schedule=_cost_schedule(buy),
+        execution_evidence=_execution_evidence(buy),
+        now=buy_bar.completed_at,
+    )
+    restart_snapshot = await original.account_snapshot(buy.account_id)
+    assert restart_snapshot.reserved_cash_krw == 0
+    assert restart_snapshot.reserved_position_quantities == ()
+    restart_at = buy_bar.completed_at + timedelta(seconds=1)
+
+    restored = InMemoryExecutionKernelV2("paper")
+    await restored.restore_quiescent_account(restart_snapshot)
+    assert await restored.account_snapshot(buy.account_id) == restart_snapshot
+    assert await restored.observations_for(buy.id) == ()
+    assert await restored.accounting_transactions_for(buy.id) == ()
+    await restored.replace_gate(
+        ExecutionGate(
+            account_id=buy.account_id,
+            environment="paper",
+            enabled=True,
+            control_epoch=1,
+            effective_at=restart_at,
+            expires_at=restart_at + timedelta(hours=8),
+        )
+    )
+    restored_lease = await restored.acquire_lease(
+        account_id=buy.account_id,
+        holder_id="worker-a",
+        now=restart_at,
+        ttl=timedelta(hours=8),
+    )
+    sell_now = restart_at + timedelta(minutes=1)
+    original_sell = _intent(
+        sell_now,
+        fencing_token=lease.fencing_token,
+        quantity=1,
+        side="sell",
+        strategy_version="strategy-sell-after-restart",
+        limit_price_krw=9_000,
+    )
+    restored_sell = _intent(
+        sell_now,
+        fencing_token=restored_lease.fencing_token,
+        quantity=1,
+        side="sell",
+        strategy_version="strategy-sell-after-restart",
+        limit_price_krw=9_000,
+    )
+
+    for kernel, sell in (
+        (original, original_sell),
+        (restored, restored_sell),
+    ):
+        assert await kernel.reserve_intent(sell, now=sell_now)
+        await kernel.mark_dispatch_started(sell, now=sell.eligible_at)
+        await kernel.execute_paper(
+            sell,
+            [_bar(sell.eligible_at, volume=100, open_krw=10_000)],
+            cost_schedule=_cost_schedule(sell),
+            execution_evidence=_execution_evidence(sell),
+            now=_execution_now(sell),
+        )
+
+    assert await restored.account_snapshot(restored_sell.account_id) == (
+        await original.account_snapshot(original_sell.account_id)
+    )
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        PaperAccountSnapshot(
+            account_id="paper-account",
+            cash_krw=100_000,
+            reserved_cash_krw=1,
+            positions=(),
+            reserved_position_quantities=(),
+        ),
+        PaperAccountSnapshot(
+            account_id="paper-account",
+            cash_krw=100_000,
+            reserved_cash_krw=0,
+            positions=(
+                PaperPositionSnapshot(
+                    symbol="005930",
+                    quantity=2,
+                    total_cost_krw=20_000,
+                ),
+            ),
+            reserved_position_quantities=(("005930", 1),),
+        ),
+    ],
+)
+async def test_restore_rejects_nonquiescent_snapshot(
+    snapshot: PaperAccountSnapshot,
+) -> None:
+    kernel = InMemoryExecutionKernelV2("paper")
+
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_requires_quiescent_snapshot",
+    ):
+        await kernel.restore_quiescent_account(snapshot)
+
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_is_not_configured",
+    ):
+        await kernel.account_snapshot(snapshot.account_id)
+
+
+async def test_restore_rejects_nonpaper_or_started_target() -> None:
+    snapshot = PaperAccountSnapshot(
+        account_id="paper-account",
+        cash_krw=100_000,
+        reserved_cash_krw=0,
+        positions=(),
+        reserved_position_quantities=(),
+    )
+    invalid_snapshot_kernel = InMemoryExecutionKernelV2("paper")
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_snapshot_invalid",
+    ):
+        invalid_snapshot: object = object()
+        await invalid_snapshot_kernel.restore_quiescent_account(
+            invalid_snapshot  # type: ignore[arg-type]
+        )
+
+    contract_kernel = InMemoryExecutionKernelV2("contract_test")
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_requires_paper_kernel",
+    ):
+        await contract_kernel.restore_quiescent_account(snapshot)
+
+    configured_kernel = InMemoryExecutionKernelV2("paper")
+    await configured_kernel.configure_account(snapshot.account_id, cash_krw=1)
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_target_already_configured",
+    ):
+        await configured_kernel.restore_quiescent_account(snapshot)
+
+    restored_kernel = InMemoryExecutionKernelV2("paper")
+    await restored_kernel.restore_quiescent_account(snapshot)
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="cannot_reconfigure_restored_paper_account",
+    ):
+        await restored_kernel.configure_account(snapshot.account_id, cash_krw=1)
+    assert await restored_kernel.account_snapshot(snapshot.account_id) == snapshot
+
+    gated_kernel = InMemoryExecutionKernelV2("paper")
+    now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
+    await gated_kernel.replace_gate(
+        ExecutionGate(
+            account_id=snapshot.account_id,
+            environment="paper",
+            enabled=False,
+            control_epoch=1,
+            effective_at=now,
+            expires_at=now + timedelta(minutes=1),
+        )
+    )
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_target_already_gated",
+    ):
+        await gated_kernel.restore_quiescent_account(snapshot)
+
+    leased_kernel = InMemoryExecutionKernelV2("paper")
+    await leased_kernel.acquire_lease(
+        account_id=snapshot.account_id,
+        holder_id="worker-a",
+        now=now,
+        ttl=timedelta(minutes=1),
+    )
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_account_restore_target_already_leased",
+    ):
+        await leased_kernel.restore_quiescent_account(snapshot)
 
 
 async def _ready_kernel(

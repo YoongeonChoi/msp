@@ -955,6 +955,7 @@ def build_observation_history_sha256(
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
+
 @dataclass(frozen=True, slots=True)
 class PaperPositionSnapshot:
     symbol: str
@@ -985,9 +986,52 @@ class PaperAccountSnapshot:
         _require_text(self.account_id, "account_id")
         _require_nonnegative_int(self.cash_krw, "cash_krw")
         _require_nonnegative_int(self.reserved_cash_krw, "reserved_cash_krw")
-        for symbol, quantity in self.reserved_position_quantities:
+        if self.reserved_cash_krw > self.cash_krw:
+            raise ExecutionInvariantError(
+                "paper_account_snapshot_reserved_cash_exceeds_cash"
+            )
+        if not isinstance(self.positions, tuple):
+            raise ExecutionInvariantError(
+                "paper_account_snapshot_positions_must_be_tuple"
+            )
+        position_quantities: dict[str, int] = {}
+        for position in self.positions:
+            if type(position) is not PaperPositionSnapshot:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_position_invalid"
+                )
+            if position.symbol in position_quantities:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_duplicate_position_symbol"
+                )
+            position_quantities[position.symbol] = position.quantity
+        if not isinstance(self.reserved_position_quantities, tuple):
+            raise ExecutionInvariantError(
+                "paper_account_snapshot_reserved_positions_must_be_tuple"
+            )
+        reserved_symbols: set[str] = set()
+        for item in self.reserved_position_quantities:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_reserved_position_invalid"
+                )
+            symbol, quantity = item
             _require_text(symbol, "reserved_position_symbol")
-            _require_nonnegative_int(quantity, "reserved_position_quantity")
+            _require_positive_int(quantity, "reserved_position_quantity")
+            if symbol in reserved_symbols:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_duplicate_reserved_symbol"
+                )
+            reserved_symbols.add(symbol)
+            position_quantity = position_quantities.get(symbol)
+            if position_quantity is None:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_reserved_symbol_missing_position"
+                )
+            if quantity > position_quantity:
+                raise ExecutionInvariantError(
+                    "paper_account_snapshot_reserved_quantity_exceeds_position"
+                )
 
     def quantity_for(self, symbol: str) -> int:
         return next(

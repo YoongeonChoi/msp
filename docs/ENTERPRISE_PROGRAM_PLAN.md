@@ -118,6 +118,9 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 - daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
   다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
   corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다.
+- 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
+  명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
+  복원, lease·fencing 연속성, runtime 시작 경로 연결은 제공하지 않는다.
 - `apps/worker/app/infrastructure/scheduler.py`는 메모리 loop이며 durable job state,
   lease, retry budget, dead-letter가 없다.
 - `apps/worker/app/infrastructure/outbox.py`는 DTO만 있고 alert delivery 경로에

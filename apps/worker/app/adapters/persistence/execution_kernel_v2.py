@@ -68,6 +68,7 @@ class InMemoryExecutionKernelV2:
         self._paper_simulator = paper_simulator or DeterministicPaperExecutionSimulator()
         self._lock = asyncio.Lock()
         self._accounts: dict[str, _MutablePaperAccount] = {}
+        self._restored_account_ids: set[str] = set()
         self._gates: dict[str, ExecutionGate] = {}
         self._leases: dict[str, WorkerLease] = {}
         self._last_fencing_tokens: dict[str, int] = {}
@@ -103,6 +104,10 @@ class InMemoryExecutionKernelV2:
                 total_cost_krw=position.total_cost_krw,
             )
         async with self._lock:
+            if account_id in self._restored_account_ids:
+                raise ExecutionInvariantError(
+                    "cannot_reconfigure_restored_paper_account"
+                )
             if any(intent.account_id == account_id for intent in self._intents_by_id.values()):
                 raise ExecutionInvariantError("cannot_reconfigure_account_after_intent_reservation")
             self._accounts[account_id] = _MutablePaperAccount(
@@ -111,6 +116,70 @@ class InMemoryExecutionKernelV2:
                 positions=normalized_positions,
                 reserved_position_quantities={},
             )
+
+    async def restore_quiescent_account(
+        self,
+        snapshot: PaperAccountSnapshot,
+    ) -> None:
+        if self.environment != "paper":
+            raise ExecutionInvariantError(
+                "paper_account_restore_requires_paper_kernel"
+            )
+        if type(snapshot) is not PaperAccountSnapshot:
+            raise ExecutionInvariantError("paper_account_restore_snapshot_invalid")
+        snapshot = PaperAccountSnapshot(
+            account_id=snapshot.account_id,
+            cash_krw=snapshot.cash_krw,
+            reserved_cash_krw=snapshot.reserved_cash_krw,
+            positions=snapshot.positions,
+            reserved_position_quantities=(
+                snapshot.reserved_position_quantities
+            ),
+        )
+        if (
+            snapshot.reserved_cash_krw != 0
+            or snapshot.reserved_position_quantities
+        ):
+            raise ExecutionInvariantError(
+                "paper_account_restore_requires_quiescent_snapshot"
+            )
+        restored_positions = {
+            position.symbol: _MutablePosition(
+                quantity=position.quantity,
+                total_cost_krw=position.total_cost_krw,
+            )
+            for position in snapshot.positions
+        }
+        async with self._lock:
+            if snapshot.account_id in self._accounts:
+                raise ExecutionInvariantError(
+                    "paper_account_restore_target_already_configured"
+                )
+            if snapshot.account_id in self._gates:
+                raise ExecutionInvariantError(
+                    "paper_account_restore_target_already_gated"
+                )
+            if snapshot.account_id in self._last_fencing_tokens:
+                raise ExecutionInvariantError(
+                    "paper_account_restore_target_already_leased"
+                )
+            if any(
+                intent.account_id == snapshot.account_id
+                for intent in self._intents_by_id.values()
+            ) or any(
+                reservation.account_id == snapshot.account_id
+                for reservation in self._reservations_by_intent.values()
+            ):
+                raise ExecutionInvariantError(
+                    "paper_account_restore_target_has_execution_state"
+                )
+            self._accounts[snapshot.account_id] = _MutablePaperAccount(
+                cash_krw=snapshot.cash_krw,
+                reserved_cash_krw=0,
+                positions=restored_positions,
+                reserved_position_quantities={},
+            )
+            self._restored_account_ids.add(snapshot.account_id)
 
     async def replace_gate(self, gate: ExecutionGate) -> None:
         if gate.environment != self.environment:

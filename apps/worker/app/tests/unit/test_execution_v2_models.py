@@ -12,8 +12,10 @@ from app.domain.execution_v2.models import (
     ExecutionInvariantError,
     ExecutionObservation,
     LedgerPosting,
+    PaperAccountSnapshot,
     PaperExecutionEvidence,
     PaperFill,
+    PaperPositionSnapshot,
     build_provider_observation_sha256,
     build_semantic_key,
     canonical_semantic_key_payload,
@@ -222,4 +224,59 @@ def test_unbalanced_accounting_transaction_is_rejected() -> None:
                 LedgerPosting("cash", debit_krw=100),
                 LedgerPosting("proceeds", credit_krw=99),
             ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("snapshot_kwargs", "reason"),
+    [
+        (
+            {
+                "cash_krw": 10,
+                "reserved_cash_krw": 11,
+                "positions": (),
+                "reserved_position_quantities": (),
+            },
+            "paper_account_snapshot_reserved_cash_exceeds_cash",
+        ),
+        (
+            {
+                "cash_krw": 10,
+                "reserved_cash_krw": 0,
+                "positions": (
+                    PaperPositionSnapshot("005930", 1, 1),
+                    PaperPositionSnapshot("005930", 2, 2),
+                ),
+                "reserved_position_quantities": (),
+            },
+            "paper_account_snapshot_duplicate_position_symbol",
+        ),
+        (
+            {
+                "cash_krw": 10,
+                "reserved_cash_krw": 0,
+                "positions": (),
+                "reserved_position_quantities": (("005930", 1),),
+            },
+            "paper_account_snapshot_reserved_symbol_missing_position",
+        ),
+        (
+            {
+                "cash_krw": 10,
+                "reserved_cash_krw": 0,
+                "positions": (PaperPositionSnapshot("005930", 1, 1),),
+                "reserved_position_quantities": (("005930", 2),),
+            },
+            "paper_account_snapshot_reserved_quantity_exceeds_position",
+        ),
+    ],
+)
+def test_paper_account_snapshot_rejects_incoherent_state(
+    snapshot_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    with pytest.raises(ExecutionInvariantError, match=reason):
+        PaperAccountSnapshot(
+            account_id="paper-account",
+            **snapshot_kwargs,  # type: ignore[arg-type]
         )

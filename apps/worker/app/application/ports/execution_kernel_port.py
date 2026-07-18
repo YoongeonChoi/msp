@@ -118,6 +118,14 @@ class ExecutionKernelPort(Protocol):
         ...
 
 
+class QuiescentPaperAccountRestorePort(Protocol):
+    async def restore_quiescent_account(
+        self,
+        snapshot: PaperAccountSnapshot,
+    ) -> None:
+        ...
+
+
 class ContractDispatchPort(Protocol):
     async def mark_dispatch_started(
         self,
