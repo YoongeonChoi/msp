@@ -45,7 +45,8 @@ approval and dedicated staging credentials.
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
 36. `20260718165749_pgcrypto_schema_convergence.sql`
 37. `20260719001947_pit_candle_revision_store.sql`
-38. `seed.sql`
+38. `20260719010000_pit_daily_candle_timing_store.sql`
+39. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -94,8 +95,12 @@ The timestamp migrations extend that boundary in this order:
   use the schema-qualified `extensions.digest` reference.
 - `20260719001947` adds a private, append-only daily-candle revision ledger,
   mutable serialized stream heads, durable ambiguity quarantine, and one
-  service-role-only Worker RPC. It does not persist or certify calendar timing
-  evidence.
+  service-role-only Worker RPC.
+- `20260719010000` adds append-only calendar revisions and exact daily-candle
+  timing bindings. PostgreSQL derives the binding from immutable candle and
+  calendar rows, records idempotent request receipts, and durably quarantines
+  clock, recurrence, source, and binding conflicts. It does not wire collection,
+  provide a durable as-of reader, or certify provider finality.
 
 ## Required project configuration
 
@@ -124,6 +129,7 @@ PostgreSQL instance:
 ```bash
 python supabase/verify_g1_g2_migration.py
 python supabase/verify_pit_candle_revision_store.py
+python supabase/verify_pit_daily_candle_timing_store.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -136,7 +142,9 @@ operation/reconciliation claims, and Worker RPC visibility. Also run the Python
 contract tests and repository safety checks. The dedicated PIT verifier adds
 Python/SQL canonical-hash vectors, exact replay and correction semantics,
 concurrent first-write serialization, durable quarantine, direct-table denial,
-and a populated pre-migration upgrade check.
+and a populated pre-migration upgrade check. The timing verifier additionally
+checks calendar revision semantics, exact immutable source binding, request
+idempotency conflicts, derived availability time, and forged-source rejection.
 
 Do not use the service role or a database owner session as evidence for the
 authenticated/anonymous negative matrix. Hosted staging additionally requires

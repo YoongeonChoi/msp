@@ -10,17 +10,20 @@ The Toss KR market-calendar adapter can map one explicitly requested date into
 strict point-in-time session evidence. It preserves a closed day without
 current regular hours, requires the next business day's KST regular session,
 binds the evidence to a pinned OpenAPI artifact hash, and rejects inconsistent
-date ordering or timestamps. This evidence is not persisted and does not by
-itself certify a completed candle or make data feature-ready.
+date ordering or timestamps. The pure adapter does not persist the result; an
+explicit Worker-only persistence adapter can submit one canonical calendar
+observation together with its timing evidence. Neither path by itself certifies
+a completed candle or makes data feature-ready.
 
 A pure domain timing gate can combine one daily candle with one open-session
 calendar revision only when the candle event's KST date matches that session
 date and both source observations were made at or after the next business
 day's regular start. The resulting PIT evidence records the later source
 observation as its availability time and binds both independently pinned
-provider contracts. It is not wired to persistence or features and does not
-claim provider finality, immutability, completeness, corporate-action safety,
-or overall DQ approval.
+provider contracts. The domain gate itself remains pure and is not wired to
+features. Persistence of an explicitly submitted result does not claim provider
+finality, collection completeness, corporate-action safety, or overall DQ
+approval.
 
 The pure daily-candle as-of selector keeps that timing evidence attached to
 the selected candle. It admits a candidate only when
@@ -36,11 +39,10 @@ This selector operates only on one exact built-in list or tuple supplied by the
 caller, and "selected" means latest only within that canonical candidate
 snapshot. Its result type cannot be directly constructed to bypass the
 snapshot-wide ambiguity checks. The selector does not prove that the snapshot
-is complete, durable, authentic, provider-final, corporate-action safe,
+is complete, authentic, provider-final, corporate-action safe,
 DQ-approved, feature-ready, or authorized for research promotion or order
-execution. It also does not certify calendar-revision finality or quarantine a
-calendar A-to-B-to-A recurrence. SHA-256 values are integrity and lineage
-checks, not provider signatures.
+execution. It is not yet backed by a durable as-of query source. SHA-256 values
+are integrity and lineage checks, not provider signatures.
 
 Append-only candle revision semantics are defined behind a dedicated storage
 port. The in-memory reference adapter and the explicit Supabase Worker adapter
@@ -54,10 +56,30 @@ observation-time regression returns a committed quarantine receipt before the
 Worker adapter raises a fail-closed domain error. Quarantine rows and accepted
 revisions are append-only, while direct table access is denied to runtime roles.
 
-This Supabase adapter is not wired into collection or feature calculation.
-The durable store proves only the behavior of observations actually submitted
-to its RPC; it does not prove collection completeness, provider authenticity or
-finality, corporate-action safety, calendar timing evidence, DQ approval, or
+The daily-candle timing store adds an append-only calendar revision ledger and
+an exact timing binding to an immutable candle revision. One service-role-only
+RPC recomputes calendar identity/content hashes, timing identity/content hashes,
+and `evidence_available_at` from the stored source rows. It never accepts a
+caller-provided hash or availability clock as authority. Request retries return
+the original durable receipt; source-clock regression, same-clock conflict,
+historical hash recurrence, request-key reuse, a missing exact source revision,
+or a forged binding produces a durable quarantine receipt and no accepted
+timing row. Runtime roles have no direct table access.
+
+Calendar evidence and timing evidence have separate acceptance semantics. A
+valid calendar correction may be committed before a later timing-stream guard
+quarantines the timing candidate. The current Worker adapter still raises a
+fail-closed timing error and does not expose that partial receipt as structured
+telemetry; database receipts remain the audit source until runtime wiring adds
+that observability.
+
+The explicit candle and timing Supabase adapters are not wired into collection,
+the runtime container, a durable as-of reader, or feature calculation. The
+stores prove only the behavior of observations submitted to their RPCs. A later
+exact re-observation cannot be timing-bound unless its exact immutable source
+observation exists, so the current store rejects that case instead of using a
+mutable stream-head clock. These contracts do not prove collection completeness,
+provider authenticity or finality, corporate-action safety, DQ approval, or
 feature/research/order readiness. An unresolved quarantine is evidence of an
 ambiguity, not an automated resolution or a promotion decision.
 

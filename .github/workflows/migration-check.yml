@@ -4,19 +4,25 @@ on:
   pull_request:
     paths:
       - "apps/worker/app/domain/market_data/point_in_time.py"
+      - "apps/worker/app/domain/market_data/point_in_time_calendar.py"
+      - "apps/worker/app/domain/market_data/daily_candle_timing.py"
       - "supabase/migrations/**"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
+      - "supabase/verify_pit_daily_candle_timing_store.py"
       - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
     paths:
       - "apps/worker/app/domain/market_data/point_in_time.py"
+      - "apps/worker/app/domain/market_data/point_in_time_calendar.py"
+      - "apps/worker/app/domain/market_data/daily_candle_timing.py"
       - "supabase/migrations/**"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
+      - "supabase/verify_pit_daily_candle_timing_store.py"
       - ".github/workflows/migration-check.yml"
 
 permissions:
@@ -82,6 +88,8 @@ jobs:
         run: python supabase/verify_g1_g2_migration.py
       - name: Verify PIT candle revision behavior
         run: python supabase/verify_pit_candle_revision_store.py
+      - name: Verify PIT daily-candle timing evidence
+        run: python supabase/verify_pit_daily_candle_timing_store.py
       - name: Check singleton paper safety seed
         shell: python
         run: |

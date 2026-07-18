@@ -153,6 +153,7 @@ WORKER_API_ALLOWLIST = frozenset(
         "claim_unknown_resolution_v2",
         "apply_unknown_resolution_v2",
         "append_pit_candle_observation_v1",
+        "append_pit_daily_candle_timing_evidence_v1",
     }
 )
 

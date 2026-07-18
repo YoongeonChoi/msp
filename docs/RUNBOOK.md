@@ -22,7 +22,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260715041912_sell_cost_basis_checkpoint_guard.sql`,
 `20260715041915_paper_evidence_and_sell_reservation_guards.sql`, and
 `20260718165749_pgcrypto_schema_convergence.sql`, followed by
-`20260719001947_pit_candle_revision_store.sql`.
+`20260719001947_pit_candle_revision_store.sql`, and
+`20260719010000_pit_daily_candle_timing_store.sql`.
 
 ## Start-of-day Paper checklist
 
