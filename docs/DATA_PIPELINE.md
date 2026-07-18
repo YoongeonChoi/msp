@@ -83,11 +83,23 @@ content conflict, or historical content-hash recurrence is durably quarantined
 and the Worker adapter fails closed. The RPC is service-role-only and direct
 table access remains denied.
 
-This calendar-only path is explicit and is not wired into collection, the
-runtime container, the scheduler, Desktop, features, backtests, strategy, or
-orders. Preserving a closed-day observation is source evidence, not proof of a
-complete KRX calendar, provider authenticity or finality, corporate-action
-safety, DQ approval, dataset certification, or research/order authorization.
+`CollectKrDailySessionObservation` is the explicit single-date application
+boundary between a `KrDailySessionSourcePort` and that observation store. One
+execution validates the exact date before I/O, performs one source fetch, binds
+the source `observed_at` to the local read window, canonicalizes the evidence,
+and performs one append. It then rebinds the durable receipt to the same
+calendar identity, evidence hash, and observation time. Source or store failure
+is returned as a fixed fail-closed error without an internal retry or upstream
+payload details. Once append has been attempted, a transport error means the
+write outcome is unknown; callers must inspect durable receipts/evidence before
+an explicit rerun and must not blind-retry the operation.
+
+This calendar collection path is not wired into the runtime container, the
+scheduler, automatic range backfill, Desktop, timing, features, backtests,
+strategy, or orders. Preserving one open- or closed-day observation is source
+evidence, not proof of a complete KRX calendar, provider authenticity or
+finality, corporate-action safety, DQ approval, dataset certification, or
+research/order authorization.
 
 `20260719050000_pit_calendar_as_of_reader.sql` adds the independent Worker-only
 `worker_api.list_pit_kr_daily_sessions_as_of_v1` read boundary for both open and

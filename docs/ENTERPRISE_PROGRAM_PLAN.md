@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 collection/runtime/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 자동 수집/runtime/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -125,7 +125,9 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   기존 append-only calendar content/occurrence ledger에 저장하고 exact replay,
   later unchanged occurrence, strictly-later correction을 구분한다. source-clock
   regression, same-clock conflict, historical hash recurrence는 durable quarantine으로
-  남기지만 collection/runtime에는 연결되지 않았고 전체 거래일 completeness를
+  남긴다. 명시적 single-date application use case는 정확히 한 번 source를 읽고
+  한 번 append하며 read-window와 durable receipt binding을 재검증하지만 runtime,
+  scheduler, 자동 range backfill에는 연결되지 않았고 전체 거래일 completeness를
   인증하지 않는다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
   calendar head가 전진한 뒤 과거 occurrence를 새 timing 요청으로 backfill하는 경로는
   fail closed이며 별도 계약이 필요하다.
@@ -562,7 +564,8 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E3` retained-open-session research-slice gate와 canonical scope/data-lineage fingerprint 로컬 구현
 - [x] `E3` 개장·휴장 독립 calendar observation store와 durable ambiguity quarantine 로컬 구현
 - [x] `E3` 개장·휴장 bounded durable calendar as-of range reader 로컬 구현
-- [ ] `E3` collection/runtime/feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
+- [x] `E3` 단일 날짜 calendar source→observation store collection use case 로컬 구현
+- [ ] `E3` runtime/scheduler/자동 range collection과 feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
 - [ ] `G1`, `G2` 독립 심사

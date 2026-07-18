@@ -18,6 +18,23 @@
 - `audit_events` UPDATE/DELETE와 hash-chain mutation을 일반 사용자·Worker 모두
   거부한다.
 
+### 1.1 Point-in-time calendar collection
+
+- 단일 날짜 collection request는 정확한 `date`만 허용하며 잘못된 값은 clock이나
+  source/store I/O 전에 거부한다.
+- 한 번의 실행은 source fetch와 append를 각각 정확히 한 번만 수행하고 내부 retry나
+  날짜 범위 loop를 만들지 않는다.
+- source session은 canonical payload로 다시 검증하며 `KR`, 요청 날짜, local read
+  window 안의 `observed_at`에 결합한다. clock 역행이나 timezone 누락은 append 전에
+  fail closed한다.
+- durable receipt의 calendar identity SHA, evidence SHA, `observed_at`이 source
+  session과 정확히 일치해야 하며 유효한 `stored`와 `replayed`만 반환한다.
+- source/store/clock 오류의 payload, credential, 응답 본문은 application error와
+  traceback에 노출하지 않는다. append 시도 후 transport 오류는 write outcome
+  unknown으로 취급하고 durable evidence 확인 없이 자동 재시도하지 않는다.
+- 단일 날짜 저장 성공은 calendar completeness, provider authenticity/finality,
+  corporate-action·DQ 승인, dataset/research/feature/order readiness를 의미하지 않는다.
+
 ## 2. G1 실행·회계 불변식
 
 - 동일 semantic intent 100개 경쟁 요청에서 정확히 하나만 예약된다.
