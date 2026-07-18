@@ -626,7 +626,7 @@ async function mockControlPlaneRealtime(
   { sendSignal = true }: { readonly sendSignal?: boolean } = {}
 ): Promise<void> {
   let signalVersion = 0;
-  await page.routeWebSocket(/e2e\.supabase\.test\/realtime\/v1\/websocket/, (socket) => {
+  await page.routeWebSocket(/e2e\.supabase\.co\/realtime\/v1\/websocket/, (socket) => {
     socket.onMessage((message) => {
       const [joinRef, ref, topic, event, payload] = JSON.parse(String(message)) as readonly [
         string | null,
@@ -694,7 +694,7 @@ async function mockOperationsRpc(
 ): Promise<void> {
   const snapshot = options.operationsSnapshot ?? makeCurrentOperationsSnapshot();
   const unknownSnapshot = options.unknownSnapshot ?? makeCurrentUnknownResolutionSnapshot(makeUnknownResolutionSnapshot());
-  await page.route("https://e2e.supabase.test/**", async (route) => {
+  await page.route("https://e2e.supabase.co/**", async (route) => {
     const request = route.request();
     if (request.method() === "OPTIONS") {
       await fulfillPreflight(route);

@@ -15,8 +15,8 @@ export default defineConfig({
   webServer: {
     command: "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 1431",
     env: {
-      VITE_SUPABASE_URL: "https://e2e.supabase.test",
-      VITE_SUPABASE_PUBLISHABLE_KEY: "e2e-publishable-key"
+      VITE_SUPABASE_URL: "https://e2e.supabase.co",
+      VITE_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_e2e-test-key"
     },
     reuseExistingServer: false,
     timeout: 120_000,

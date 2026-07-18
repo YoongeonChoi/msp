@@ -1,3 +1,4 @@
+await import("./supabaseConfigSecurity.test");
 await import("./operationsContracts.test");
 await import("./unknownResolutionContracts.test");
 await import("./operationRequests.test");
