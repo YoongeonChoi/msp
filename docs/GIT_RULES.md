@@ -13,14 +13,23 @@ Use Conventional Commits:
 
 ## Branches
 
-- `main`: production-ready baseline.
-- `develop`: optional integration branch.
-- `feature/<name>`
-- `fix/<name>`
-- `docs/<name>`
-- `release/<version>` when needed.
+- `main`: stable, production-ready integration baseline. Active development commits are prohibited.
+- `develop`: required development and integration branch and the source branch for completed `main` integrations.
+- `feature/<name>`, `fix/<name>`, and `docs/<name>`: optional isolation branches created from and merged back into `develop` when explicitly needed.
+- `release/<version>`: optional release preparation branch created from `develop` when needed.
 
-Solo trunk-based work is allowed with short-lived branches and PR review checklist discipline.
+## Required Development Flow
+
+1. Verify the current `main` commit and repository state before starting work.
+2. Switch to `develop` before editing. Create it from the verified `main` commit when it does not yet exist.
+3. Stage only the intended files, create one atomic commit per completed change, run the relevant checks, and push the commit to `origin/develop`.
+4. Keep implementation, documentation, configuration, and migration work off `main` while development is active.
+5. When the complete development scope is ready, open a reviewed pull request from `develop` to `main`. The exact `develop` head must pass its push CI and migration gates, and the corresponding PR merge candidate must pass all required security, PR, and release gates before integration; do not bypass these gates with a direct `main` push.
+6. Preserve the long-lived branch ancestry by using a fast-forward or merge commit. Do not squash or rebase `develop` into `main`.
+7. Verify that `origin/main` points to the approved integrated commit, then fast-forward `develop` to that commit and push the synchronized `origin/develop` without force.
+8. Remain on `develop` after synchronization so the next coding task starts on the development branch.
+
+Unrelated staged or working-tree changes must never be mixed into these commits. Conflicts, divergence, or unfinished Git operations block automatic integration until they are explicitly resolved.
 
 ## Pull Requests
 

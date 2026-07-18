@@ -6,9 +6,17 @@ Versioning:
 
 Branches:
 
-- `main`: production-ready baseline.
-- `develop`: optional integration branch.
-- Short-lived feature/fix/docs branches are preferred.
+- `main`: stable, production-ready integration baseline; no active development work is committed directly here.
+- `develop`: required development and integration branch and the source of completed `main` integrations.
+- Short-lived feature/fix/docs branches are optional and must branch from and merge back into `develop`.
+
+## Branch Integration
+
+1. Complete atomic commits and push them to `origin/develop`.
+2. Open a reviewed pull request from `develop` to `main`; run the push CI and migration gates against the exact `develop` head, then run the pre-release checklist plus all required security and PR gates against the corresponding merge candidate.
+3. Integrate with a fast-forward or merge commit so the long-lived branch ancestry is preserved; never squash or rebase `develop` into `main`.
+4. Verify that `origin/main` points to the approved integrated commit.
+5. Fast-forward `develop` to the integrated `main` commit, push the synchronized `origin/develop` without force, and remain on `develop` for subsequent work.
 
 ## Pre-Release Checklist
 
