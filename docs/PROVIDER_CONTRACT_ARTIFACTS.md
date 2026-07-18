@@ -50,3 +50,30 @@ inclusive cursor, `adjusted` boolean, 일봉/분봉 interval, 필수 OHLCV와 cu
 이 기록은 candle read mapping만 고정한다. 2026-07-14 로컬 주문 계약
 시뮬레이터의 자격 hash를 대체하거나 production write, 자동 수집, 완료 봉 판정,
 feature 사용을 승인하지 않는다.
+
+## Toss KR market calendar read contract — 2026-07-18 UTC
+
+| 항목 | 값 |
+| --- | --- |
+| provider | `toss` |
+| verification scope | `GET /api/v1/market-calendar/KR` read mapping only |
+| OpenAPI artifact | `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` |
+| OpenAPI version | `1.2.4` |
+| OpenAPI retrieved at | `2026-07-18T09:32:14.8298700Z` |
+| OpenAPI byte length | `341558` |
+| OpenAPI SHA-256 | `7000d89ea3d783b0fa36d32e31750e85e139098306dbfce53a75fc4891019f1b` |
+| hash input | raw HTTP response body bytes |
+
+이 artifact에서 응답의 `today`, `previousBusinessDay`, `nextBusinessDay`와 각
+`date`가 필수임을 확인했다. `integrated`와 그 안의 `regularMarket`은 nullable이고,
+정규 세션이 있으면 `startTime`과 `endTime`은 필수이며 시장 시각은 KST다.
+
+Worker 매핑은 요청 날짜와 `today`가 같고
+`previousBusinessDay < today < nextBusinessDay`인 응답만 수용한다. 휴장일의
+`today.integrated=null`은 현재 세션이 없는 증거로 보존한다. 후속 시간 경계 계산에
+필요한 `nextBusinessDay.regularMarket`이 없거나 세션 시각이 KST가 아니면
+fail-closed한다. `singlePriceAuctionStartTime`은 실행 중단 시각과 관련된 별도
+필드이므로 정규 세션 종료 증거에는 공식 `endTime`을 사용한다.
+
+이 기록은 market calendar read mapping만 고정한다. 봉 완료·불변성, 자동 수집,
+feature readiness, 주문 가능 상태 또는 production write를 승인하지 않는다.

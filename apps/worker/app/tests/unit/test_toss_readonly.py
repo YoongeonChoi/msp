@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from typing import Any, cast
 from urllib.parse import parse_qs
 
 import httpx
@@ -280,6 +281,15 @@ async def test_toss_client_parses_buying_power_calendar_and_account_state() -> N
     assert calendar.today.integrated is not None
     assert calendar.today.integrated.regular_market is not None
     assert calendar.today.integrated.regular_market.start_time.hour == 9
+    assert calendar.next_business_day.integrated is not None
+    assert calendar.next_business_day.integrated.regular_market is not None
+    assert calendar.next_business_day.integrated.regular_market.start_time.hour == 9
+    calendar_request = next(
+        request
+        for request in requests
+        if request.url.path == "/api/v1/market-calendar/KR"
+    )
+    assert calendar_request.url.params["date"] == "2026-03-25"
     assert account_state.cash_krw == 5_000_000
     assert account_state.equity_krw == 12_050_000
     assert account_state.daily_loss_pct == 0.0
@@ -295,6 +305,27 @@ async def test_toss_client_parses_buying_power_calendar_and_account_state() -> N
         "/api/v1/buying-power",
         "/api/v1/holdings",
     ]
+
+
+@pytest.mark.parametrize("missing", ["today", "next_regular_end"])
+async def test_toss_client_rejects_missing_required_calendar_fields(
+    missing: str,
+) -> None:
+    payload = _kr_market_calendar_payload()
+    result = cast(dict[str, Any], payload["result"])
+    if missing == "today":
+        del result["today"]
+    else:
+        next_day = cast(dict[str, Any], result["nextBusinessDay"])
+        integrated = cast(dict[str, Any], next_day["integrated"])
+        regular = cast(dict[str, Any], integrated["regularMarket"])
+        del regular["endTime"]
+    client, _requests = _client_with_responses(
+        {"/api/v1/market-calendar/KR": payload}
+    )
+
+    with pytest.raises(ProviderSchemaError, match="toss_read_schema_invalid"):
+        await client.get_kr_market_calendar(date(2026, 3, 25))
 
 
 async def test_toss_client_parses_price_and_candle_responses() -> None:
@@ -528,7 +559,15 @@ def _kr_market_calendar_payload() -> JsonObject:
             },
             "nextBusinessDay": {
                 "date": "2026-03-26",
-                "integrated": None,
+                "integrated": {
+                    "regularMarket": {
+                        "startTime": "2026-03-26T09:00:00+09:00",
+                        "singlePriceAuctionStartTime": (
+                            "2026-03-26T15:20:00+09:00"
+                        ),
+                        "endTime": "2026-03-26T15:30:00+09:00",
+                    }
+                },
             },
         }
     }

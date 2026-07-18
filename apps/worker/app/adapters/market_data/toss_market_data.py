@@ -3,17 +3,22 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from app.adapters.broker.toss_contract import TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256
+from app.adapters.broker.toss_contract import (
+    TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256,
+    TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256,
+)
 from app.adapters.broker.toss_models import (
     TossCandle,
     TossCandlePage,
     TossCandleQuery,
+    TossIntegratedMarketHours,
     TossKrMarketCalendarResponse,
     TossPriceResponse,
+    TossRegularMarketSession,
 )
 from app.application.ports.candle_data_port import (
     DailyCandleReadPage,
@@ -25,6 +30,10 @@ from app.domain.market_data.point_in_time import (
     PointInTimeCandleV1,
     PointInTimeDataError,
     validate_point_in_time_candle_page,
+)
+from app.domain.market_data.point_in_time_calendar import (
+    PointInTimeCalendarError,
+    PointInTimeKrDailySessionV1,
 )
 from app.domain.trading.entities import Quote
 
@@ -158,6 +167,79 @@ class TossMarketData:
             next_before=page.next_before,
             observed_at=page.observed_at,
         )
+
+    async def get_kr_daily_session_evidence(
+        self,
+        target_date: date,
+    ) -> PointInTimeKrDailySessionV1:
+        validated_target_date = _require_calendar_target_date(target_date)
+        calendar = await self.toss.get_kr_market_calendar(validated_target_date)
+        observed_at = _require_aware_timestamp(
+            self.clock(),
+            "toss_market_calendar_observed_at_timezone_missing",
+        )
+        if calendar.today.date != validated_target_date:
+            raise ProviderSchemaError(
+                "toss",
+                "toss_market_calendar_today_date_mismatch",
+            )
+        if calendar.previous_business_day.date >= validated_target_date:
+            raise ProviderSchemaError(
+                "toss",
+                "toss_market_calendar_previous_business_date_not_before_target",
+            )
+        if calendar.next_business_day.date <= validated_target_date:
+            raise ProviderSchemaError(
+                "toss",
+                "toss_market_calendar_next_business_date_not_after_target",
+            )
+
+        today_regular = _regular_market_session(calendar.today.integrated)
+        next_regular = _regular_market_session(
+            calendar.next_business_day.integrated
+        )
+        if next_regular is None:
+            raise ProviderSchemaError(
+                "toss",
+                "toss_market_calendar_next_regular_session_missing",
+            )
+        today_start = None
+        today_end = None
+        if today_regular is not None:
+            today_start = _require_kst_timestamp(
+                today_regular.start_time,
+                "toss_market_calendar_today_regular_start",
+            )
+            today_end = _require_kst_timestamp(
+                today_regular.end_time,
+                "toss_market_calendar_today_regular_end",
+            )
+        next_start = _require_kst_timestamp(
+            next_regular.start_time,
+            "toss_market_calendar_next_regular_start",
+        )
+        next_end = _require_kst_timestamp(
+            next_regular.end_time,
+            "toss_market_calendar_next_regular_end",
+        )
+        try:
+            return PointInTimeKrDailySessionV1.create(
+                provider="toss",
+                market="KR",
+                session_date=calendar.today.date,
+                is_open=today_regular is not None,
+                regular_start_at=today_start,
+                regular_end_at=today_end,
+                next_business_date=calendar.next_business_day.date,
+                next_regular_start_at=next_start,
+                next_regular_end_at=next_end,
+                observed_at=observed_at,
+                provider_contract_sha256=(
+                    TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256
+                ),
+            )
+        except PointInTimeCalendarError as exc:
+            raise ProviderSchemaError("toss", f"toss_{exc.safe_message}") from exc
 
     async def is_market_open(self) -> bool | None:
         current = now_kst()
@@ -298,6 +380,36 @@ def _require_aware_timestamp(value: object, reason: str) -> datetime:
     ):
         raise ProviderSchemaError("toss", reason)
     return value
+
+
+def _require_calendar_target_date(value: object) -> date:
+    if type(value) is not date:
+        raise ProviderSchemaError(
+            "toss",
+            "toss_market_calendar_target_must_be_date",
+        )
+    return value
+
+
+def _require_kst_timestamp(value: object, reason_prefix: str) -> datetime:
+    timestamp = _require_aware_timestamp(
+        value,
+        f"{reason_prefix}_timezone_missing",
+    )
+    if timestamp.utcoffset() != timedelta(hours=9):
+        raise ProviderSchemaError(
+            "toss",
+            f"{reason_prefix}_not_kst",
+        )
+    return timestamp
+
+
+def _regular_market_session(
+    integrated: TossIntegratedMarketHours | None,
+) -> TossRegularMarketSession | None:
+    if integrated is None:
+        return None
+    return integrated.regular_market
 
 
 def _within_live_execution_window(value: datetime) -> bool:

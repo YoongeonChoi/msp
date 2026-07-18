@@ -7,7 +7,10 @@ from typing import Any, cast
 import pytest
 from pytest import MonkeyPatch
 
-from app.adapters.broker.toss_contract import TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256
+from app.adapters.broker.toss_contract import (
+    TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256,
+    TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256,
+)
 from app.adapters.broker.toss_models import (
     TossCandle,
     TossCandlePage,
@@ -18,7 +21,11 @@ from app.adapters.broker.toss_models import (
 from app.adapters.market_data import toss_market_data
 from app.adapters.market_data.toss_market_data import TossMarketData
 from app.application.ports.candle_data_port import DailyCandleReadRequest
-from app.domain.common.errors import ProviderSchemaError
+from app.domain.common.errors import (
+    ProviderError,
+    ProviderSchemaError,
+    ProviderUnavailableError,
+)
 from app.domain.common.time import KST
 
 
@@ -27,14 +34,17 @@ class FakeToss:
         self,
         prices: list[TossPriceResponse] | None = None,
         calendar: TossKrMarketCalendarResponse | None = None,
+        calendar_error: ProviderError | None = None,
         candle_page: TossCandlePage | None = None,
         events: list[str] | None = None,
     ) -> None:
         self.prices = prices or []
         self.calendar = calendar
+        self.calendar_error = calendar_error
         self.candle_page = candle_page
         self.events = events if events is not None else []
         self.candle_queries: list[TossCandleQuery] = []
+        self.calendar_queries: list[date | None] = []
 
     async def get_prices(self, symbols: list[str]) -> list[TossPriceResponse]:
         return self.prices
@@ -43,7 +53,10 @@ class FakeToss:
         self,
         target_date: date | None = None,
     ) -> TossKrMarketCalendarResponse:
-        del target_date
+        self.events.append("calendar_fetch")
+        self.calendar_queries.append(target_date)
+        if self.calendar_error is not None:
+            raise self.calendar_error
         if self.calendar is None:
             raise AssertionError("calendar not configured")
         return self.calendar
@@ -95,6 +108,58 @@ def _candle_page(
     )
 
 
+_DEFAULT_CALENDAR_VALUE = object()
+
+
+def _calendar_payload(
+    integrated: bool,
+    *,
+    today_date: str = "2026-03-25",
+    previous_date: str = "2026-03-24",
+    next_date: str = "2026-03-26",
+    today_integrated: object = _DEFAULT_CALENDAR_VALUE,
+    next_integrated: object = _DEFAULT_CALENDAR_VALUE,
+) -> TossKrMarketCalendarResponse:
+    resolved_today_integrated: object = None
+    if integrated:
+        resolved_today_integrated = {
+            "regularMarket": {
+                "startTime": "2026-03-25T09:00:00+09:00",
+                "singlePriceAuctionStartTime": "2026-03-25T15:20:00+09:00",
+                "endTime": "2026-03-25T15:30:00+09:00",
+            }
+        }
+    if today_integrated is not _DEFAULT_CALENDAR_VALUE:
+        resolved_today_integrated = today_integrated
+
+    resolved_next_integrated: object = {
+        "regularMarket": {
+            "startTime": "2026-03-26T09:00:00+09:00",
+            "singlePriceAuctionStartTime": "2026-03-26T15:20:00+09:00",
+            "endTime": "2026-03-26T15:30:00+09:00",
+        }
+    }
+    if next_integrated is not _DEFAULT_CALENDAR_VALUE:
+        resolved_next_integrated = next_integrated
+
+    return TossKrMarketCalendarResponse.model_validate(
+        {
+            "today": {
+                "date": today_date,
+                "integrated": resolved_today_integrated,
+            },
+            "previousBusinessDay": {
+                "date": previous_date,
+                "integrated": None,
+            },
+            "nextBusinessDay": {
+                "date": next_date,
+                "integrated": resolved_next_integrated,
+            },
+        }
+    )
+
+
 async def test_toss_market_data_converts_krw_prices_to_quotes() -> None:
     service = TossMarketData(
         FakeToss(
@@ -136,6 +201,231 @@ async def test_toss_market_data_rejects_missing_price_timestamp() -> None:
 
     with pytest.raises(ProviderSchemaError, match="toss_price_timestamp_missing"):
         await service.get_quotes(["005930"])
+
+
+async def test_toss_market_data_maps_open_calendar_after_fetch() -> None:
+    events: list[str] = []
+    observed_at = datetime(2026, 3, 24, 23, 0, tzinfo=UTC)
+    fake = FakeToss(
+        calendar=_calendar_payload(integrated=True),
+        events=events,
+    )
+
+    def clock() -> datetime:
+        events.append("clock")
+        return observed_at
+
+    service = TossMarketData(fake, clock=clock)
+
+    evidence = await service.get_kr_daily_session_evidence(date(2026, 3, 25))
+
+    assert events == ["calendar_fetch", "clock"]
+    assert fake.calendar_queries == [date(2026, 3, 25)]
+    assert evidence.provider == "toss"
+    assert evidence.market == "KR"
+    assert evidence.session_date == date(2026, 3, 25)
+    assert evidence.is_open is True
+    assert evidence.regular_start_at == datetime(2026, 3, 25, 9, 0, tzinfo=KST)
+    assert evidence.regular_end_at == datetime(2026, 3, 25, 15, 30, tzinfo=KST)
+    assert evidence.next_business_date == date(2026, 3, 26)
+    assert evidence.next_regular_start_at == datetime(
+        2026,
+        3,
+        26,
+        9,
+        0,
+        tzinfo=KST,
+    )
+    assert evidence.observed_at == observed_at
+    assert (
+        evidence.provider_contract_sha256
+        == TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256
+    )
+    assert "is_final" not in evidence.to_payload()
+
+
+@pytest.mark.parametrize("today_integrated", [None, {}])
+async def test_toss_market_data_maps_closed_day_without_current_hours(
+    today_integrated: object,
+) -> None:
+    service = TossMarketData(
+        FakeToss(
+            calendar=_calendar_payload(
+                integrated=False,
+                today_integrated=today_integrated,
+            )
+        ),
+        clock=lambda: datetime(2026, 3, 24, 23, 0, tzinfo=UTC),
+    )
+
+    evidence = await service.get_kr_daily_session_evidence(date(2026, 3, 25))
+
+    assert evidence.is_open is False
+    assert evidence.regular_start_at is None
+    assert evidence.regular_end_at is None
+    assert evidence.next_regular_start_at == datetime(
+        2026,
+        3,
+        26,
+        9,
+        0,
+        tzinfo=KST,
+    )
+
+
+async def test_toss_market_data_rejects_invalid_calendar_target_before_fetch() -> None:
+    fake = FakeToss(calendar=_calendar_payload(integrated=True))
+    service = TossMarketData(fake)
+
+    with pytest.raises(
+        ProviderSchemaError,
+        match="toss_market_calendar_target_must_be_date",
+    ):
+        await service.get_kr_daily_session_evidence(
+            cast(date, datetime(2026, 3, 25, tzinfo=UTC))
+        )
+
+    assert fake.calendar_queries == []
+    assert fake.events == []
+
+
+async def test_toss_market_data_propagates_calendar_transport_error() -> None:
+    error = ProviderUnavailableError("toss", "toss_calendar_unavailable")
+    fake = FakeToss(calendar_error=error)
+
+    def unexpected_clock() -> datetime:
+        raise AssertionError("clock must not run after a failed fetch")
+
+    service = TossMarketData(fake, clock=unexpected_clock)
+
+    with pytest.raises(ProviderUnavailableError) as caught:
+        await service.get_kr_daily_session_evidence(date(2026, 3, 25))
+
+    assert caught.value is error
+    assert fake.calendar_queries == [date(2026, 3, 25)]
+    assert fake.events == ["calendar_fetch"]
+
+
+@pytest.mark.parametrize(
+    ("calendar", "reason"),
+    [
+        (
+            _calendar_payload(integrated=True, today_date="2026-03-26"),
+            "toss_market_calendar_today_date_mismatch",
+        ),
+        (
+            _calendar_payload(integrated=True, previous_date="2026-03-25"),
+            "toss_market_calendar_previous_business_date_not_before_target",
+        ),
+        (
+            _calendar_payload(integrated=True, previous_date="2026-03-26"),
+            "toss_market_calendar_previous_business_date_not_before_target",
+        ),
+        (
+            _calendar_payload(integrated=True, next_date="2026-03-25"),
+            "toss_market_calendar_next_business_date_not_after_target",
+        ),
+        (
+            _calendar_payload(integrated=True, next_date="2026-03-24"),
+            "toss_market_calendar_next_business_date_not_after_target",
+        ),
+        (
+            _calendar_payload(integrated=True, next_integrated=None),
+            "toss_market_calendar_next_regular_session_missing",
+        ),
+        (
+            _calendar_payload(integrated=True, next_integrated={}),
+            "toss_market_calendar_next_regular_session_missing",
+        ),
+        (
+            _calendar_payload(
+                integrated=True,
+                today_integrated={
+                    "regularMarket": {
+                        "startTime": "2026-03-25T09:00:00",
+                        "endTime": "2026-03-25T15:30:00+09:00",
+                    }
+                },
+            ),
+            "toss_market_calendar_today_regular_start_timezone_missing",
+        ),
+        (
+            _calendar_payload(
+                integrated=True,
+                today_integrated={
+                    "regularMarket": {
+                        "startTime": "2026-03-25T00:00:00Z",
+                        "endTime": "2026-03-25T06:30:00Z",
+                    }
+                },
+            ),
+            "toss_market_calendar_today_regular_start_not_kst",
+        ),
+        (
+            _calendar_payload(
+                integrated=True,
+                today_integrated={
+                    "regularMarket": {
+                        "startTime": "2026-03-25T15:30:00+09:00",
+                        "endTime": "2026-03-25T15:30:00+09:00",
+                    }
+                },
+            ),
+            "toss_point_in_time_kr_session_regular_time_order_invalid",
+        ),
+        (
+            _calendar_payload(
+                integrated=True,
+                next_integrated={
+                    "regularMarket": {
+                        "startTime": "2026-03-26T00:00:00Z",
+                        "endTime": "2026-03-26T06:30:00Z",
+                    }
+                },
+            ),
+            "toss_market_calendar_next_regular_start_not_kst",
+        ),
+        (
+            _calendar_payload(
+                integrated=True,
+                next_integrated={
+                    "regularMarket": {
+                        "startTime": "2026-03-26T15:30:00+09:00",
+                        "endTime": "2026-03-26T15:30:00+09:00",
+                    }
+                },
+            ),
+            "toss_point_in_time_kr_session_next_regular_time_order_invalid",
+        ),
+    ],
+)
+async def test_toss_market_data_rejects_inconsistent_calendar_evidence(
+    calendar: TossKrMarketCalendarResponse,
+    reason: str,
+) -> None:
+    service = TossMarketData(
+        FakeToss(calendar=calendar),
+        clock=lambda: datetime(2026, 3, 24, 23, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(ProviderSchemaError, match=reason):
+        await service.get_kr_daily_session_evidence(date(2026, 3, 25))
+
+
+async def test_toss_market_data_rejects_naive_calendar_observation_clock() -> None:
+    fake = FakeToss(calendar=_calendar_payload(integrated=True))
+    service = TossMarketData(
+        fake,
+        clock=lambda: datetime(2026, 3, 24, 23, 0),
+    )
+
+    with pytest.raises(
+        ProviderSchemaError,
+        match="toss_market_calendar_observed_at_timezone_missing",
+    ):
+        await service.get_kr_daily_session_evidence(date(2026, 3, 25))
+
+    assert fake.calendar_queries == [date(2026, 3, 25)]
 
 
 async def test_toss_market_data_maps_daily_candle_page_to_pit_contract() -> None:
@@ -467,25 +757,3 @@ async def test_toss_market_data_reports_closed_when_integrated_session_is_null(
     )
 
     assert await service.is_market_open() is False
-
-
-def _calendar_payload(integrated: bool) -> TossKrMarketCalendarResponse:
-    today: dict[str, object] = {
-        "date": "2026-03-25",
-        "integrated": None,
-    }
-    if integrated:
-        today["integrated"] = {
-            "regularMarket": {
-                "startTime": "2026-03-25T09:00:00+09:00",
-                "singlePriceAuctionStartTime": "2026-03-25T15:20:00+09:00",
-                "endTime": "2026-03-25T15:30:00+09:00",
-            }
-        }
-    return TossKrMarketCalendarResponse.model_validate(
-        {
-            "today": today,
-            "previousBusinessDay": {"date": "2026-03-24", "integrated": None},
-            "nextBusinessDay": {"date": "2026-03-26", "integrated": None},
-        }
-    )

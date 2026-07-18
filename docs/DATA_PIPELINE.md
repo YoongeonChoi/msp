@@ -6,6 +6,13 @@ The candle path exposes an explicit, bounded single-page read through
 schedule collection, certify a completed bar, calculate a feature, or authorize
 an order.
 
+The Toss KR market-calendar adapter can map one explicitly requested date into
+strict point-in-time session evidence. It preserves a closed day without
+current regular hours, requires the next business day's KST regular session,
+binds the evidence to a pinned OpenAPI artifact hash, and rejects inconsistent
+date ordering or timestamps. This evidence is not persisted and does not by
+itself certify a completed candle or make data feature-ready.
+
 Append-only candle revision semantics are defined behind a dedicated storage
 port and an in-memory reference adapter. This adapter is not durable and is not
 wired into collection or feature calculation. A repeated latest hash is an
