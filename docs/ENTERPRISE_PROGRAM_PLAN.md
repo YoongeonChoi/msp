@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable as-of reader가 있다. 그러나 collection/runtime/feature 연결, completeness·finality·corporate-action·DQ 인증은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 collection/runtime/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -139,6 +139,16 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   `received_at <= as_of`나 과거 DB commit visibility를 뜻하지 않는다. 이 reader는
   completeness, provider/calendar finality, corporate-action, DQ 또는 feature readiness를
   증명하지 않는다.
+- `apps/worker/app/application/services/daily_candle_research_slice.py`는 reader가
+  완성한 snapshot을 한 번에 받아 exact 양끝 session, retained next-business
+  date와 다음 정규장 시각, source scope와 `selected_as_of`, content/occurrence
+  lineage uniqueness, slice 전체의 uniform candle/calendar contract pin, 기존
+  selector 결과를 다시 검증한다. transport와 분리된 logical-scope 및 selected
+  data-lineage fingerprint도 계산하지만 coverage는
+  `retained_open_session_chain_only`이고 `full_research_certified=false`이다.
+  이는 실제 KRX 전체 이력 completeness, provider authenticity/finality,
+  corporate action, 전체 DQ, persisted dataset registry, feature/backtest replay,
+  전략 승격 또는 주문 사용 승인을 증명하지 않는다.
 - 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
   명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
   복원, lease·fencing 연속성, runtime 시작 경로 연결은 제공하지 않는다.
@@ -529,7 +539,8 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E2 Paper Accounting` 로컬 구현과 격리 검증
 - [ ] `E3 Point-in-Time Data Plane` 구현
 - [x] `E3` occurrence-backed bounded durable as-of reader 로컬 구현
-- [ ] `E3` collection/runtime/feature 연결과 completeness·finality·corporate-action·DQ 인증
+- [x] `E3` retained-open-session research-slice gate와 canonical scope/data-lineage fingerprint 로컬 구현
+- [ ] `E3` collection/runtime/feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
 - [ ] `G1`, `G2` 독립 심사

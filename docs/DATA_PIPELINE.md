@@ -117,6 +117,29 @@ replay it verbatim. The official adapter pins the first-page metadata and
 rejects any later cursor or envelope mutation; the database applies the
 15-minute expiry to that unmodified server-issued cursor.
 
+`DailyCandleResearchSliceService` can consume one complete snapshot from the
+official durable reader and fails closed unless the selected open sessions
+cover the requested inclusive first and last session boundaries, are strictly
+increasing, and each retained calendar revision points to the next selected
+business date with matching regular-session hours. It rebinds the query,
+scope, `selected_as_of`, unique content/occurrence lineage, uniform candle and
+calendar contract pins, and the existing as-of selection. The gated result
+labels its coverage `retained_open_session_chain_only`, fixes
+`full_research_certified=false`, and emits separate SHA-256 fingerprints for
+the logical slice scope and the selected data/lineage manifest. Page size,
+snapshot token, and snapshot issue time remain acquisition metadata and do not
+change those stable fingerprints when the semantic scope and evidence are
+otherwise identical.
+
+Here, `contiguous` means only the chain asserted by the retained selected
+calendar evidence; it is not proof that provider or KRX history is complete.
+A research slice and manifest are not a persisted or certified dataset,
+provider signature, historical database snapshot, corporate-action or DQ
+approval, deterministic feature/backtest replay, strategy promotion, or order
+authorization. The slice service is read-only and is not wired into the
+runtime container, scheduler, features, backtests, strategy, or any order
+path.
+
 The RPC is granted only to the server-side `service_role`; it is not exposed to
 Desktop, `public`, authenticated clients, or Realtime. The port and adapter are
 not wired into collection, the runtime container, features, strategy,

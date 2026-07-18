@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Protocol
 
 from app.domain.common.errors import KnownFailClosedError
+from app.domain.common.json import JsonObject
 from app.domain.market_data.daily_candle_as_of import (
     SelectedPointInTimeDailyCandleV1,
 )
@@ -22,6 +25,7 @@ _KR_SYMBOL_RE = re.compile(r"[0-9]{6}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _SNAPSHOT_TOKEN_RE = re.compile(r"[0-9]+:[0-9]+:(?:[0-9]+(?:,[0-9]+)*)?")
 _ORIGINS = frozenset({"content_revision_backfill", "stream_head_recovery", "rpc"})
+PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION = "pit_daily_candle_as_of_reader.v1"
 
 
 class DailyCandleAsOfReaderError(KnownFailClosedError):
@@ -224,6 +228,64 @@ class DailyCandleAsOfReaderPort(Protocol):
         ...
 
 
+def daily_candle_as_of_query_sha256(value: object) -> str:
+    """Return the canonical Worker/SQL query fingerprint for one read."""
+
+    if type(value) is not DailyCandleAsOfReadRequest:
+        raise DailyCandleAsOfReaderError("daily_candle_as_of_reader_request_invalid")
+    try:
+        request = DailyCandleAsOfReadRequest(
+            provider=value.provider,
+            market=value.market,
+            symbol=value.symbol,
+            interval=value.interval,
+            adjusted=value.adjusted,
+            start_session_date=value.start_session_date,
+            end_session_date=value.end_session_date,
+            as_of=value.as_of,
+            page_size=value.page_size,
+        )
+        as_of = request.as_of.astimezone(UTC)
+    except (
+        AttributeError,
+        DailyCandleAsOfReaderError,
+        OverflowError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DailyCandleAsOfReaderError(
+            "daily_candle_as_of_reader_request_invalid"
+        ) from exc
+    if request != value:
+        raise DailyCandleAsOfReaderError("daily_candle_as_of_reader_request_invalid")
+    query: JsonObject = {
+        "adjusted": request.adjusted,
+        "as_of": _canonical_timestamp(as_of),
+        "contract_version": PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION,
+        "end_session_date": request.end_session_date.isoformat(),
+        "interval": request.interval,
+        "limit": request.page_size,
+        "market": request.market,
+        "provider": request.provider,
+        "start_session_date": request.start_session_date.isoformat(),
+        "symbol": request.symbol,
+    }
+    try:
+        canonical = json.dumps(
+            query,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise DailyCandleAsOfReaderError(
+            "daily_candle_as_of_reader_request_invalid"
+        ) from exc
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _require_sha256(value: object) -> str:
     if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
         raise DailyCandleAsOfReaderError("daily_candle_as_of_reader_lineage_invalid")
@@ -253,3 +315,7 @@ def _require_aware_datetime(value: object) -> datetime:
         return value.astimezone(UTC)
     except (OverflowError, RuntimeError, TypeError, ValueError) as exc:
         raise DailyCandleAsOfReaderError("daily_candle_as_of_reader_lineage_invalid") from exc
+
+
+def _canonical_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

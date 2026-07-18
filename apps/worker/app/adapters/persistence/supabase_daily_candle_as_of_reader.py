@@ -12,11 +12,15 @@ from uuid import UUID
 import httpx
 
 from app.application.ports.daily_candle_as_of_reader_port import (
+    PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION as _READER_SCHEMA_VERSION,
+)
+from app.application.ports.daily_candle_as_of_reader_port import (
     DailyCandleAsOfLineageV1,
     DailyCandleAsOfReaderError,
     DailyCandleAsOfReadRequest,
     DurableDailyCandleAsOfSnapshotV1,
     DurableSelectedDailyCandleV1,
+    daily_candle_as_of_query_sha256,
 )
 from app.config import Settings
 from app.domain.common.json import JsonObject
@@ -39,7 +43,7 @@ from app.domain.market_data.point_in_time_calendar import (
 )
 from app.infrastructure.supabase_headers import supabase_api_headers
 
-PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION = "pit_daily_candle_as_of_reader.v1"
+PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION = _READER_SCHEMA_VERSION
 PIT_DAILY_CANDLE_AS_OF_CURSOR_SCHEMA_VERSION = "pit_daily_candle_as_of_cursor.v1"
 PITDailyCandleAsOfReaderRpc = Literal["list_pit_daily_candles_as_of_v1"]
 PIT_DAILY_CANDLE_AS_OF_READER_RPC_ALLOWLIST: frozenset[str] = frozenset(
@@ -189,10 +193,7 @@ class SupabaseDailyCandleAsOfReader:
     ) -> DurableDailyCandleAsOfSnapshotV1:
         valid_request = _canonical_request(request)
         request_as_of = valid_request.as_of.astimezone(UTC)
-        expected_query_sha256 = _request_query_sha256(
-            valid_request,
-            request_as_of,
-        )
+        expected_query_sha256 = daily_candle_as_of_query_sha256(valid_request)
         cursor: JsonObject | None = None
         seen_cursors: set[str] = set()
         raw_candidates: list[_RawCandidate] = []
@@ -393,25 +394,6 @@ def _canonical_request(value: object) -> DailyCandleAsOfReadRequest:
     if canonical != value:
         raise DailyCandleAsOfReaderError("daily_candle_as_of_reader_request_invalid")
     return canonical
-
-
-def _request_query_sha256(
-    request: DailyCandleAsOfReadRequest,
-    as_of: datetime,
-) -> str:
-    query: JsonObject = {
-        "adjusted": request.adjusted,
-        "as_of": _canonical_timestamp(as_of),
-        "contract_version": PIT_DAILY_CANDLE_AS_OF_READER_SCHEMA_VERSION,
-        "end_session_date": request.end_session_date.isoformat(),
-        "interval": request.interval,
-        "limit": request.page_size,
-        "market": request.market,
-        "provider": request.provider,
-        "start_session_date": request.start_session_date.isoformat(),
-        "symbol": request.symbol,
-    }
-    return hashlib.sha256(_canonical_json_text(query).encode("utf-8")).hexdigest()
 
 
 def _envelope(value: object) -> Mapping[str, object]:
