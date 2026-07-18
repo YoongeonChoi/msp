@@ -15,6 +15,10 @@ from app.adapters.broker.toss_models import (
     TossKrMarketCalendarResponse,
     TossPriceResponse,
 )
+from app.application.ports.candle_data_port import (
+    DailyCandleReadPage,
+    DailyCandleReadRequest,
+)
 from app.domain.common.errors import ProviderError, ProviderSchemaError
 from app.domain.common.time import KST, now_kst, now_utc
 from app.domain.market_data.point_in_time import (
@@ -134,6 +138,25 @@ class TossMarketData:
             candles=candles,
             next_before=next_before,
             observed_at=observed_at,
+        )
+
+    async def read_daily_candle_page(
+        self,
+        request: DailyCandleReadRequest,
+    ) -> DailyCandleReadPage:
+        page = await self.get_daily_candles(
+            TossCandleQuery(
+                symbol=request.symbol,
+                interval="1d",
+                count=request.count,
+                before=request.before,
+                adjusted=request.adjusted,
+            )
+        )
+        return DailyCandleReadPage(
+            candles=page.candles,
+            next_before=page.next_before,
+            observed_at=page.observed_at,
         )
 
     async def is_market_open(self) -> bool | None:

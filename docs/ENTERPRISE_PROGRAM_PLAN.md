@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | `DataCollectionService`는 비어 있고 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read 경계만 있고 persistence·revision·DQ·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -106,7 +106,9 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   생성된다.
 - `apps/worker/app/application/services/execution_service.py`는 Paper 주문을
   decision price와 whole-share quantity로 즉시 `paper` 상태로 저장한다.
-- `apps/worker/app/application/services/data_collection_service.py`는 아직 no-op이다.
+- `apps/worker/app/application/services/data_collection_service.py`는 명시적인
+  단일-page PIT candle read만 수행한다. persistence, pagination, scheduler,
+  completed-bar 인증, feature 연결은 아직 없다.
 - `apps/worker/app/infrastructure/scheduler.py`는 메모리 loop이며 durable job state,
   lease, retry budget, dead-letter가 없다.
 - `apps/worker/app/infrastructure/outbox.py`는 DTO만 있고 alert delivery 경로에

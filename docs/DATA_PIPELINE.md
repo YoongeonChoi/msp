@@ -1,6 +1,10 @@
 # Data Pipeline
 
-Toss: account, position, quote, candle, order contracts are represented as ports and placeholders until official endpoint details are verified.
+Toss: account, position, quote, candle, order contracts are represented as ports.
+The candle path exposes an explicit, bounded single-page read through
+`DataCollectionService`; it does not persist observations, follow pagination,
+schedule collection, certify a completed bar, calculate a feature, or authorize
+an order.
 
 KRX: market calendar/listing/statistics are adapter placeholders and mock data in local mode.
 

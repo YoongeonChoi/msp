@@ -17,6 +17,7 @@ from app.adapters.broker.toss_models import (
 )
 from app.adapters.market_data import toss_market_data
 from app.adapters.market_data.toss_market_data import TossMarketData
+from app.application.ports.candle_data_port import DailyCandleReadRequest
 from app.domain.common.errors import ProviderSchemaError
 from app.domain.common.time import KST
 
@@ -173,6 +174,35 @@ async def test_toss_market_data_maps_daily_candle_page_to_pit_contract() -> None
     )
     assert len(page.candles[0].canonical_observation_sha256) == 64
     assert "is_complete" not in page.candles[0].to_payload()
+
+
+async def test_toss_market_data_bridges_application_daily_candle_request() -> None:
+    observed_at = datetime(2026, 3, 25, 0, 0, 5, tzinfo=UTC)
+    before = datetime(2026, 3, 25, 9, 0, tzinfo=KST)
+    fake = FakeToss(candle_page=_candle_page())
+    service = TossMarketData(fake, clock=lambda: observed_at)
+    request = DailyCandleReadRequest(
+        symbol="005930",
+        before=before,
+        count=2,
+        adjusted=False,
+    )
+
+    page = await service.read_daily_candle_page(request)
+
+    assert fake.candle_queries == [
+        TossCandleQuery(
+            symbol="005930",
+            interval="1d",
+            count=2,
+            before=before,
+            adjusted=False,
+        )
+    ]
+    assert page.candles[0].symbol == "005930"
+    assert page.candles[0].adjusted is False
+    assert page.next_before == datetime(2026, 3, 24, 9, 0, tzinfo=KST)
+    assert page.observed_at == observed_at
 
 
 @pytest.mark.parametrize(
