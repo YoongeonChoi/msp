@@ -18,7 +18,11 @@ PROTECTED_SECRET_NAMES = (
     "SUPABASE_LIVE_REVIEWER_JWT",
 )
 
-_SQL_COMMENT_PATTERN = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_DESTRUCTIVE_APPROVAL_PATTERN = re.compile(
+    r"\b(?:rollback\s+note|destructive\s+migration\s+approved)\s*:\s*\S",
+    re.IGNORECASE,
+)
+_DOLLAR_QUOTE_PATTERN = re.compile(r"\$(?:[a-z_][a-z0-9_]*)?\$", re.IGNORECASE)
 _EXPOSED_TABLE_PATTERN = re.compile(
     r"\bcreate\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?"
     r'(?P<schema>public|api|"public"|"api")\s*\.\s*'
@@ -168,14 +172,22 @@ def check_migration_safety(repo_root: Path) -> list[str]:
     if not paths:
         return ["supabase/migrations: no SQL migrations found"]
 
-    sql = "\n".join(path.read_text(encoding="utf-8") for path in paths)
-    normalized = _SQL_COMMENT_PATTERN.sub(" ", sql)
+    migration_sql = [(path, path.read_text(encoding="utf-8")) for path in paths]
+    sql = "\n".join(text for _path, text in migration_sql)
+    normalized = _strip_sql_comments(sql)
     exposed_tables = _qualified_objects(_EXPOSED_TABLE_PATTERN, normalized)
     rls_tables = _qualified_objects(_RLS_PATTERN, normalized)
     findings = [
         f"exposed table missing RLS: {schema}.{table}"
         for schema, table in sorted(exposed_tables - rls_tables)
     ]
+    findings.extend(
+        f"{path.relative_to(repo_root).as_posix()}: destructive migration "
+        "missing rollback note or approval"
+        for path, text in migration_sql
+        if _contains_destructive_migration_sql(text)
+        and not _has_same_file_destructive_approval(text)
+    )
     findings.extend(
         f"exposed table disables RLS: {schema}.{table}"
         for schema, table in sorted(
@@ -222,6 +234,125 @@ def check_migration_safety(repo_root: Path) -> list[str]:
             compact = " ".join(statement.split())[:160]
             findings.append(f"anon/public write-capable policy: {compact}")
     return findings
+
+
+def _contains_destructive_migration_sql(sql: str) -> bool:
+    tokens = _sql_tokens_outside_string_literals(_strip_sql_comments(sql))
+    return any(
+        token == "truncate"
+        or (
+            token == "drop"
+            and index + 1 < len(tokens)
+            and tokens[index + 1] in {"table", "column"}
+        )
+        for index, token in enumerate(tokens)
+    )
+
+
+def _has_same_file_destructive_approval(sql: str) -> bool:
+    return any(
+        _DESTRUCTIVE_APPROVAL_PATTERN.search(
+            comment[2:-2] if comment.startswith("/*") else comment[2:]
+        )
+        is not None
+        for comment in _top_level_sql_comments(sql)
+    )
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove SQL comments without treating markers inside quotes as comments."""
+
+    pieces: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(sql):
+        if sql[index] in {"'", '"'}:
+            index = _quoted_sql_end(sql, index)
+            continue
+        if sql.startswith("--", index):
+            pieces.append(sql[cursor:index])
+            line_end = sql.find("\n", index + 2)
+            if line_end == -1:
+                pieces.append(" ")
+                cursor = len(sql)
+                index = len(sql)
+                continue
+            pieces.append("\n")
+            cursor = line_end + 1
+            index = cursor
+            continue
+        if sql.startswith("/*", index):
+            pieces.append(sql[cursor:index])
+            index = _block_comment_end(sql, index)
+            pieces.append(" ")
+            cursor = index
+            continue
+        index += 1
+    pieces.append(sql[cursor:])
+    return "".join(pieces)
+
+
+def _top_level_sql_comments(sql: str) -> list[str]:
+    """Return comments outside quoted values and dollar-quoted function bodies."""
+
+    comments: list[str] = []
+    index = 0
+    while index < len(sql):
+        if sql[index] in {"'", '"'}:
+            index = _quoted_sql_end(sql, index)
+            continue
+        if sql[index] == "$":
+            delimiter_match = _DOLLAR_QUOTE_PATTERN.match(sql, index)
+            if delimiter_match is not None:
+                delimiter = delimiter_match.group(0)
+                closing = sql.find(delimiter, delimiter_match.end())
+                index = len(sql) if closing == -1 else closing + len(delimiter)
+                continue
+        if sql.startswith("--", index):
+            line_end = sql.find("\n", index + 2)
+            line_end = len(sql) if line_end == -1 else line_end
+            comments.append(sql[index:line_end])
+            index = line_end
+            continue
+        if sql.startswith("/*", index):
+            comment_end = _block_comment_end(sql, index)
+            comments.append(sql[index:comment_end])
+            index = comment_end
+            continue
+        index += 1
+    return comments
+
+
+def _quoted_sql_end(sql: str, start: int) -> int:
+    quote = sql[start]
+    index = start + 1
+    while index < len(sql):
+        if sql[index] == "\\" and index + 1 < len(sql):
+            index += 2
+            continue
+        if sql[index] == quote:
+            if index + 1 < len(sql) and sql[index + 1] == quote:
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(sql)
+
+
+def _block_comment_end(sql: str, start: int) -> int:
+    depth = 1
+    index = start + 2
+    while index < len(sql) and depth > 0:
+        if sql.startswith("/*", index):
+            depth += 1
+            index += 2
+            continue
+        if sql.startswith("*/", index):
+            depth -= 1
+            index += 2
+            continue
+        index += 1
+    return index
 
 
 def _function_headers(

@@ -25,6 +25,8 @@ create policy control_plane_signal_authenticated_read
 revoke all on api.control_plane_signal from public, anon, service_role;
 grant select on api.control_plane_signal to authenticated;
 alter publication supabase_realtime add table api.control_plane_signal;
+-- Rollback note: re-adding any raw control/status table to Realtime reverses
+-- the signal-only boundary and requires an explicit security review first.
 alter publication supabase_realtime drop table public.bot_settings;
 alter publication supabase_realtime drop table public.worker_heartbeats;
 alter publication supabase_realtime drop table public.api_health;

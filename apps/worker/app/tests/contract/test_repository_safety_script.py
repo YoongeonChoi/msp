@@ -83,6 +83,119 @@ def test_migration_cannot_disable_public_table_rls(tmp_path: Path) -> None:
     assert "exposed table disables RLS: public.events" in findings
 
 
+def test_destructive_approval_cannot_cross_migration_files(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    migration_dir = root / "supabase" / "migrations"
+    (migration_dir / "0002.sql").write_text(
+        "-- Rollback note: this note applies only to migration 0002.\n",
+        encoding="utf-8",
+    )
+    (migration_dir / "0003.sql").write_text(
+        "drop table private.execution_history;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "supabase/migrations/0003.sql: destructive migration missing "
+        "rollback note or approval"
+    ) in findings
+
+
+def test_destructive_sql_accepts_same_file_rollback_note(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "-- Rollback note: restore private.execution_history from backup.\n"
+        "drop table private.execution_history;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert not any("destructive migration" in finding for finding in findings)
+
+
+def test_destructive_words_in_sql_comments_do_not_trigger_guard(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "-- Example only: drop table private.execution_history.\n"
+        "select 1;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert not any("destructive migration" in finding for finding in findings)
+
+
+def test_multiline_drop_column_requires_same_file_approval(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "alter table private.execution_history\n"
+        "  drop\n"
+        "  column provider_payload;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "supabase/migrations/0002.sql: destructive migration missing "
+        "rollback note or approval"
+    ) in findings
+
+
+def test_approval_phrase_inside_sql_string_is_not_evidence(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        "select '-- Rollback note: fake approval';\n"
+        "truncate table private.execution_history;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "supabase/migrations/0002.sql: destructive migration missing "
+        "rollback note or approval"
+    ) in findings
+
+
+@pytest.mark.parametrize(
+    "comment",
+    (
+        "-- No rollback note is available.\n",
+        "-- Rollback note:\n",
+        "/* Destructive migration approved: */\n",
+    ),
+)
+def test_destructive_approval_requires_explicit_comment_detail(
+    tmp_path: Path,
+    comment: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    (root / "supabase" / "migrations" / "0002.sql").write_text(
+        comment + "drop table private.execution_history;\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_migration_safety(root)
+
+    assert (
+        "supabase/migrations/0002.sql: destructive migration missing "
+        "rollback note or approval"
+    ) in findings
+
+
 def test_api_table_without_rls_is_rejected(tmp_path: Path) -> None:
     module = _module()
     root = _safe_repository(tmp_path)

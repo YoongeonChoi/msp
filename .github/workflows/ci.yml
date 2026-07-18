@@ -146,14 +146,6 @@ jobs:
           normalized = re.sub(r"\s+", " ", seed)
           assert "'singleton'" in normalized
           assert re.search(r"false,\s*'paper',\s*false", normalized)
-      - name: Block unreviewed destructive migrations
-        shell: bash
-        run: |
-          set -euo pipefail
-          if rg -i "drop table|drop column|truncate table" supabase/migrations; then
-            rg -i "destructive migration approved|rollback note" supabase/migrations
-          fi
-
   repository-safety:
     name: repository safety checks
     runs-on: ubuntu-latest

@@ -76,13 +76,6 @@ jobs:
         run: python .github/scripts/repository_safety.py migrations
       - name: Apply G1+G2 migrations and assert contracts
         run: python supabase/verify_g1_g2_migration.py
-      - name: Block destructive migrations without rollback note
-        shell: bash
-        run: |
-          set -euo pipefail
-          if rg -i "drop table|drop column|truncate table" supabase/migrations; then
-            rg -i "rollback note|destructive migration approved" supabase/migrations
-          fi
       - name: Check singleton paper safety seed
         shell: python
         run: |

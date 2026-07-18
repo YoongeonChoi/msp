@@ -1168,6 +1168,8 @@ grant select on table
   public.audit_logs
 to service_role;
 
+-- Rollback note: re-adding positions/orders to Realtime restores raw trading
+-- payload publication and requires an explicit security review first.
 alter publication supabase_realtime drop table public.positions;
 alter publication supabase_realtime drop table public.orders;
 
