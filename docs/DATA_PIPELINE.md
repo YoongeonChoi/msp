@@ -6,6 +6,14 @@ The candle path exposes an explicit, bounded single-page read through
 schedule collection, certify a completed bar, calculate a feature, or authorize
 an order.
 
+Append-only candle revision semantics are defined behind a dedicated storage
+port and an in-memory reference adapter. This adapter is not durable and is not
+wired into collection or feature calculation. A repeated latest hash is an
+idempotent replay; a new hash requires a strictly later observation time and
+creates a revision. Reappearance of an older historical hash is rejected as
+ambiguous rather than guessed to be a replay or provider reversion; no durable
+quarantine exists yet.
+
 KRX: market calendar/listing/statistics are adapter placeholders and mock data in local mode.
 
 OpenDART: financial statement ingestion requires corp code and account-name mapping verification. Canonical fields are defined in `domain/fundamentals/value_objects.py`.
