@@ -31,8 +31,8 @@ KR_CALENDAR_DATE_RANGE_COLLECTION_RUN_SCHEMA_VERSION = "kr_calendar_date_range_c
 KR_CALENDAR_DATE_RANGE_COLLECTION_LIMITATIONS = (
     "manual_invocation_only",
     "one_date_per_invocation",
-    "in_memory_reference_store_not_restart_durable",
-    "durable_supabase_job_store_not_implemented",
+    "job_store_durability_depends_on_explicit_adapter_configuration",
+    "durable_supabase_job_store_not_runtime_configured",
     "runtime_and_scheduler_not_connected",
     "provider_authenticity_and_finality_not_proven",
     "official_exchange_calendar_completeness_not_proven",

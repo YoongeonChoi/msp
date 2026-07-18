@@ -121,8 +121,14 @@ releases that fence; an uncommitted or still-unknown confirm leaves the attempt
 active. Any active fence is never reclaimed by TTL or used for a blind retry.
 The in-memory adapter validates these CAS and concurrency semantics but is test
 reference state only: it is not restart-durable and is intentionally absent from
-the runtime container. A durable Supabase job/checkpoint adapter and reviewed
-manual recovery workflow remain unimplemented.
+the runtime container. The explicit Supabase adapter persists the canonical job
+snapshot and append-only attempt ledger through service-role-only RPCs. Database
+CAS binds every mutation to the spec SHA, revision, attempt, holder, and target;
+restart/reconnect, concurrent begin, stale-write, blocked-attempt, terminal
+manifest, ACL/RLS, and zero-order-write behavior are exercised in a disposable
+PostgreSQL verifier. It has no TTL takeover or automatic retry. The adapter is
+not selected by the runtime container, and a reviewed manual recovery workflow
+remains unimplemented.
 
 This calendar collection path is not wired into the runtime container, the
 scheduler, automatic range backfill, Desktop, timing, features, backtests,

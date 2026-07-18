@@ -27,7 +27,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719020000_pit_source_observation_occurrence_store.sql`, and
 `20260719030000_pit_daily_candle_as_of_reader.sql`, followed by
 `20260719040000_pit_calendar_observation_store.sql`, and
-`20260719050000_pit_calendar_as_of_reader.sql`.
+`20260719050000_pit_calendar_as_of_reader.sql`, followed by
+`20260719060000_kr_calendar_collection_job_store.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -117,6 +118,26 @@ This verifier does not approve collection, runtime-container or scheduler
 wiring, timing backfill, DQ, completeness, authenticity, provider finality,
 corporate-action handling, dataset/research/feature/backtest/strategy/order use,
 Hosted Staging, or Live. Production Live remains not authorized.
+
+After the durable manual calendar collection-job migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_kr_calendar_collection_job_store.py
+```
+
+The five Worker-only RPCs must remain service-role-only. Confirm reconnect
+durability, concurrent create/begin serialization, exact spec/revision/attempt/
+holder/target fencing, pause followed only by a new explicit manual attempt,
+blocked-attempt takeover denial, immutable calendar occurrence binding,
+canonical UTC timestamps, the 366-day bound, terminal-manifest parity, forced
+RLS, append-only attempt history, and zero writes to trading/order rows. Never
+add TTL takeover or automatic retry for an unresolved attempt.
+
+The adapter is not selected by the runtime container or scheduler. Its presence
+does not approve a manual recovery procedure, automatic backfill, dataset/DQ
+certification, research/feature/backtest/strategy/order use, Hosted Staging, or
+Production Live.
 
 ## Start-of-day Paper checklist
 

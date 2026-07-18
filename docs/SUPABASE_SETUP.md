@@ -50,7 +50,8 @@ approval and dedicated staging credentials.
 40. `20260719030000_pit_daily_candle_as_of_reader.sql`
 41. `20260719040000_pit_calendar_observation_store.sql`
 42. `20260719050000_pit_calendar_as_of_reader.sql`
-43. `seed.sql`
+43. `20260719060000_kr_calendar_collection_job_store.sql`
+44. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -136,6 +137,11 @@ The timestamp migrations extend that boundary in this order:
   It also converges the shared calendar identity/evidence hash helpers to
   explicit `YYYY-MM-DD` dates so results remain independent of session
   `DateStyle` without changing the existing ISO hash bytes.
+- `20260719060000_kr_calendar_collection_job_store.sql` adds service-role-only
+  durable snapshots and an append-only attempt ledger for the default-disabled
+  manual KR calendar range job. Every mutation is bound to the spec SHA,
+  revision, attempt, holder, target date, and canonical clock. There is no TTL
+  takeover, automatic retry, runtime-container selection, or scheduler wiring.
 
 ## Required project configuration
 
@@ -169,6 +175,7 @@ python supabase/verify_pit_source_observation_occurrence_store.py
 python supabase/verify_pit_daily_candle_as_of_reader.py
 python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
+python supabase/verify_kr_calendar_collection_job_store.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -208,6 +215,11 @@ returns no partial result. The official Worker adapter additionally rejects
 non-identity response encoding, non-terminal short pages, excess continuations,
 and RPC response bodies above 4 MiB before returning a fixed, payload-free
 parser error.
+The calendar collection-job verifier additionally checks reconnect durability,
+concurrent create/begin, stale CAS zero-change, pause/rebegin, blocked-attempt
+takeover denial, immutable occurrence binding, canonical UTC, the 366-day
+boundary, Python/SQL terminal-manifest parity, forced RLS/ACL, append-only
+attempt history, and zero order-domain writes.
 
 For the calendar reader, `occurrence.observed_at <= as_of` is the semantic
 source cutoff. `received_at` remains lineage and cannot reconstruct which rows

@@ -44,7 +44,8 @@ SQL migration 순서:
 40. `20260719030000_pit_daily_candle_as_of_reader.sql`
 41. `20260719040000_pit_calendar_observation_store.sql`
 42. `20260719050000_pit_calendar_as_of_reader.sql`
-43. `seed.sql` (로컬 non-live 기본값만)
+43. `20260719060000_kr_calendar_collection_job_store.sql`
+44. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -61,6 +62,7 @@ python supabase/verify_pit_source_observation_occurrence_store.py
 python supabase/verify_pit_daily_candle_as_of_reader.py
 python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
+python supabase/verify_kr_calendar_collection_job_store.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
@@ -68,7 +70,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 
 `verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
 Docker의 새 `postgres:17-alpine`에 `0001`부터
-`20260719050000_pit_calendar_as_of_reader.sql`까지 적용하는
+`20260719060000_kr_calendar_collection_job_store.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
@@ -121,6 +123,9 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
   immutable occurrence/revision lineage, service-role-only zero-write RPC,
   15분 MVCC snapshot/manifest와 전체 timeline ambiguity fail-closed,
   calendar hash date의 명시적 `YYYY-MM-DD` 수렴과 `DateStyle` 독립성
+- default-disabled 수동 KR calendar range job의 durable snapshot과 append-only
+  attempt ledger, exact revision/fencing CAS, blocked-attempt 무인 takeover 금지,
+  terminal manifest Python/SQL parity, service-role-only RPC와 zero-order-write
 
 `verify_pit_candle_revision_store.py`는 별도의 disposable PostgreSQL에서 위 PIT
 동작을 fresh install과 직전 migration까지 채워진 upgrade 경로로 재검증합니다.
@@ -140,6 +145,11 @@ retained-timeline quarantine, ACL과 zero-write 계약을 검증합니다. 모�
 검증·버퍼하기 전에 부분 결과를 노출하지 않고 non-terminal short page·과도한
 continuation·non-identity response encoding·4 MiB 초과 RPC 응답을 payload-free
 오류로 거부하는 Worker adapter 동작은 별도 unit test로 검증합니다.
+`verify_kr_calendar_collection_job_store.py`는 fresh/populated-upgrade PostgreSQL에서
+동시 create/begin, 재접속 복원, stale CAS, pause 후 새 수동 attempt, blocked 상태의
+takeover 금지, immutable calendar occurrence 결합, canonical UTC, 366일 경계,
+terminal manifest, forced RLS/ACL, append-only ledger와 zero-order-write를 검증합니다.
+이 durable adapter는 runtime/container/scheduler에서 아직 선택되지 않습니다.
 
 `worker_api.list_pit_kr_daily_sessions_as_of_v1`의 `as_of` 의미는
 `occurrence.observed_at <= as_of`인 현재 보존 source evidence를 재구성하는

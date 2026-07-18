@@ -53,9 +53,15 @@
 - begin, pause, block, confirm 각각의 commit 전/후 응답 유실과 cancellation을
   fault-injection한다. begin 확인 전 collector 호출은 0회이고, confirm 응답 유실 뒤
   같은 날짜를 다시 수집하지 않으며, 오래된 active attempt를 TTL로 회수하지 않는다.
-- in-memory adapter는 lock/CAS reference semantics만 증명한다. 새 adapter instance가
-  기존 상태를 복원하지 못함을 명시하고 runtime/container/scheduler 연결이나 durable
-  Supabase checkpoint가 완료됐다고 표시하지 않는다.
+- in-memory adapter는 lock/CAS reference semantics만 증명하며 새 instance가 기존
+  상태를 복원하지 못해야 한다. 별도 Supabase adapter는 service-role-only RPC와
+  private RLS table/append-only attempt ledger를 사용하고 직접 table CRUD를 노출하지
+  않아야 한다.
+- disposable PostgreSQL에서 새 connection의 상태 복원, concurrent begin 단일 winner,
+  stale CAS 무변경, attempt UUID 재사용 차단, pause 후 새 수동 attempt, blocked attempt
+  무인 takeover 금지, complete manifest의 Python/SQL 동일성, ACL/RLS, 주문 경로
+  zero-write를 검증한다. runtime/container/scheduler 연결이나 manual recovery 승인은
+  별도 항목으로 남긴다.
 - 성공 결과도 provider authenticity/finality, official exchange completeness,
   corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
   승인을 의미하지 않는다.

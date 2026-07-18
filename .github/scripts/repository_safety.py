@@ -157,6 +157,11 @@ WORKER_API_ALLOWLIST = frozenset(
         "append_pit_daily_candle_timing_evidence_v1",
         "list_pit_daily_candles_as_of_v1",
         "list_pit_kr_daily_sessions_as_of_v1",
+        "load_or_create_kr_calendar_collection_job_v1",
+        "begin_kr_calendar_collection_date_attempt_v1",
+        "pause_kr_calendar_collection_date_attempt_v1",
+        "block_kr_calendar_collection_date_attempt_v1",
+        "confirm_kr_calendar_collection_date_v1",
     }
 )
 
