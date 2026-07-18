@@ -99,6 +99,8 @@ APPROVED_GITLEAKS_FINGERPRINTS = frozenset(
         "f43029dc833718ef79087f0c8eeb1359616d7f36:apps/worker/app/tests/unit/test_webhook_alert_notifier.py:generic-api-key:27",
         "f43029dc833718ef79087f0c8eeb1359616d7f36:apps/worker/app/tests/unit/test_redaction.py:generic-api-key:8",
         "8904120101ec6bec62b8585f3e3341f66930edcd:apps/worker/app/tests/unit/test_redaction.py:generic-api-key:5",
+        "2c499a729405f68966a7aa1f8d7bcecd95d7b0ef:apps/desktop/playwright.config.ts:generic-api-key:19",
+        "2c499a729405f68966a7aa1f8d7bcecd95d7b0ef:apps/desktop/tests/supabaseConfigSecurity.test.ts:generic-api-key:5",
     }
 )
 
