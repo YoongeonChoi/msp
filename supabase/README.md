@@ -37,7 +37,8 @@ SQL migration 순서:
 33. `20260715041909_operation_claim_fencing.sql`
 34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
-36. `seed.sql` (로컬 non-live 기본값만)
+36. `20260718165749_pgcrypto_schema_convergence.sql`
+37. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -55,7 +56,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 
 `verify_g1_g2_migration.py`가 현재 repository-local migration 검증 진입점입니다.
 Docker의 새 `postgres:16-alpine`에 `0001`부터
-`20260715041915_paper_evidence_and_sell_reservation_guards.sql`까지 적용하는
+`20260718165749_pgcrypto_schema_convergence.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST

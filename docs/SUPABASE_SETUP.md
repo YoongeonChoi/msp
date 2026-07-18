@@ -43,7 +43,8 @@ approval and dedicated staging credentials.
 33. `20260715041909_operation_claim_fencing.sql`
 34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
-36. `seed.sql`
+36. `20260718165749_pgcrypto_schema_convergence.sql`
+37. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -87,6 +88,9 @@ The timestamp migrations extend that boundary in this order:
 - `20260715041915` rejects mixed series/source/volume evidence for aggregate
   Paper fills in one completed minute and permits only one active sell
   reservation per account and symbol until its quantity reaches zero.
+- `20260718165749` relocates `pgcrypto` to the locked `extensions` schema while
+  preserving extension object identities and recompiles application routines to
+  use the schema-qualified `extensions.digest` reference.
 
 ## Required project configuration
 

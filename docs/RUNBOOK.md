@@ -19,8 +19,9 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260715020752_kst_trading_date_convergence.sql`,
 `20260715041903_paper_bar_participation_guard.sql`,
 `20260715041909_operation_claim_fencing.sql`,
-`20260715041912_sell_cost_basis_checkpoint_guard.sql`, and
-`20260715041915_paper_evidence_and_sell_reservation_guards.sql`.
+`20260715041912_sell_cost_basis_checkpoint_guard.sql`,
+`20260715041915_paper_evidence_and_sell_reservation_guards.sql`, and
+`20260718165749_pgcrypto_schema_convergence.sql`.
 
 ## Start-of-day Paper checklist
 
