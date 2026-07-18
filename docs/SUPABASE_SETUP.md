@@ -44,7 +44,8 @@ approval and dedicated staging credentials.
 34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
 36. `20260718165749_pgcrypto_schema_convergence.sql`
-37. `seed.sql`
+37. `20260719001947_pit_candle_revision_store.sql`
+38. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -91,6 +92,10 @@ The timestamp migrations extend that boundary in this order:
 - `20260718165749` relocates `pgcrypto` to the locked `extensions` schema while
   preserving extension object identities and recompiles application routines to
   use the schema-qualified `extensions.digest` reference.
+- `20260719001947` adds a private, append-only daily-candle revision ledger,
+  mutable serialized stream heads, durable ambiguity quarantine, and one
+  service-role-only Worker RPC. It does not persist or certify calendar timing
+  evidence.
 
 ## Required project configuration
 
@@ -118,6 +123,7 @@ PostgreSQL instance:
 
 ```bash
 python supabase/verify_g1_g2_migration.py
+python supabase/verify_pit_candle_revision_store.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -127,7 +133,10 @@ constraints, ledger invariants, command separation, append-only audit behavior,
 Paper source publication, KST cash settlement, Unknown V2 dedicated
 maker/checker application, aggregate Paper bar participation, lease-bound
 operation/reconciliation claims, and Worker RPC visibility. Also run the Python
-contract tests and repository safety checks.
+contract tests and repository safety checks. The dedicated PIT verifier adds
+Python/SQL canonical-hash vectors, exact replay and correction semantics,
+concurrent first-write serialization, durable quarantine, direct-table denial,
+and a populated pre-migration upgrade check.
 
 Do not use the service role or a database owner session as evidence for the
 authenticated/anonymous negative matrix. Hosted staging additionally requires

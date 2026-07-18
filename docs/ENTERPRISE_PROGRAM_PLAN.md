@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑, evidence-time as-of 선택이 있지만 durable persistence·quarantine·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle revision·ambiguity quarantine, provider hash에 묶인 PIT 거래일·세션 매핑, evidence-time as-of 선택이 있다. 그러나 collection·timing persistence·feature 연결은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -109,9 +109,12 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 - `apps/worker/app/application/services/data_collection_service.py`는 명시적인
   단일-page PIT candle read만 수행한다. persistence, pagination, scheduler,
   completed-bar 인증, feature 연결은 아직 없다.
-- candle observation storage port와 in-memory reference adapter는 exact replay,
-  correction revision, ambiguous historical-hash recurrence를 구분하지만 durable
-  database persistence나 collection wiring을 제공하지 않는다.
+- candle observation storage port의 in-memory reference adapter와 명시적 Supabase
+  Worker adapter는 exact replay와 strictly-later correction revision을 구분한다.
+  Supabase RPC는 canonical key/hash를 DB에서 재계산하고 accepted revision과
+  시각 역행·same-clock conflict·historical-hash recurrence quarantine을 durable
+  append-only row로 보존한다. 아직 collection wiring, calendar timing evidence,
+  completeness 또는 feature readiness는 제공하지 않는다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
   않는다.

@@ -152,6 +152,7 @@ WORKER_API_ALLOWLIST = frozenset(
         "list_unknown_resolution_v2",
         "claim_unknown_resolution_v2",
         "apply_unknown_resolution_v2",
+        "append_pit_candle_observation_v1",
     }
 )
 

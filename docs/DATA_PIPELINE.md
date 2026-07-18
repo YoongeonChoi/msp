@@ -43,12 +43,23 @@ calendar A-to-B-to-A recurrence. SHA-256 values are integrity and lineage
 checks, not provider signatures.
 
 Append-only candle revision semantics are defined behind a dedicated storage
-port and an in-memory reference adapter. This adapter is not durable and is not
-wired into collection or feature calculation. A repeated latest hash is an
-idempotent replay; a new hash requires a strictly later observation time and
-creates a revision. Reappearance of an older historical hash is rejected as
-ambiguous rather than guessed to be a replay or provider reversion; no durable
-quarantine exists yet.
+port. The in-memory reference adapter and the explicit Supabase Worker adapter
+implement the same receipt contract. The Supabase path uses one service-role-
+only RPC to serialize each logical candle, recompute the Python canonical
+identity and observation hashes in PostgreSQL, and persist immutable revisions.
+A repeated latest hash is an idempotent replay; a new hash requires a strictly
+later observation time and creates the next database-assigned revision.
+Reappearance of an older historical hash, a same-clock price conflict, or an
+observation-time regression returns a committed quarantine receipt before the
+Worker adapter raises a fail-closed domain error. Quarantine rows and accepted
+revisions are append-only, while direct table access is denied to runtime roles.
+
+This Supabase adapter is not wired into collection or feature calculation.
+The durable store proves only the behavior of observations actually submitted
+to its RPC; it does not prove collection completeness, provider authenticity or
+finality, corporate-action safety, calendar timing evidence, DQ approval, or
+feature/research/order readiness. An unresolved quarantine is evidence of an
+ambiguity, not an automated resolution or a promotion decision.
 
 KRX: market calendar/listing/statistics are adapter placeholders and mock data in local mode.
 

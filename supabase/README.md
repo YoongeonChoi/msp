@@ -38,7 +38,8 @@ SQL migration 순서:
 34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
 36. `20260718165749_pgcrypto_schema_convergence.sql`
-37. `seed.sql` (로컬 non-live 기본값만)
+37. `20260719001947_pit_candle_revision_store.sql`
+38. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -49,14 +50,15 @@ for f in supabase/migrations/*.sql; do echo "$f"; done
 rg "enable row level security" supabase/migrations/0002_rls.sql
 python supabase/verify_live_enable_migration.py
 python supabase/verify_g1_g2_migration.py
+python supabase/verify_pit_candle_revision_store.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
 ```
 
-`verify_g1_g2_migration.py`가 현재 repository-local migration 검증 진입점입니다.
-Docker의 새 `postgres:16-alpine`에 `0001`부터
-`20260718165749_pgcrypto_schema_convergence.sql`까지 적용하는
+`verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
+Docker의 새 `postgres:17-alpine`에 `0001`부터
+`20260719001947_pit_candle_revision_store.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
@@ -91,6 +93,15 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
   fencing token에 결합되고 tokenless legacy overload가 fail-closed인지
 - 동일 완료 bar의 Paper fill이 하나의 series/source/volume evidence만 사용하고,
   계좌·종목별 active sell reservation이 하나만 존재하는지
+- PIT daily candle의 canonical Python/SQL hash, concurrent exact replay,
+  strictly-later correction revision, A→B→A·시각 역행 quarantine, append-only
+  evidence, service-role 전용 RPC 및 direct table 접근 차단
+
+`verify_pit_candle_revision_store.py`는 별도의 disposable PostgreSQL에서 위 PIT
+동작을 fresh install과 직전 migration까지 채워진 upgrade 경로로 재검증합니다.
+이 검증은 candle revision persistence만 다루며 calendar timing evidence,
+collection completeness, provider finality 또는 feature readiness를 인증하지
+않습니다.
 
 PostgREST image를 받을 수 없는 로컬 parser 디버깅에만
 `--skip-postgrest`를 사용할 수 있습니다. 이 옵션을 사용한 결과는 staging 승인
