@@ -89,6 +89,33 @@ orders. Preserving a closed-day observation is source evidence, not proof of a
 complete KRX calendar, provider authenticity or finality, corporate-action
 safety, DQ approval, dataset certification, or research/order authorization.
 
+`20260719050000_pit_calendar_as_of_reader.sql` adds the independent Worker-only
+`worker_api.list_pit_kr_daily_sessions_as_of_v1` read boundary for both open and
+closed retained calendar evidence. One query is limited to one exact provider,
+the `KR` market, an inclusive range of at most 366 calendar days, page size
+`25..100`, and no more than 1,000 raw candidates. Eligibility is determined by
+the source-semantic `occurrence.observed_at <= as_of` cutoff. `received_at`
+remains immutable lineage and cannot be used to reconstruct which transaction
+was committed or visible in the database at a past instant. The migration also
+converges the shared calendar identity/evidence hash helpers to explicit
+`YYYY-MM-DD` rendering so their bytes do not depend on session `DateStyle`.
+
+The reader joins exact immutable occurrence/content-revision lineage and never
+uses a mutable calendar stream head as its source. Its first page binds the
+query and complete ordered candidate manifest to a PostgreSQL MVCC snapshot for
+15 minutes. Every page is validated and buffered before any result is exposed;
+the Worker requires identity response encoding and rejects a non-terminal short
+page, excess continuation count, or an RPC body above 4 MiB before JSON decode. Any parser
+failure is re-raised without upstream payload details in its exception chain.
+Cursor expiry, manifest drift, corrupt hashes or lineage, or an ambiguity in the
+full as-of-eligible retained timeline fails the whole read closed with no
+partial result. The RPC writes no domain rows.
+
+This bounded reader is not collection, runtime-container, scheduler, timing
+backfill, DQ, completeness, provider-finality or authenticity,
+corporate-action, dataset, research, feature, backtest, strategy, order,
+Desktop, or Live authorization. Production Live remains not authorized.
+
 The existing timing writer keeps its stricter monotonic source-stream guard.
 An exact calendar-only occurrence can be replayed after a newer observation,
 but a new timing request cannot bind that older occurrence once the calendar
@@ -166,9 +193,9 @@ authorization. The slice service is read-only and is not wired into the
 runtime container, scheduler, features, backtests, strategy, or any order
 path.
 
-The RPC is granted only to the server-side `service_role`; it is not exposed to
-Desktop, `public`, authenticated clients, or Realtime. The port and adapter are
-not wired into collection, the runtime container, features, strategy,
+The read RPCs are granted only to the server-side `service_role`; they are not
+exposed to Desktop, `public`, authenticated clients, or Realtime. The port and
+adapter are not wired into collection, the runtime container, features, strategy,
 backtests, or any order path. These contracts do not prove collection
 completeness, provider authenticity or finality, corporate-action safety, DQ
 approval, or feature/research/order readiness. An unresolved quarantine is

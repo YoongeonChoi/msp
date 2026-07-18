@@ -49,7 +49,8 @@ approval and dedicated staging credentials.
 39. `20260719020000_pit_source_observation_occurrence_store.sql`
 40. `20260719030000_pit_daily_candle_as_of_reader.sql`
 41. `20260719040000_pit_calendar_observation_store.sql`
-42. `seed.sql`
+42. `20260719050000_pit_calendar_as_of_reader.sql`
+43. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -125,6 +126,16 @@ The timestamp migrations extend that boundary in this order:
   quarantines clock regression, same-clock conflict, and historical hash
   recurrence. It is not wired into collection, scheduling, features,
   backtests, strategy, Desktop, or orders.
+- `20260719050000_pit_calendar_as_of_reader.sql` adds the service-role-only
+  `worker_api.list_pit_kr_daily_sessions_as_of_v1` RPC. It reads open and closed
+  retained sessions for one exact provider and `KR` market over at most 366
+  inclusive calendar days, accepts page sizes `25..100`, and rejects more than
+  1,000 raw candidates. A 15-minute MVCC snapshot and complete ordered manifest
+  bind exact immutable occurrence/content-revision lineage across every page;
+  no mutable stream head is a read source and the RPC writes zero domain rows.
+  It also converges the shared calendar identity/evidence hash helpers to
+  explicit `YYYY-MM-DD` dates so results remain independent of session
+  `DateStyle` without changing the existing ISO hash bytes.
 
 ## Required project configuration
 
@@ -157,6 +168,7 @@ python supabase/verify_pit_daily_candle_timing_store.py
 python supabase/verify_pit_source_observation_occurrence_store.py
 python supabase/verify_pit_daily_candle_as_of_reader.py
 python supabase/verify_pit_calendar_observation_store.py
+python supabase/verify_pit_calendar_as_of_reader.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -186,6 +198,24 @@ corrections, durable quarantine, fresh and populated upgrades, and concurrent
 serialization with the existing timing RPC. It also verifies the current
 fail-closed limitation that a new timing request cannot bind an older calendar
 occurrence after that calendar stream head advances.
+The calendar as-of verifier additionally checks open and closed session reads,
+the 366-day/page/candidate bounds, immutable revision/occurrence lineage,
+15-minute snapshot/cursor/manifest continuity, `observed_at` cutoff semantics,
+full as-of-eligible retained-timeline quarantine blocking, service-role-only
+ACLs, and zero domain writes. Every page must be validated and buffered before
+exposure; a cursor, manifest, payload, hash, lineage, or quarantine failure
+returns no partial result. The official Worker adapter additionally rejects
+non-identity response encoding, non-terminal short pages, excess continuations,
+and RPC response bodies above 4 MiB before returning a fixed, payload-free
+parser error.
+
+For the calendar reader, `occurrence.observed_at <= as_of` is the semantic
+source cutoff. `received_at` remains lineage and cannot reconstruct which rows
+were committed or visible in the database at a historical instant. It is not
+wired into collection, the runtime container, scheduling, timing backfill, DQ,
+dataset, research, features, backtests, strategy, Desktop, or orders. Passing
+the verifier does not certify completeness, authenticity, provider finality,
+corporate-action safety, Hosted Staging, or Production Live authorization.
 
 For this reader, `evidence_available_at <= as_of` reconstructs eligibility from
 the durable source evidence retained when the query runs. It is not a

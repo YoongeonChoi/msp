@@ -26,7 +26,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719010000_pit_daily_candle_timing_store.sql`,
 `20260719020000_pit_source_observation_occurrence_store.sql`, and
 `20260719030000_pit_daily_candle_as_of_reader.sql`, followed by
-`20260719040000_pit_calendar_observation_store.sql`.
+`20260719040000_pit_calendar_observation_store.sql`, and
+`20260719050000_pit_calendar_as_of_reader.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -85,6 +86,37 @@ It is not a calendar completeness, provider-finality, DQ, dataset, feature,
 backtest, strategy, or order authorization boundary. The existing timing RPC
 also remains fail closed when a new request tries to bind an older calendar
 occurrence after the calendar stream head has advanced.
+
+After the bounded calendar as-of reader migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_pit_calendar_as_of_reader.py
+```
+
+The Worker-only RPC reads both open and closed sessions for one exact provider
+and the `KR` market. Keep every request within 366 inclusive calendar days,
+page size `25..100`, and 1,000 raw candidates. Keep the server-issued cursor
+opaque: it binds the query, complete ordered candidate manifest, and one MVCC
+snapshot for at most 15 minutes. The reader uses exact immutable occurrence and
+content-revision lineage, never a mutable stream head. The migration also
+converges shared calendar hash dates to explicit `YYYY-MM-DD`; a non-ISO
+session `DateStyle` must produce the same identities, items, and manifest.
+
+`observed_at <= as_of` is the only source-semantic cutoff. `received_at` is
+lineage and cannot reconstruct past database visibility. On cursor expiry,
+manifest drift, corrupt payload/hash/lineage, or any ambiguity in the full
+as-of-eligible retained timeline, discard every buffered page and expose no
+partial result. Also fail the whole read when a non-terminal page is shorter
+than the requested page size, continuation exceeds the declared candidate
+count, response encoding is not identity, or one RPC response exceeds 4 MiB.
+The read writes zero domain rows and
+is unavailable to Desktop, `public`, authenticated clients, and Realtime.
+
+This verifier does not approve collection, runtime-container or scheduler
+wiring, timing backfill, DQ, completeness, authenticity, provider finality,
+corporate-action handling, dataset/research/feature/backtest/strategy/order use,
+Hosted Staging, or Live. Production Live remains not authorized.
 
 ## Start-of-day Paper checklist
 

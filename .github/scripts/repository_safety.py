@@ -156,6 +156,7 @@ WORKER_API_ALLOWLIST = frozenset(
         "append_pit_kr_daily_session_observation_v1",
         "append_pit_daily_candle_timing_evidence_v1",
         "list_pit_daily_candles_as_of_v1",
+        "list_pit_kr_daily_sessions_as_of_v1",
     }
 )
 
