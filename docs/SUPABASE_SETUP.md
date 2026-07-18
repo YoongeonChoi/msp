@@ -48,7 +48,8 @@ approval and dedicated staging credentials.
 38. `20260719010000_pit_daily_candle_timing_store.sql`
 39. `20260719020000_pit_source_observation_occurrence_store.sql`
 40. `20260719030000_pit_daily_candle_as_of_reader.sql`
-41. `seed.sql`
+41. `20260719040000_pit_calendar_observation_store.sql`
+42. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -116,6 +117,14 @@ The timestamp migrations extend that boundary in this order:
   candidates. A 15-minute PostgreSQL MVCC snapshot token and a full ordered
   raw-candidate manifest bind every page. The RPC writes zero domain rows and is
   not exposed to Desktop, `public`, authenticated clients, or Realtime.
+- `20260719040000_pit_calendar_observation_store.sql` adds the service-role-only
+  `worker_api.append_pit_kr_daily_session_observation_v1` RPC over the private
+  calendar content and occurrence ledgers. It accepts canonical open and closed
+  KR session observations, derives hashes and KST geometry in PostgreSQL,
+  preserves later unchanged observations as occurrences, and durably
+  quarantines clock regression, same-clock conflict, and historical hash
+  recurrence. It is not wired into collection, scheduling, features,
+  backtests, strategy, Desktop, or orders.
 
 ## Required project configuration
 
@@ -147,6 +156,7 @@ python supabase/verify_pit_candle_revision_store.py
 python supabase/verify_pit_daily_candle_timing_store.py
 python supabase/verify_pit_source_observation_occurrence_store.py
 python supabase/verify_pit_daily_candle_as_of_reader.py
+python supabase/verify_pit_calendar_observation_store.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -170,6 +180,12 @@ exact-series request, service-role-only RPC grant, zero-write reads,
 deterministic paging under one 15-minute MVCC snapshot, complete raw-candidate
 manifest binding, adapter/selector equivalence, and fail-closed ambiguity,
 corruption, cursor, and concurrent-writer cases.
+The independent calendar verifier additionally checks open/closed session
+geometry, exact historical occurrence replay, later unchanged observations,
+corrections, durable quarantine, fresh and populated upgrades, and concurrent
+serialization with the existing timing RPC. It also verifies the current
+fail-closed limitation that a new timing request cannot bind an older calendar
+occurrence after that calendar stream head advances.
 
 For this reader, `evidence_available_at <= as_of` reconstructs eligibility from
 the durable source evidence retained when the query runs. It is not a

@@ -25,7 +25,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719001947_pit_candle_revision_store.sql`,
 `20260719010000_pit_daily_candle_timing_store.sql`,
 `20260719020000_pit_source_observation_occurrence_store.sql`, and
-`20260719030000_pit_daily_candle_as_of_reader.sql`.
+`20260719030000_pit_daily_candle_as_of_reader.sql`, followed by
+`20260719040000_pit_calendar_observation_store.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -68,6 +69,22 @@ strategy, backtests, or orders. Its verifier does not establish completeness,
 authenticity, provider finality, corporate-action safety, DQ approval, feature
 readiness, Hosted Staging approval, or any Live authorization. Production Live
 remains not authorized.
+
+After the independent calendar observation migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_pit_calendar_observation_store.py
+```
+
+The RPC accepts one canonical open or closed KR session observation and remains
+available only to the server-side `service_role`. Confirm exact occurrence
+replay, later unchanged occurrence storage, correction revisions, durable
+quarantine, append-only ACLs, and serialization with the existing timing RPC.
+It is not a calendar completeness, provider-finality, DQ, dataset, feature,
+backtest, strategy, or order authorization boundary. The existing timing RPC
+also remains fail closed when a new request tries to bind an older calendar
+occurrence after the calendar stream head has advanced.
 
 ## Start-of-day Paper checklist
 

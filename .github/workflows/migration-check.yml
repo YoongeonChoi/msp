@@ -8,7 +8,9 @@ on:
       - "apps/worker/app/domain/market_data/daily_candle_timing.py"
       - "apps/worker/app/domain/market_data/daily_candle_as_of.py"
       - "apps/worker/app/application/ports/daily_candle_as_of_reader_port.py"
+      - "apps/worker/app/application/ports/calendar_observation_store_port.py"
       - "apps/worker/app/adapters/persistence/supabase_daily_candle_as_of_reader.py"
+      - "apps/worker/app/adapters/persistence/supabase_calendar_observation_store.py"
       - "supabase/migrations/**"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
@@ -16,6 +18,7 @@ on:
       - "supabase/verify_pit_daily_candle_timing_store.py"
       - "supabase/verify_pit_source_observation_occurrence_store.py"
       - "supabase/verify_pit_daily_candle_as_of_reader.py"
+      - "supabase/verify_pit_calendar_observation_store.py"
       - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
@@ -25,7 +28,9 @@ on:
       - "apps/worker/app/domain/market_data/daily_candle_timing.py"
       - "apps/worker/app/domain/market_data/daily_candle_as_of.py"
       - "apps/worker/app/application/ports/daily_candle_as_of_reader_port.py"
+      - "apps/worker/app/application/ports/calendar_observation_store_port.py"
       - "apps/worker/app/adapters/persistence/supabase_daily_candle_as_of_reader.py"
+      - "apps/worker/app/adapters/persistence/supabase_calendar_observation_store.py"
       - "supabase/migrations/**"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
@@ -33,6 +38,7 @@ on:
       - "supabase/verify_pit_daily_candle_timing_store.py"
       - "supabase/verify_pit_source_observation_occurrence_store.py"
       - "supabase/verify_pit_daily_candle_as_of_reader.py"
+      - "supabase/verify_pit_calendar_observation_store.py"
       - ".github/workflows/migration-check.yml"
 
 permissions:
@@ -104,6 +110,8 @@ jobs:
         run: python supabase/verify_pit_source_observation_occurrence_store.py
       - name: Verify durable PIT daily-candle as-of reader
         run: python supabase/verify_pit_daily_candle_as_of_reader.py
+      - name: Verify independent PIT KR calendar observations
+        run: python supabase/verify_pit_calendar_observation_store.py
       - name: Check singleton paper safety seed
         shell: python
         run: |

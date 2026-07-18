@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 collection/runtime/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 collection/runtime/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -121,7 +121,14 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   wiring, completeness 또는 feature readiness는 제공하지 않는다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
-  않는다.
+  않는다. 별도 Worker-only calendar observation store는 개장·휴장 증거 모두를
+  기존 append-only calendar content/occurrence ledger에 저장하고 exact replay,
+  later unchanged occurrence, strictly-later correction을 구분한다. source-clock
+  regression, same-clock conflict, historical hash recurrence는 durable quarantine으로
+  남기지만 collection/runtime에는 연결되지 않았고 전체 거래일 completeness를
+  인증하지 않는다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
+  calendar head가 전진한 뒤 과거 occurrence를 새 timing 요청으로 backfill하는 경로는
+  fail closed이며 별도 계약이 필요하다.
 - daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
   다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
   corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다. 명시적
@@ -540,6 +547,7 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [ ] `E3 Point-in-Time Data Plane` 구현
 - [x] `E3` occurrence-backed bounded durable as-of reader 로컬 구현
 - [x] `E3` retained-open-session research-slice gate와 canonical scope/data-lineage fingerprint 로컬 구현
+- [x] `E3` 개장·휴장 독립 calendar observation store와 durable ambiguity quarantine 로컬 구현
 - [ ] `E3` collection/runtime/feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거

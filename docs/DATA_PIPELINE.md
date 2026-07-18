@@ -71,6 +71,32 @@ a missing exact source occurrence, or a forged binding produces a durable
 quarantine receipt and no accepted timing row. Runtime roles have no direct
 table access.
 
+`20260719040000_pit_calendar_observation_store.sql` adds a separate Worker-only
+calendar observation RPC over the same append-only calendar content and
+occurrence ledgers. It accepts one canonically validated KR session observation,
+including both open and closed dates, and recomputes the calendar identity,
+evidence hash, canonical timestamps, and KST session geometry in PostgreSQL.
+An exact occurrence replay returns the existing receipt, a later unchanged
+observation adds only an occurrence, and a strictly later correction adds one
+content revision plus its occurrence. A regressed source clock, same-clock
+content conflict, or historical content-hash recurrence is durably quarantined
+and the Worker adapter fails closed. The RPC is service-role-only and direct
+table access remains denied.
+
+This calendar-only path is explicit and is not wired into collection, the
+runtime container, the scheduler, Desktop, features, backtests, strategy, or
+orders. Preserving a closed-day observation is source evidence, not proof of a
+complete KRX calendar, provider authenticity or finality, corporate-action
+safety, DQ approval, dataset certification, or research/order authorization.
+
+The existing timing writer keeps its stricter monotonic source-stream guard.
+An exact calendar-only occurrence can be replayed after a newer observation,
+but a new timing request cannot bind that older occurrence once the calendar
+stream head has advanced; it is quarantined fail closed. Exact retries of an
+already recorded timing request still use the timing request ledger. Supporting
+asynchronous historical timing backfill requires a separate reviewed contract
+and is not part of this store.
+
 Calendar evidence and timing evidence have separate acceptance semantics. A
 valid calendar correction may be committed before a later timing-stream guard
 quarantines the timing candidate. The current Worker adapter still raises a
