@@ -11,6 +11,7 @@ on:
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
       - "supabase/verify_pit_daily_candle_timing_store.py"
+      - "supabase/verify_pit_source_observation_occurrence_store.py"
       - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
@@ -23,6 +24,7 @@ on:
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
       - "supabase/verify_pit_daily_candle_timing_store.py"
+      - "supabase/verify_pit_source_observation_occurrence_store.py"
       - ".github/workflows/migration-check.yml"
 
 permissions:
@@ -90,6 +92,8 @@ jobs:
         run: python supabase/verify_pit_candle_revision_store.py
       - name: Verify PIT daily-candle timing evidence
         run: python supabase/verify_pit_daily_candle_timing_store.py
+      - name: Verify PIT source observation occurrences
+        run: python supabase/verify_pit_source_observation_occurrence_store.py
       - name: Check singleton paper safety seed
         shell: python
         run: |

@@ -706,7 +706,7 @@ def verify_replay_and_corrections(container: str) -> None:
     print("PASS exact replay plus calendar and candle-bound timing corrections")
 
 
-def verify_exact_reobservation_has_no_clock_poisoning(container: str) -> None:
+def verify_exact_reobservation_creates_occurrence(container: str) -> None:
     candle, calendar, timing = fixture(day_offset=14, symbol="100015")
     append_candle(container, candle)
     append_timing(
@@ -715,47 +715,35 @@ def verify_exact_reobservation_has_no_clock_poisoning(container: str) -> None:
         calendar,
         timing,
     )
-    before = scalar(
-        container,
-        f"""
-select concat_ws('|',
-  row_to_json(head)::text,
-  (select count(*) from private.pit_calendar_content_revisions as revision
-   where revision.calendar_idempotency_key={sql_text(calendar.idempotency_key)}),
-  (select count(*) from private.pit_daily_candle_timing_revisions as revision
-   where revision.timing_idempotency_key={sql_text(timing.idempotency_key)})
-)
-from private.pit_calendar_stream_heads as head
-where head.calendar_idempotency_key={sql_text(calendar.idempotency_key)};
-""",
-    )
-
     _, later_calendar, later_timing = fixture(
         day_offset=14,
         symbol="100015",
         calendar_observed_minutes=5,
     )
-    quarantined = append_timing(
+    accepted = append_timing(
         container,
         request_key("exact-reobservation-later-clock"),
         later_calendar,
         later_timing,
     )
-    quarantine_id = assert_quarantine(
-        quarantined,
-        "pit_timing_calendar_revision_missing",
+    assert_accepted(
+        accepted,
+        later_timing,
+        status="stored",
+        calendar_revision=1,
+        timing_revision=2,
+        calendar_inserted=False,
+        timing_inserted=True,
     )
-    if quarantined.get("calendar_inserted") is not False:
-        raise VerificationError(
-            f"exact re-observation reported a calendar insert: {quarantined}"
-        )
-    after = scalar(
+    state = scalar(
         container,
         f"""
 select concat_ws('|',
-  row_to_json(head)::text,
+  private.pit_canonical_timestamp_v1(head.last_seen_observed_at),
   (select count(*) from private.pit_calendar_content_revisions as revision
    where revision.calendar_idempotency_key={sql_text(calendar.idempotency_key)}),
+  (select count(*) from private.pit_calendar_observation_occurrences as occurrence
+   where occurrence.calendar_idempotency_key={sql_text(calendar.idempotency_key)}),
   (select count(*) from private.pit_daily_candle_timing_revisions as revision
    where revision.timing_idempotency_key={sql_text(timing.idempotency_key)})
 )
@@ -763,10 +751,10 @@ from private.pit_calendar_stream_heads as head
 where head.calendar_idempotency_key={sql_text(calendar.idempotency_key)};
 """,
     )
-    if after != before:
+    expected_state = f"{later_calendar.to_payload()['observed_at']}|1|2|2"
+    if state != expected_state:
         raise VerificationError(
-            "quarantined exact re-observation mutated calendar head or revisions: "
-            f"{before} != {after}"
+            f"exact re-observation occurrence state mismatch: {state}"
         )
 
     retry = append_timing(
@@ -775,12 +763,20 @@ where head.calendar_idempotency_key={sql_text(calendar.idempotency_key)};
         later_calendar,
         later_timing,
     )
-    assert_quarantine(
+    assert_accepted(
         retry,
-        "pit_timing_calendar_revision_missing",
-        previous_id=quarantine_id,
+        later_timing,
+        status="stored",
+        calendar_revision=1,
+        timing_revision=2,
+        calendar_inserted=False,
+        timing_inserted=True,
     )
-    print("PASS exact re-observation quarantine cannot poison the calendar clock")
+    if retry != accepted:
+        raise VerificationError(
+            f"exact re-observation request replay changed receipt: {accepted} / {retry}"
+        )
+    print("PASS exact re-observation appends an occurrence and exact timing binding")
 
 
 def verify_calendar_revision_guards(container: str) -> None:
@@ -918,7 +914,15 @@ def verify_timing_revision_guards(container: str) -> None:
         calendar_late,
         timing_b,
     )
-    assert_quarantine(same_clock, "pit_timing_revision_time_not_increasing")
+    assert_accepted(
+        same_clock,
+        timing_b,
+        status="stored",
+        calendar_revision=1,
+        timing_revision=2,
+        calendar_inserted=False,
+        timing_inserted=True,
+    )
 
     candle_x, calendar_x, timing_x = fixture(day_offset=12, symbol="100013")
     candle_y, _, timing_y = fixture(
@@ -941,7 +945,7 @@ def verify_timing_revision_guards(container: str) -> None:
         recurrence,
         "pit_timing_historical_hash_recurrence_ambiguous",
     )
-    print("PASS timing regression, same-clock and A-B-A guards")
+    print("PASS timing regression, same-availability advance and A-B-A guards")
 
 
 def verify_request_idempotency_conflict(container: str) -> None:
@@ -1208,7 +1212,7 @@ def main() -> int:
         verify_python_sql_golden_vectors(fresh)
         verify_concurrent_exact_delivery(fresh)
         verify_replay_and_corrections(fresh)
-        verify_exact_reobservation_has_no_clock_poisoning(fresh)
+        verify_exact_reobservation_creates_occurrence(fresh)
         verify_calendar_revision_guards(fresh)
         verify_timing_revision_guards(fresh)
         verify_request_idempotency_conflict(fresh)

@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar revision·ambiguity quarantine, 두 immutable source revision에 대한 timing exact binding, evidence-time as-of 선택이 있다. 그러나 collection/runtime wiring·durable as-of source·feature 연결은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, evidence-time as-of 선택이 있다. 그러나 collection/runtime wiring·durable as-of source·feature 연결은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -113,18 +113,19 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   Worker adapter는 exact replay와 strictly-later correction revision을 구분한다.
   Supabase RPC는 canonical key/hash를 DB에서 재계산하고 accepted revision과
   시각 역행·same-clock conflict·historical-hash recurrence quarantine을 durable
-  append-only row로 보존한다. 별도 timing RPC는 calendar revision을 같은 방식으로
-  보존하고 immutable candle/calendar source row에서 availability와 timing hash를
-  재계산해 exact binding을 남긴다. 아직 collection/runtime wiring, durable as-of
-  reader, completeness 또는 feature readiness는 제공하지 않는다.
+  append-only row로 보존한다. 별도 timing RPC는 calendar content와 candle/calendar
+  observation occurrence를 분리해 보존하고 exact occurrence에서 availability와
+  timing hash를 재계산한다. 동일 content의 후속 관측도 content revision을 늘리지
+  않고 occurrence로 남긴다. 아직 collection/runtime wiring, durable as-of reader,
+  completeness 또는 feature readiness는 제공하지 않는다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
   않는다.
 - daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
   다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
   corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다. 명시적
-  Supabase adapter는 이 결과를 exact source revision에 결합하지만 collection이나
-  feature 경로에는 아직 연결되지 않았다.
+  Supabase adapter는 이 결과를 exact source content revision과 observation
+  occurrence에 결합하지만 collection이나 feature 경로에는 아직 연결되지 않았다.
 - daily candle as-of selector는 모든 candle/timing source를 재검증·교차 결합하고
   `evidence_available_at`으로 조회 시점 적격성을, `candle.observed_at`으로 correction
   순서를 판단한다. 동일 시각 충돌·historical hash recurrence·daily identity drift는

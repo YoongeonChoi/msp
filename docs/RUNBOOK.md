@@ -22,8 +22,16 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260715041912_sell_cost_basis_checkpoint_guard.sql`,
 `20260715041915_paper_evidence_and_sell_reservation_guards.sql`, and
 `20260718165749_pgcrypto_schema_convergence.sql`, followed by
-`20260719001947_pit_candle_revision_store.sql`, and
-`20260719010000_pit_daily_candle_timing_store.sql`.
+`20260719001947_pit_candle_revision_store.sql`,
+`20260719010000_pit_daily_candle_timing_store.sql`, and
+`20260719020000_pit_source_observation_occurrence_store.sql`.
+
+After the occurrence migration, confirm its dedicated fresh and populated
+upgrade verifier passes. The upgrade can reconstruct original content
+observations and the latest retained candle-head observation only; it cannot
+invent intermediate unchanged observations that the previous schema discarded.
+Do not reinterpret an existing quarantined request key. Its durable receipt must
+remain stable, and a genuinely new observation requires a new request key.
 
 ## Start-of-day Paper checklist
 

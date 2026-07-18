@@ -46,7 +46,8 @@ approval and dedicated staging credentials.
 36. `20260718165749_pgcrypto_schema_convergence.sql`
 37. `20260719001947_pit_candle_revision_store.sql`
 38. `20260719010000_pit_daily_candle_timing_store.sql`
-39. `seed.sql`
+39. `20260719020000_pit_source_observation_occurrence_store.sql`
+40. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -101,6 +102,12 @@ The timestamp migrations extend that boundary in this order:
   calendar rows, records idempotent request receipts, and durably quarantines
   clock, recurrence, source, and binding conflicts. It does not wire collection,
   provide a durable as-of reader, or certify provider finality.
+- `20260719020000_pit_source_observation_occurrence_store.sql` separates
+  deduplicated candle/calendar content revisions from
+  append-only observation occurrences and binds every timing revision to the
+  exact two occurrences used to derive availability. It backfills only evidence
+  retained by the old schema; discarded intermediate unchanged observations
+  cannot be reconstructed.
 
 ## Required project configuration
 
@@ -130,6 +137,7 @@ PostgreSQL instance:
 python supabase/verify_g1_g2_migration.py
 python supabase/verify_pit_candle_revision_store.py
 python supabase/verify_pit_daily_candle_timing_store.py
+python supabase/verify_pit_source_observation_occurrence_store.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -145,6 +153,9 @@ concurrent first-write serialization, durable quarantine, direct-table denial,
 and a populated pre-migration upgrade check. The timing verifier additionally
 checks calendar revision semantics, exact immutable source binding, request
 idempotency conflicts, derived availability time, and forged-source rejection.
+The occurrence verifier additionally checks exact populated backfill, immutable
+same-content re-observation, component-wise source-clock monotonicity, exact
+occurrence foreign keys, and concurrent delivery convergence.
 
 Do not use the service role or a database owner session as evidence for the
 authenticated/anonymous negative matrix. Hosted staging additionally requires

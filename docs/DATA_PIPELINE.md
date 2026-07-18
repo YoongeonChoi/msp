@@ -56,15 +56,19 @@ observation-time regression returns a committed quarantine receipt before the
 Worker adapter raises a fail-closed domain error. Quarantine rows and accepted
 revisions are append-only, while direct table access is denied to runtime roles.
 
-The daily-candle timing store adds an append-only calendar revision ledger and
-an exact timing binding to an immutable candle revision. One service-role-only
-RPC recomputes calendar identity/content hashes, timing identity/content hashes,
-and `evidence_available_at` from the stored source rows. It never accepts a
-caller-provided hash or availability clock as authority. Request retries return
-the original durable receipt; source-clock regression, same-clock conflict,
-historical hash recurrence, request-key reuse, a missing exact source revision,
-or a forged binding produces a durable quarantine receipt and no accepted
-timing row. Runtime roles have no direct table access.
+The daily-candle timing store adds an append-only calendar content ledger and
+separate append-only candle/calendar observation-occurrence ledgers. Content is
+deduplicated without discarding the fact that unchanged content was observed at
+a later time. Each timing revision has composite foreign keys to the exact
+immutable content revisions and exact occurrence rows used to derive it. One
+service-role-only RPC recomputes calendar identity/content hashes, timing
+identity/content hashes, and `evidence_available_at` from those stored source
+occurrences. It never accepts a caller-provided hash or availability clock as
+authority. Request retries return the original durable receipt; source-clock
+regression, same-clock conflict, historical hash recurrence, request-key reuse,
+a missing exact source occurrence, or a forged binding produces a durable
+quarantine receipt and no accepted timing row. Runtime roles have no direct
+table access.
 
 Calendar evidence and timing evidence have separate acceptance semantics. A
 valid calendar correction may be committed before a later timing-stream guard
@@ -76,12 +80,17 @@ that observability.
 The explicit candle and timing Supabase adapters are not wired into collection,
 the runtime container, a durable as-of reader, or feature calculation. The
 stores prove only the behavior of observations submitted to their RPCs. A later
-exact re-observation cannot be timing-bound unless its exact immutable source
-observation exists, so the current store rejects that case instead of using a
-mutable stream-head clock. These contracts do not prove collection completeness,
-provider authenticity or finality, corporate-action safety, DQ approval, or
-feature/research/order readiness. An unresolved quarantine is evidence of an
-ambiguity, not an automated resolution or a promotion decision.
+exact re-observation of the latest unchanged content now creates an immutable
+occurrence without creating a duplicate content revision, and timing binds that
+exact occurrence rather than a mutable stream-head clock. A pre-migration
+database can recover each content revision's original occurrence and the latest
+candle head observation, but intermediate unchanged observations that were
+never stored cannot be reconstructed. A request key that already has a durable
+quarantine receipt keeps replaying that receipt; callers must use a new request
+key for a newly observed event. These contracts do not prove collection
+completeness, provider authenticity or finality, corporate-action safety, DQ
+approval, or feature/research/order readiness. An unresolved quarantine is
+evidence of an ambiguity, not an automated resolution or a promotion decision.
 
 KRX: market calendar/listing/statistics are adapter placeholders and mock data in local mode.
 

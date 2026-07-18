@@ -135,7 +135,7 @@ def test_dedicated_verifier_covers_target_and_future_upgrade_paths() -> None:
         "verify_python_sql_golden_vectors",
         "verify_concurrent_exact_delivery",
         "verify_replay_and_corrections",
-        "verify_exact_reobservation_has_no_clock_poisoning",
+        "verify_exact_reobservation_creates_occurrence",
         "verify_calendar_revision_guards",
         "verify_timing_revision_guards",
         "verify_request_idempotency_conflict",

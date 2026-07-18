@@ -40,7 +40,8 @@ SQL migration 순서:
 36. `20260718165749_pgcrypto_schema_convergence.sql`
 37. `20260719001947_pit_candle_revision_store.sql`
 38. `20260719010000_pit_daily_candle_timing_store.sql`
-39. `seed.sql` (로컬 non-live 기본값만)
+39. `20260719020000_pit_source_observation_occurrence_store.sql`
+40. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -60,7 +61,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 
 `verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
 Docker의 새 `postgres:17-alpine`에 `0001`부터
-`20260719010000_pit_daily_candle_timing_store.sql`까지 적용하는
+`20260719020000_pit_source_observation_occurrence_store.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
@@ -101,13 +102,19 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
 - PIT calendar revision의 같은 시간·재발·시각 역행 quarantine, immutable candle/
   calendar source row에 대한 timing exact binding, DB 재계산 availability/hash,
   request retry/conflict, forged source 차단 및 invalid timing zero-write
+- PIT candle/calendar content와 observation occurrence 분리, 동일 content 후속
+  관측의 append-only 보존, timing의 exact occurrence FK, component-wise clock
+  monotonicity, populated exact backfill 및 concurrent occurrence convergence
 
 `verify_pit_candle_revision_store.py`는 별도의 disposable PostgreSQL에서 위 PIT
 동작을 fresh install과 직전 migration까지 채워진 upgrade 경로로 재검증합니다.
 `verify_pit_daily_candle_timing_store.py`는 calendar revision과 timing binding을
-동일한 fresh/upgrade 경로에서 별도로 검증합니다. 두 검증 모두 제출된 evidence의
-저장 계약만 다루며 collection completeness, runtime wiring, durable as-of query,
-provider finality 또는 feature readiness를 인증하지 않습니다.
+동일한 fresh/upgrade 경로에서 별도로 검증합니다.
+`verify_pit_source_observation_occurrence_store.py`는 content와 occurrence 분리,
+기존 timing의 exact backfill, 동일 content 후속 관측, exact occurrence binding과
+동시성 수렴을 검증합니다. 세 검증 모두 제출된 evidence의 저장 계약만 다루며
+collection completeness, runtime wiring, durable as-of query, provider finality
+또는 feature readiness를 인증하지 않습니다.
 
 PostgREST image를 받을 수 없는 로컬 parser 디버깅에만
 `--skip-postgrest`를 사용할 수 있습니다. 이 옵션을 사용한 결과는 staging 승인
