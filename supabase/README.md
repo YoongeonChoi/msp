@@ -41,7 +41,8 @@ SQL migration 순서:
 37. `20260719001947_pit_candle_revision_store.sql`
 38. `20260719010000_pit_daily_candle_timing_store.sql`
 39. `20260719020000_pit_source_observation_occurrence_store.sql`
-40. `seed.sql` (로컬 non-live 기본값만)
+40. `20260719030000_pit_daily_candle_as_of_reader.sql`
+41. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -54,6 +55,8 @@ python supabase/verify_live_enable_migration.py
 python supabase/verify_g1_g2_migration.py
 python supabase/verify_pit_candle_revision_store.py
 python supabase/verify_pit_daily_candle_timing_store.py
+python supabase/verify_pit_source_observation_occurrence_store.py
+python supabase/verify_pit_daily_candle_as_of_reader.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
@@ -61,7 +64,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 
 `verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
 Docker의 새 `postgres:17-alpine`에 `0001`부터
-`20260719020000_pit_source_observation_occurrence_store.sql`까지 적용하는
+`20260719030000_pit_daily_candle_as_of_reader.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
@@ -105,6 +108,10 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
 - PIT candle/calendar content와 observation occurrence 분리, 동일 content 후속
   관측의 append-only 보존, timing의 exact occurrence FK, component-wise clock
   monotonicity, populated exact backfill 및 concurrent occurrence convergence
+- bounded PIT daily-candle as-of read의 exact provider/`KR`/symbol/`1d`/`adjusted`
+  범위, 최대 366일·page size `25..100`·raw candidate 1,000건 제한,
+  service-role-only RPC, zero-write read, 15분 MVCC snapshot과 전체 raw-candidate
+  manifest, ambiguity·binding corruption·manifest drift fail-closed
 
 `verify_pit_candle_revision_store.py`는 별도의 disposable PostgreSQL에서 위 PIT
 동작을 fresh install과 직전 migration까지 채워진 upgrade 경로로 재검증합니다.
@@ -112,9 +119,28 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
 동일한 fresh/upgrade 경로에서 별도로 검증합니다.
 `verify_pit_source_observation_occurrence_store.py`는 content와 occurrence 분리,
 기존 timing의 exact backfill, 동일 content 후속 관측, exact occurrence binding과
-동시성 수렴을 검증합니다. 세 검증 모두 제출된 evidence의 저장 계약만 다루며
-collection completeness, runtime wiring, durable as-of query, provider finality
-또는 feature readiness를 인증하지 않습니다.
+동시성 수렴을 검증합니다. 이 세 storage 검증은 제출된 evidence의 저장 계약만
+다룹니다. `verify_pit_daily_candle_as_of_reader.py`는 별도의 disposable
+PostgreSQL에서 fresh/upgrade 경로, exact RPC/grant 경계, bounded pagination,
+snapshot/manifest 일관성, concurrent writer, zero-write 및 기존 selector oracle의
+최종 결과 일치를 검증합니다. Worker adapter 자체는 별도 unit test로 검증합니다.
+
+`worker_api.list_pit_daily_candles_as_of_v1`의 `as_of` 의미는 현재 보존된 durable
+source evidence 중 `evidence_available_at <= as_of`인 후보를 재구성하는 것입니다.
+이는 `received_at <= as_of` 조건이나 과거 시점의 DB commit visibility를 뜻하지
+않습니다. 첫 페이지의 PostgreSQL MVCC token은 15분 동안 이후 페이지를 같은 현재
+snapshot에 결합하고, 전체 raw-candidate manifest는 page 누락·혼합을 차단합니다.
+Worker adapter는 모든 페이지를 검증·버퍼한 뒤 기존 selector를 정확히 한 번
+호출하며 부분 결과를 노출하지 않습니다. unresolved timeline ambiguity, corrupt
+content/occurrence/timing binding, cursor expiry 또는 manifest drift는 전체 조회를
+fail closed합니다.
+
+이 RPC는 server-side `service_role`에만 허용되고 Desktop, `public`, authenticated
+client, Realtime에는 노출되지 않으며 domain row를 쓰지 않습니다. reader port와
+adapter는 collection, runtime container, feature, strategy, backtest, order 경로에
+연결되지 않았습니다. 이 검증은 completeness, authenticity, provider finality,
+corporate-action safety, DQ/feature readiness, Hosted Staging 또는 Production Live
+승인을 의미하지 않습니다. Production Live는 승인되지 않았습니다.
 
 PostgREST image를 받을 수 없는 로컬 parser 디버깅에만
 `--skip-postgrest`를 사용할 수 있습니다. 이 옵션을 사용한 결과는 staging 승인

@@ -23,8 +23,9 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260715041915_paper_evidence_and_sell_reservation_guards.sql`, and
 `20260718165749_pgcrypto_schema_convergence.sql`, followed by
 `20260719001947_pit_candle_revision_store.sql`,
-`20260719010000_pit_daily_candle_timing_store.sql`, and
-`20260719020000_pit_source_observation_occurrence_store.sql`.
+`20260719010000_pit_daily_candle_timing_store.sql`,
+`20260719020000_pit_source_observation_occurrence_store.sql`, and
+`20260719030000_pit_daily_candle_as_of_reader.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -32,6 +33,41 @@ observations and the latest retained candle-head observation only; it cannot
 invent intermediate unchanged observations that the previous schema discarded.
 Do not reinterpret an existing quarantined request key. Its durable receipt must
 remain stable, and a genuinely new observation requires a new request key.
+
+After the as-of reader migration, run its dedicated disposable-database
+verifier:
+
+```bash
+python supabase/verify_pit_daily_candle_as_of_reader.py
+```
+
+The RPC is a server-side `service_role` boundary for one exact provider/`KR`/
+six-digit symbol/`1d`/`adjusted` series, an inclusive date range of at most 366
+days, page size `25..100`, and no more than 1,000 raw candidates. It must remain
+unavailable to Desktop, `public`, authenticated clients, and Realtime. The read
+writes zero domain rows.
+
+Treat `evidence_available_at <= as_of` as reconstruction from durable source
+evidence retained when the read runs. Do not reinterpret it as
+`received_at <= as_of` or as proof of which rows had committed at that
+historical time. Multi-page reads must retain the same full raw-candidate
+manifest and PostgreSQL MVCC snapshot token. The cursor expires after 15
+minutes; on expiry, unresolved timeline ambiguity, corrupt binding, or manifest
+drift, discard the entire read and start a new one. Never splice pages or expose
+a partial selection. The Worker adapter performs this validation, buffers all
+pages, and invokes the existing selector exactly once.
+
+Treat the cursor as opaque within the trusted Worker-to-`worker_api` boundary.
+Direct `service_role` callers must replay the server-issued object verbatim;
+they must not rewrite its issuance time or any binding field. The official
+adapter pins first-page metadata and rejects such drift before exposing a
+result.
+
+This reader is not connected to collection, the runtime container, features,
+strategy, backtests, or orders. Its verifier does not establish completeness,
+authenticity, provider finality, corporate-action safety, DQ approval, feature
+readiness, Hosted Staging approval, or any Live authorization. Production Live
+remains not authorized.
 
 ## Start-of-day Paper checklist
 

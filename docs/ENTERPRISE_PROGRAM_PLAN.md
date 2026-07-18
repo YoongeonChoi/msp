@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, evidence-time as-of 선택이 있다. 그러나 collection/runtime wiring·durable as-of source·feature 연결은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable as-of reader가 있다. 그러나 collection/runtime/feature 연결, completeness·finality·corporate-action·DQ 인증은 없으며 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -116,8 +116,9 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   append-only row로 보존한다. 별도 timing RPC는 calendar content와 candle/calendar
   observation occurrence를 분리해 보존하고 exact occurrence에서 availability와
   timing hash를 재계산한다. 동일 content의 후속 관측도 content revision을 늘리지
-  않고 occurrence로 남긴다. 아직 collection/runtime wiring, durable as-of reader,
-  completeness 또는 feature readiness는 제공하지 않는다.
+  않고 occurrence로 남긴다. 별도 Worker-only durable as-of reader는 현재 보존된
+  exact occurrence lineage를 bounded snapshot으로 재구성하지만 collection/runtime
+  wiring, completeness 또는 feature readiness는 제공하지 않는다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
   않는다.
@@ -128,9 +129,15 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   occurrence에 결합하지만 collection이나 feature 경로에는 아직 연결되지 않았다.
 - daily candle as-of selector는 모든 candle/timing source를 재검증·교차 결합하고
   `evidence_available_at`으로 조회 시점 적격성을, `candle.observed_at`으로 correction
-  순서를 판단한다. 동일 시각 충돌·historical hash recurrence·daily identity drift는
-  fail closed이지만 "latest"는 caller가 제공한 정확한 in-memory 후보 snapshot
-  내부에만 한정되며 snapshot의 완전성, durability 또는 calendar revision finality는
+  순서를 판단한다. `20260719030000`의 Worker-only reader는 exact provider/`KR`/symbol/
+  `1d`/`adjusted`, 최대 366일, page size `25..100`, raw candidate 1,000건 경계에서
+  15분 TTL MVCC snapshot과 전체 manifest로 모든 페이지를 고정한다. Worker adapter는
+  전 페이지를 검증·버퍼한 뒤 기존 selector를 정확히 한 번 호출하며 부분 결과를
+  노출하지 않는다. 동일 시각 충돌·historical hash recurrence·daily identity drift,
+  unresolved timeline ambiguity, binding 손상, manifest drift는 fail closed이다.
+  `as_of`는 현재 보존된 evidence의 `evidence_available_at` 컷오프이며
+  `received_at <= as_of`나 과거 DB commit visibility를 뜻하지 않는다. 이 reader는
+  completeness, provider/calendar finality, corporate-action, DQ 또는 feature readiness를
   증명하지 않는다.
 - 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
   명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
@@ -521,6 +528,8 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E1 Execution Safety Kernel` schema와 migration 로컬 구현
 - [x] `E2 Paper Accounting` 로컬 구현과 격리 검증
 - [ ] `E3 Point-in-Time Data Plane` 구현
+- [x] `E3` occurrence-backed bounded durable as-of reader 로컬 구현
+- [ ] `E3` collection/runtime/feature 연결과 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
 - [ ] `G1`, `G2` 독립 심사

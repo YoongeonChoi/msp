@@ -47,7 +47,8 @@ approval and dedicated staging credentials.
 37. `20260719001947_pit_candle_revision_store.sql`
 38. `20260719010000_pit_daily_candle_timing_store.sql`
 39. `20260719020000_pit_source_observation_occurrence_store.sql`
-40. `seed.sql`
+40. `20260719030000_pit_daily_candle_as_of_reader.sql`
+41. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -108,6 +109,13 @@ The timestamp migrations extend that boundary in this order:
   exact two occurrences used to derive availability. It backfills only evidence
   retained by the old schema; discarded intermediate unchanged observations
   cannot be reconstructed.
+- `20260719030000_pit_daily_candle_as_of_reader.sql` adds the service-role-only
+  `worker_api.list_pit_daily_candles_as_of_v1` RPC. It reads one exact provider/
+  `KR`/symbol/`1d`/`adjusted` series for at most 366 inclusive calendar days,
+  accepts page sizes `25..100`, and rejects a snapshot with more than 1,000 raw
+  candidates. A 15-minute PostgreSQL MVCC snapshot token and a full ordered
+  raw-candidate manifest bind every page. The RPC writes zero domain rows and is
+  not exposed to Desktop, `public`, authenticated clients, or Realtime.
 
 ## Required project configuration
 
@@ -138,6 +146,7 @@ python supabase/verify_g1_g2_migration.py
 python supabase/verify_pit_candle_revision_store.py
 python supabase/verify_pit_daily_candle_timing_store.py
 python supabase/verify_pit_source_observation_occurrence_store.py
+python supabase/verify_pit_daily_candle_as_of_reader.py
 ```
 
 It must apply a fresh database through the latest timestamp migration, apply the
@@ -156,6 +165,21 @@ idempotency conflicts, derived availability time, and forged-source rejection.
 The occurrence verifier additionally checks exact populated backfill, immutable
 same-content re-observation, component-wise source-clock monotonicity, exact
 occurrence foreign keys, and concurrent delivery convergence.
+The as-of reader verifier and Worker unit tests additionally check the bounded
+exact-series request, service-role-only RPC grant, zero-write reads,
+deterministic paging under one 15-minute MVCC snapshot, complete raw-candidate
+manifest binding, adapter/selector equivalence, and fail-closed ambiguity,
+corruption, cursor, and concurrent-writer cases.
+
+For this reader, `evidence_available_at <= as_of` reconstructs eligibility from
+the durable source evidence retained when the query runs. It is not a
+`received_at <= as_of` filter and does not prove historical transaction commit
+visibility. The Worker adapter must validate and buffer every page before
+calling the existing selector exactly once; it must not expose a partial
+selection. The reader is not wired into collection, the runtime container,
+features, strategy, backtests, or orders. Passing the verifier does not certify
+completeness, authenticity, provider finality, corporate-action safety, DQ or
+feature readiness, Hosted Staging, or Production Live authorization.
 
 Do not use the service role or a database owner session as evidence for the
 authenticated/anonymous negative matrix. Hosted staging additionally requires

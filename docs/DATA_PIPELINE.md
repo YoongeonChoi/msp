@@ -38,11 +38,12 @@ timezone representations.
 This selector operates only on one exact built-in list or tuple supplied by the
 caller, and "selected" means latest only within that canonical candidate
 snapshot. Its result type cannot be directly constructed to bypass the
-snapshot-wide ambiguity checks. The selector does not prove that the snapshot
-is complete, authentic, provider-final, corporate-action safe,
-DQ-approved, feature-ready, or authorized for research promotion or order
-execution. It is not yet backed by a durable as-of query source. SHA-256 values
-are integrity and lineage checks, not provider signatures.
+snapshot-wide ambiguity checks. A dedicated Supabase reader can now assemble
+that candidate snapshot from retained immutable rows, but neither component
+proves that the source history is complete, authentic, provider-final,
+corporate-action safe, DQ-approved, feature-ready, or authorized for research
+promotion or order execution. SHA-256 values are integrity and lineage checks,
+not provider signatures.
 
 Append-only candle revision semantics are defined behind a dedicated storage
 port. The in-memory reference adapter and the explicit Supabase Worker adapter
@@ -78,19 +79,52 @@ telemetry; database receipts remain the audit source until runtime wiring adds
 that observability.
 
 The explicit candle and timing Supabase adapters are not wired into collection,
-the runtime container, a durable as-of reader, or feature calculation. The
-stores prove only the behavior of observations submitted to their RPCs. A later
-exact re-observation of the latest unchanged content now creates an immutable
-occurrence without creating a duplicate content revision, and timing binds that
-exact occurrence rather than a mutable stream-head clock. A pre-migration
-database can recover each content revision's original occurrence and the latest
-candle head observation, but intermediate unchanged observations that were
-never stored cannot be reconstructed. A request key that already has a durable
-quarantine receipt keeps replaying that receipt; callers must use a new request
-key for a newly observed event. These contracts do not prove collection
+the runtime container, or feature calculation. The stores prove only the
+behavior of observations submitted to their RPCs. A later exact re-observation
+of the latest unchanged content now creates an immutable occurrence without
+creating a duplicate content revision, and timing binds that exact occurrence
+rather than a mutable stream-head clock. A pre-migration database can recover
+each content revision's original occurrence and the latest candle head
+observation, but intermediate unchanged observations that were never stored
+cannot be reconstructed. A request key that already has a durable quarantine
+receipt keeps replaying that receipt; callers must use a new request key for a
+newly observed event.
+
+`20260719030000_pit_daily_candle_as_of_reader.sql` adds the Worker-only
+`worker_api.list_pit_daily_candles_as_of_v1` RPC and a matching explicit Worker
+adapter. One logical query is restricted to an exact provider, `KR` market,
+six-digit symbol, `1d` interval, explicit `adjusted` value, an inclusive range
+of at most 366 calendar days, page size `25..100`, and at most 1,000 eligible
+raw candidates. Eligibility remains `evidence_available_at <= as_of` over the
+durable source evidence retained when the query runs. It does not mean
+`received_at <= as_of`, and it cannot reconstruct which transactions were
+committed or visible in the database at that historical time. The received
+timestamps remain lineage, not an alternate semantic cutoff.
+
+The first page captures a PostgreSQL MVCC snapshot token with a 15-minute TTL
+and a SHA-256 manifest over the complete ordered raw-candidate set. Every later
+page is bound to the same query, snapshot, and manifest. The Worker adapter
+validates and buffers every page before it pre-collapses legal same-availability
+timing revisions and invokes the existing domain selector exactly once. It
+never exposes a partial selection. An expired or drifting snapshot, unresolved
+timeline ambiguity, malformed immutable payload, corrupt content/occurrence/
+timing binding, or manifest mismatch fails the whole read closed. The read
+writes zero domain rows.
+
+The cursor is an opaque continuation inside the trusted Worker-to-`worker_api`
+boundary, not an end-user bearer token. A direct `service_role` caller must
+replay it verbatim. The official adapter pins the first-page metadata and
+rejects any later cursor or envelope mutation; the database applies the
+15-minute expiry to that unmodified server-issued cursor.
+
+The RPC is granted only to the server-side `service_role`; it is not exposed to
+Desktop, `public`, authenticated clients, or Realtime. The port and adapter are
+not wired into collection, the runtime container, features, strategy,
+backtests, or any order path. These contracts do not prove collection
 completeness, provider authenticity or finality, corporate-action safety, DQ
 approval, or feature/research/order readiness. An unresolved quarantine is
 evidence of an ambiguity, not an automated resolution or a promotion decision.
+Production Live remains not authorized.
 
 KRX: market calendar/listing/statistics are adapter placeholders and mock data in local mode.
 
