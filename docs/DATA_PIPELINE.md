@@ -90,9 +90,39 @@ the source `observed_at` to the local read window, canonicalizes the evidence,
 and performs one append. It then rebinds the durable receipt to the same
 calendar identity, evidence hash, and observation time. Source or store failure
 is returned as a fixed fail-closed error without an internal retry or upstream
-payload details. Once append has been attempted, a transport error means the
-write outcome is unknown; callers must inspect durable receipts/evidence before
-an explicit rerun and must not blind-retry the operation.
+payload details. Its structured `write_outcome` is `not_attempted` only before
+the observation-store boundary and `unknown` after append is entered or its
+receipt cannot be trusted. The optional evidence-returning method owns canonical
+copies of both the session and receipt. Once append has been attempted, callers
+must inspect durable receipts/evidence before an explicit rerun and must not
+blind-retry the operation.
+
+`RunKrCalendarDateRangeCollectionJob` defines a bounded manual range-job
+contract over that single-date collector. A job covers one exact provider, the
+`KR` market, and 1..366 inclusive dates. Execution is disabled by default and
+requires the exact `manual` trigger embedded in the canonical job spec. One
+explicit invocation records an attempt fence before collection and advances at
+most one date. Every transition is bound to the job spec SHA, expected revision,
+opaque UUIDv4 attempt and holder IDs, and exact target date. Confirmed checkpoints
+form a continuous prefix from the requested start date, own the canonical source
+evidence and receipt, retain the attempt fence/times, and produce a terminal
+SHA-256 manifest only after the entire range is confirmed.
+
+The `manual` trigger is an application scheduling boundary, not proof of user
+identity, MFA, maker/checker approval, or operational authorization.
+
+Only a proven pre-write failure can move the date to `paused_retryable`, and a
+new explicit manual invocation is still required. An unknown write outcome or
+unexpected failure moves the attempt to `blocked_unknown` when that transition
+can be confirmed. Cancellation, process loss, or a lost transition response does
+not itself authorize a retry: the next explicit invocation must follow the
+reloaded job state. A committed confirm advances the durable checkpoint and
+releases that fence; an uncommitted or still-unknown confirm leaves the attempt
+active. Any active fence is never reclaimed by TTL or used for a blind retry.
+The in-memory adapter validates these CAS and concurrency semantics but is test
+reference state only: it is not restart-durable and is intentionally absent from
+the runtime container. A durable Supabase job/checkpoint adapter and reviewed
+manual recovery workflow remain unimplemented.
 
 This calendar collection path is not wired into the runtime container, the
 scheduler, automatic range backfill, Desktop, timing, features, backtests,

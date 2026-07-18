@@ -35,7 +35,32 @@
 - 단일 날짜 저장 성공은 calendar completeness, provider authenticity/finality,
   corporate-action·DQ 승인, dataset/research/feature/order readiness를 의미하지 않는다.
 
-### 1.2 Retained calendar date-range coverage
+### 1.2 Manual fenced calendar range collection job
+
+- 기본 `manual_execution_enabled=false`와 exact `trigger=manual`을 함께 요구하고,
+  비활성·잘못된 요청은 clock, job store, UUID factory, collector보다 먼저 거부한다.
+- job 범위는 inclusive 1..366일만 허용한다. 한 invocation은 attempt를 먼저 CAS로
+  기록한 뒤 정확히 다음 날짜 하나만 수집하며 내부 loop나 자동 연속 실행이 없다.
+- spec SHA, expected revision, attempt UUID, holder UUID, target date를 모든 begin/pause/
+  block/confirm에 결합한다. stale fence, attempt ID 재사용, 동시 begin의 두 번째
+  winner, 연속 prefix가 아닌 checkpoint를 거부하고 실패 전 상태를 보존한다.
+- checkpoint는 source session/receipt의 canonical copy와 attempt fence/timeline을
+  보존한다. `observed_at`은 attempt begin과 confirm 사이여야 하고 completed 상태는
+  전체 날짜와 재계산 가능한 terminal manifest를 모두 요구한다.
+- `write_outcome=not_attempted`이면서 허용된 pre-write 오류 코드일 때만
+  `paused_retryable`로 이동한다. `unknown`, 변조·예상 밖 오류, 잘못된 수집 증거는
+  `blocked_unknown` 또는 unresolved active attempt로 남기며 자동 재시도하지 않는다.
+- begin, pause, block, confirm 각각의 commit 전/후 응답 유실과 cancellation을
+  fault-injection한다. begin 확인 전 collector 호출은 0회이고, confirm 응답 유실 뒤
+  같은 날짜를 다시 수집하지 않으며, 오래된 active attempt를 TTL로 회수하지 않는다.
+- in-memory adapter는 lock/CAS reference semantics만 증명한다. 새 adapter instance가
+  기존 상태를 복원하지 못함을 명시하고 runtime/container/scheduler 연결이나 durable
+  Supabase checkpoint가 완료됐다고 표시하지 않는다.
+- 성공 결과도 provider authenticity/finality, official exchange completeness,
+  corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
+  승인을 의미하지 않는다.
+
+### 1.3 Retained calendar date-range coverage
 
 - 요청 inclusive 범위의 모든 calendar date가 정확히 한 번씩 하루 단위 오름차순으로
   존재해야 한다. 첫·중간·끝 누락, 중복, 역순, 범위 밖 날짜는 fail closed한다.

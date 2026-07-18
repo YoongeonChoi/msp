@@ -167,6 +167,7 @@ async def test_source_failure_is_sanitized_and_never_reaches_store() -> None:
 
     assert source.calls == [TARGET_DATE]
     assert store.calls == []
+    assert captured.value.write_outcome == "not_attempted"
     _assert_secret_absent(captured.value, secret)
 
 
@@ -313,6 +314,7 @@ async def test_store_failure_is_sanitized_and_not_retried() -> None:
 
     assert source.calls == [TARGET_DATE]
     assert len(store.calls) == 1
+    assert captured.value.write_outcome == "unknown"
     _assert_secret_absent(captured.value, secret)
 
 
@@ -366,7 +368,7 @@ async def test_rejects_receipt_that_is_not_bound_to_source_session(
     with pytest.raises(
         KrDailySessionCollectionError,
         match="kr_daily_session_collection_store_outcome_unknown",
-    ):
+    ) as captured:
         await CollectKrDailySessionObservation(
             FakeSource(session),
             store,
@@ -374,6 +376,7 @@ async def test_rejects_receipt_that_is_not_bound_to_source_session(
         ).execute(TARGET_DATE)
 
     assert len(store.calls) == 1
+    assert captured.value.write_outcome == "unknown"
 
 
 async def test_rejects_invalid_or_mutated_store_receipt() -> None:
@@ -386,13 +389,31 @@ async def test_rejects_invalid_or_mutated_store_receipt() -> None:
         with pytest.raises(
             KrDailySessionCollectionError,
             match="kr_daily_session_collection_store_outcome_unknown",
-        ):
+        ) as captured:
             await CollectKrDailySessionObservation(
                 FakeSource(session),
                 store,
                 clock=SequenceClock(STARTED_AT, COMPLETED_AT),
             ).execute(TARGET_DATE)
         assert len(store.calls) == 1
+        assert captured.value.write_outcome == "unknown"
+
+
+async def test_evidence_result_owns_canonical_session_and_receipt_copies() -> None:
+    session = _session()
+    receipt = _receipt(session)
+
+    result = await CollectKrDailySessionObservation(
+        FakeSource(session),
+        FakeStore(receipt),
+        clock=SequenceClock(STARTED_AT, COMPLETED_AT),
+    ).execute_with_evidence(TARGET_DATE)
+
+    assert result.target_date == TARGET_DATE
+    assert result.session == session
+    assert result.session is not session
+    assert result.receipt == receipt
+    assert result.receipt is not receipt
 
 
 def _session(

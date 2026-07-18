@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from typing import Literal
 
 from app.application.ports.calendar_observation_store_port import (
     CalendarObservationStorePort,
     CalendarObservationWriteReceipt,
+)
+from app.application.ports.kr_daily_session_collection_port import (
+    CollectedKrDailySessionObservationV1,
 )
 from app.application.ports.kr_daily_session_source_port import (
     KrDailySessionSourcePort,
@@ -16,10 +20,20 @@ from app.domain.market_data.point_in_time_calendar import (
     PointInTimeKrDailySessionV1,
 )
 
+KrDailySessionCollectionWriteOutcome = Literal["not_attempted", "unknown"]
+
 
 class KrDailySessionCollectionError(KnownFailClosedError):
-    def __init__(self, safe_message: str) -> None:
+    write_outcome: KrDailySessionCollectionWriteOutcome
+
+    def __init__(
+        self,
+        safe_message: str,
+        *,
+        write_outcome: KrDailySessionCollectionWriteOutcome = "not_attempted",
+    ) -> None:
         super().__init__("kr_daily_session_collection", safe_message)
+        self.write_outcome = write_outcome
 
 
 class CollectKrDailySessionObservation:
@@ -38,6 +52,13 @@ class CollectKrDailySessionObservation:
         self,
         target_date: date,
     ) -> CalendarObservationWriteReceipt:
+        collected = await self.execute_with_evidence(target_date)
+        return collected.receipt
+
+    async def execute_with_evidence(
+        self,
+        target_date: date,
+    ) -> CollectedKrDailySessionObservationV1:
         valid_target_date = _target_date(target_date)
         started_at = _read_clock(self.clock)
 
@@ -57,7 +78,21 @@ class CollectKrDailySessionObservation:
                 started_at=started_at,
                 completed_at=completed_at,
             )
-            return await self._append(session)
+            receipt = await self._append(session)
+            try:
+                collected = CollectedKrDailySessionObservationV1(
+                    session=session,
+                    receipt=receipt,
+                )
+            except Exception:
+                pass
+            else:
+                return collected
+
+            raise KrDailySessionCollectionError(
+                "kr_daily_session_collection_store_outcome_unknown",
+                write_outcome="unknown",
+            )
 
         raise KrDailySessionCollectionError("kr_daily_session_collection_source_failed")
 
@@ -73,7 +108,10 @@ class CollectKrDailySessionObservation:
         else:
             return receipt
 
-        raise KrDailySessionCollectionError("kr_daily_session_collection_store_outcome_unknown")
+        raise KrDailySessionCollectionError(
+            "kr_daily_session_collection_store_outcome_unknown",
+            write_outcome="unknown",
+        )
 
 
 def _target_date(value: object) -> date:
