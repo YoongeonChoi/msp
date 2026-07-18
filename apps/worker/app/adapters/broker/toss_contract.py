@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256 = (
+    "7000d89ea3d783b0fa36d32e31750e85e139098306dbfce53a75fc4891019f1b"
+)
