@@ -35,6 +35,34 @@
 - 단일 날짜 저장 성공은 calendar completeness, provider authenticity/finality,
   corporate-action·DQ 승인, dataset/research/feature/order readiness를 의미하지 않는다.
 
+### 1.2 Retained calendar date-range coverage
+
+- 요청 inclusive 범위의 모든 calendar date가 정확히 한 번씩 하루 단위 오름차순으로
+  존재해야 한다. 첫·중간·끝 누락, 중복, 역순, 범위 밖 날짜는 fail closed한다.
+- query/provider/`KR`/`selected_as_of`를 다시 결합하고 selected revision ID,
+  occurrence ID, calendar idempotency key 재사용과 mixed provider contract를 거부한다.
+- caller scope 보관본과 reader 전달용 request를 별도 canonical 객체로 유지해 adapter가
+  전달 객체를 유효한 다른 범위로 변조해도 원 요청 query/scope 결합을 우회하지 못한다.
+- request와 lineage의 timezone-aware clock은 fresh UTC 값으로 분리해 mutable `tzinfo`
+  사후 변경이 결과 invariant나 이미 계산한 manifest를 바꾸지 못하게 한다.
+- raw `candidate_count`는 correction·re-observation 때문에 selected 날짜 수보다 클 수
+  있지만 작을 수는 없다. `received_at`은 semantic cutoff가 아니며 오직
+  `snapshot_issued_at`보다 늦지 않은 lineage인지 확인한다.
+- 범위 안 `next_business_date`는 target open 상태, 중간 closed 날짜, 정규장 시간을
+  대조한다. 범위 밖 오른쪽 target은 suffix 내부 주장만 일치시키고
+  `right_boundary_next_session_verified=false`로 남긴다.
+- source failure은 한 번의 read 뒤 payload/credential 없이 고정 오류로 변환하고
+  cancellation은 전파한다. 결과는 source와 분리된 canonical copy여야 하며 외부에서
+  직접 생성할 수 없어야 한다.
+- stable scope/data-lineage fingerprint는 timezone 표현, page size, snapshot token,
+  issue time에 영향받지 않아야 한다. selected content/lineage, candidate count, raw
+  manifest, selected contract가 바뀌면 data manifest가 바뀌어야 한다.
+- raw snapshot manifest의 전체 candidate 검증 책임은 official reader에 있다. coverage
+  gate는 selected items로 이를 재계산하거나 검증 완료를 주장하지 않고 결합만 한다.
+- 성공은 `retained_calendar_date_range_only`이며 official exchange calendar completeness,
+  provider authenticity/finality, corporate-action·DQ, dataset/research/feature/backtest,
+  order 또는 Production Live 승인을 의미하지 않는다.
+
 ## 2. G1 실행·회계 불변식
 
 - 동일 semantic intent 100개 경쟁 요청에서 정확히 하나만 예약된다.

@@ -128,6 +128,38 @@ backfill, DQ, completeness, provider-finality or authenticity,
 corporate-action, dataset, research, feature, backtest, strategy, order,
 Desktop, or Live authorization. Production Live remains not authorized.
 
+`RetainedKrCalendarCoverageService` can consume one complete snapshot from the
+official durable calendar reader and fails closed unless every calendar date
+in the requested inclusive range appears exactly once and in order. It
+rebinds the query, provider, `KR` market, `selected_as_of`, unique selected
+revision/occurrence lineage, the reader snapshot clock, and one uniform
+selected provider-contract hash. The service keeps an isolated canonical copy
+of the caller scope instead of trusting the request object handed to the
+reader, and detaches request/lineage clocks into fresh UTC values before they
+enter the result. `candidate_count` may be greater than the selected date count
+because retained corrections and re-observations remain raw candidates; it
+may never be smaller.
+
+For a `next_business_date` inside the retained range, the gate requires that
+the target date is open, every intervening retained date is closed, and the
+target regular-session hours match. A suffix whose next business session is
+outside the range must make one internally consistent date/hour claim, but the
+target itself cannot be checked from this snapshot. The result therefore fixes
+`coverage_scope=retained_calendar_date_range_only`,
+`retained_date_coverage_complete=true`, `full_calendar_certified=false`, and
+`right_boundary_next_session_verified=false`.
+
+The coverage spec and selected data/lineage manifest use stable canonical
+SHA-256 fingerprints. Page size, query hash, snapshot token, and snapshot issue
+time are acquisition metadata and do not change those fingerprints. The raw
+snapshot manifest cannot be recomputed from selected items: the gate only
+binds the value already verified by the official reader. A successful result
+does not prove provider authenticity or finality, official exchange-calendar
+completeness, historical database visibility, corporate-action or DQ safety,
+dataset/research/feature/backtest readiness, or order authorization. The pure
+read-only service is not wired into runtime, scheduler, Desktop, strategy, or
+orders. Production Live remains not authorized.
+
 The existing timing writer keeps its stricter monotonic source-stream guard.
 An exact calendar-only occurrence can be replayed after a newer observation,
 but a new timing request cannot bind that older occurrence once the calendar

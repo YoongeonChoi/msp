@@ -565,6 +565,7 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E3` 개장·휴장 독립 calendar observation store와 durable ambiguity quarantine 로컬 구현
 - [x] `E3` 개장·휴장 bounded durable calendar as-of range reader 로컬 구현
 - [x] `E3` 단일 날짜 calendar source→observation store collection use case 로컬 구현
+- [x] `E3` retained calendar date-range coverage gate와 canonical scope/data-lineage fingerprint 로컬 구현
 - [ ] `E3` runtime/scheduler/자동 range collection과 feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
