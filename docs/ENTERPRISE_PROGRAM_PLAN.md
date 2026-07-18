@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑만 있고 durable persistence·DQ·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑과 timing-only 결합 gate만 있고 durable persistence·quarantine·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -115,6 +115,9 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
   않는다.
+- daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
+  다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
+  corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다.
 - `apps/worker/app/infrastructure/scheduler.py`는 메모리 loop이며 durable job state,
   lease, retry budget, dead-letter가 없다.
 - `apps/worker/app/infrastructure/outbox.py`는 DTO만 있고 alert delivery 경로에

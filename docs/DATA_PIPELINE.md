@@ -13,6 +13,15 @@ binds the evidence to a pinned OpenAPI artifact hash, and rejects inconsistent
 date ordering or timestamps. This evidence is not persisted and does not by
 itself certify a completed candle or make data feature-ready.
 
+A pure domain timing gate can combine one daily candle with one open-session
+calendar revision only when the candle event's KST date matches that session
+date and both source observations were made at or after the next business
+day's regular start. The resulting PIT evidence records the later source
+observation as its availability time and binds both independently pinned
+provider contracts. It is not wired to persistence or features and does not
+claim provider finality, immutability, completeness, corporate-action safety,
+or overall DQ approval.
+
 Append-only candle revision semantics are defined behind a dedicated storage
 port and an in-memory reference adapter. This adapter is not durable and is not
 wired into collection or feature calculation. A repeated latest hash is an
