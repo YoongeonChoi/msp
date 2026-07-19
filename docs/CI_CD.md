@@ -71,6 +71,9 @@ Jobs:
   - `npm audit --audit-level=moderate`
   - `pip-audit`
   - `bandit`
+- Python audit tools and their complete dependency closure are version- and
+  wheel-hash-pinned in `.github/security-tools.lock`; the audit job is pinned
+  to Ubuntu 24.04 x86_64 and CPython 3.12.13
 - Gitleaks secret scan
 - common secret pattern scan that prints only file paths, not matched secret text
 - committed `.env` file block, allowing only `.env.example`
@@ -79,10 +82,19 @@ Jobs:
 Dependency and code-audit findings fail the workflow. Third-party actions are
 pinned to immutable full commit SHAs, and the workflow policy guard rejects
 floating action tags, unpinned Docker actions, protected secret references, and
-unsafe workflow triggers. Every `develop` push starts CodeQL, `npm audit`,
+unsafe workflow triggers. Python audit tool installation force-reinstalls only
+binary wheels with `pip --require-hashes`, including the pinned `pip` dependency,
+so an unreviewed package file cannot silently replace a pinned tool or
+dependency. `pip check` verifies the installed closure, and the audit-tool lock
+is itself checked by `pip-audit`. Every `develop` push starts CodeQL, `npm audit`,
 `pip-audit`, Bandit, secret scans, and the workflow policy guard. Dependency
 Review remains a PR-only diff check. The exact current `develop` head must have
 a successful security run before it can become a `main` integration candidate.
+
+When `.github/security-tools.lock` changes, resolve both top-level tools on the
+pinned Ubuntu/Python target, download wheel artifacts with
+`--only-binary=:all:`, recompute every SHA-256 digest, and rerun the exact
+force-reinstall, `pip check`, and both `pip-audit` gates before review.
 
 ### `.github/workflows/migration-check.yml`
 

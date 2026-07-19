@@ -9,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[5]
 SCRIPT = ROOT / ".github" / "scripts" / "repository_safety.py"
+SECURITY_TOOLS_LOCK = ROOT / ".github" / "security-tools.lock"
 
 
 def _module() -> ModuleType:
@@ -641,3 +642,53 @@ def test_security_workflow_runs_on_develop_and_main_pushes() -> None:
 
     dependency_review = _workflow_job_block(text, "dependency-review")
     assert "\n    if: github.event_name == 'pull_request'" in dependency_review
+
+
+def test_security_audit_tools_use_complete_hashed_lock() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "security.yml").read_text(
+        encoding="utf-8"
+    )
+    audit_job = _workflow_job_block(workflow, "security-audits")
+    install_command = (
+        "python -m pip install --force-reinstall --require-hashes "
+        "--only-binary=:all: -r .github/security-tools.lock"
+    )
+    assert "\n    runs-on: ubuntu-24.04\n" in audit_job
+    assert 'python-version: "3.12.13"' in audit_job
+    assert install_command in audit_job
+    pip_install_commands = [
+        line.strip().removeprefix("run:").strip()
+        for line in audit_job.splitlines()
+        if re.search(r"\bpip\s+install\b", line)
+    ]
+    assert pip_install_commands == [install_command]
+
+    dependency_check_command = "python -m pip check"
+    tool_audit_command = "python -m pip_audit -r .github/security-tools.lock"
+    worker_audit_command = "python -m pip_audit -r requirements.lock"
+    assert dependency_check_command in audit_job
+    assert tool_audit_command in audit_job
+    assert audit_job.index(install_command) < audit_job.index(dependency_check_command)
+    assert audit_job.index(dependency_check_command) < audit_job.index(tool_audit_command)
+    assert audit_job.index(tool_audit_command) < audit_job.index(worker_audit_command)
+
+    requirement_pattern = re.compile(
+        r"^(?P<name>[A-Za-z0-9_.-]+)==(?P<version>[^ ]+) "
+        r"--hash=sha256:(?P<digest>[0-9a-f]{64})$"
+    )
+    requirements = [
+        line
+        for line in SECURITY_TOOLS_LOCK.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    matches = [requirement_pattern.fullmatch(line) for line in requirements]
+    assert requirements
+    assert all(match is not None for match in matches)
+
+    normalized_names = [
+        match.group("name").casefold().replace("_", "-").replace(".", "-")
+        for match in matches
+        if match is not None
+    ]
+    assert len(normalized_names) == len(set(normalized_names))
+    assert {"bandit", "pip", "pip-audit"}.issubset(normalized_names)
