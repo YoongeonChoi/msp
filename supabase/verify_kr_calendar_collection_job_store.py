@@ -81,6 +81,7 @@ TABLES = (
     "kr_calendar_collection_attempt_ledger",
 )
 RPC_NAMES = (
+    "inspect_kr_calendar_collection_job_v1",
     "load_or_create_kr_calendar_collection_job_v1",
     "begin_kr_calendar_collection_date_attempt_v1",
     "pause_kr_calendar_collection_date_attempt_v1",
@@ -331,6 +332,10 @@ def load_rpc_payload(
     }
 
 
+def inspect_rpc_payload(job_id: str) -> dict[str, object]:
+    return {"p_job_id": job_id}
+
+
 def transition_rpc_payload(
     *,
     spec: KrCalendarCollectionJobSpecV1,
@@ -472,6 +477,69 @@ def postgrest_snapshot(
     ):
         raise VerificationError(f"PostgREST RPC envelope mismatch: {envelope}")
     return validate_snapshot(envelope[0]["snapshot"]), len(raw)
+
+
+def validate_inspection(
+    value: object,
+) -> tuple[bool, dict[str, object] | None]:
+    if type(value) is not dict or set(value) != {"job_found", "snapshot"}:
+        raise VerificationError(f"inspection envelope mismatch: {value}")
+    job_found = value["job_found"]
+    snapshot = value["snapshot"]
+    if type(job_found) is not bool:
+        raise VerificationError("inspection job_found is not an exact boolean")
+    if not job_found:
+        if snapshot is not None:
+            raise VerificationError("missing inspection returned a snapshot")
+        return False, None
+    if snapshot is None:
+        raise VerificationError("found inspection omitted the snapshot")
+    return True, validate_snapshot(snapshot)
+
+
+def inspect_job(
+    container: str,
+    job_id: str,
+) -> tuple[bool, dict[str, object] | None]:
+    rows = psql(
+        container,
+        jwt_claim_sql(WORKER_ID, role="service_role")
+        + "select row_to_json(result) from (select * from "
+        "worker_api.inspect_kr_calendar_collection_job_v1("
+        f"{sql_text(job_id)})) as result;",
+    ).stdout.strip().splitlines()
+    if not rows:
+        raise VerificationError("inspection did not return a result row")
+    return validate_inspection(json.loads(rows[-1]))
+
+
+def postgrest_inspection(
+    root: str,
+    token: str,
+    job_id: str,
+) -> tuple[bool, dict[str, object] | None, int]:
+    status, raw, _ = http_post_rpc(
+        root,
+        "inspect_kr_calendar_collection_job_v1",
+        token,
+        inspect_rpc_payload(job_id),
+    )
+    if status != 200:
+        raise VerificationError(
+            f"PostgREST inspection failed with HTTP {status}"
+        )
+    try:
+        envelope = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError(
+            "PostgREST inspection success was not canonical JSON"
+        ) from error
+    if type(envelope) is not list or len(envelope) != 1:
+        raise VerificationError(
+            f"PostgREST inspection row count mismatch: {envelope}"
+        )
+    job_found, snapshot = validate_inspection(envelope[0])
+    return job_found, snapshot, len(raw)
 
 
 def start_postgrest(pg: str, network: str, container: str) -> str:
@@ -948,10 +1016,32 @@ select concat_ws('|',
     'service_role',
     'private.kr_calendar_collection_snapshot_v1(uuid)',
     'EXECUTE'
-  ));
+  ),
+  has_function_privilege(
+    'service_role',
+    'worker_api.inspect_kr_calendar_collection_job_v1(text)',
+    'EXECUTE'
+  ),
+  has_function_privilege(
+    'service_role',
+    'private.inspect_kr_calendar_collection_job_v1_impl(text)',
+    'EXECUTE'
+  ),
+  (select count(*) from pg_catalog.pg_proc as procedure where procedure.oid in (
+    'private.inspect_kr_calendar_collection_job_v1_impl(text)'::regprocedure,
+    'worker_api.inspect_kr_calendar_collection_job_v1(text)'::regprocedure
+  ) and procedure.provolatile = 's'),
+  (select count(*) from pg_catalog.pg_proc as procedure where procedure.oid =
+    'private.inspect_kr_calendar_collection_job_v1_impl(text)'::regprocedure
+    and procedure.prosecdef and procedure.proconfig = array['search_path=""']::text[]),
+  (select count(*) from pg_catalog.pg_proc as procedure where procedure.oid =
+    'worker_api.inspect_kr_calendar_collection_job_v1(text)'::regprocedure
+    and not procedure.prosecdef
+    and procedure.proconfig = array['search_path=""']::text[])
+  );
 """,
     )
-    if catalog != "2|0|f|f|t|f":
+    if catalog != "2|0|f|f|t|f|t|t|2|1|1":
         raise VerificationError(f"RLS/ACL catalog mismatch: {catalog}")
     for role in ("anon", "authenticated", "authenticator"):
         expect_failure(
@@ -959,6 +1049,13 @@ select concat_ws('|',
             f"set role {role}; select * from "
             "worker_api.load_or_create_kr_calendar_collection_job_v1("
             "'{}'::jsonb,clock_timestamp());",
+            "permission denied",
+        )
+        expect_failure(
+            container,
+            f"set role {role}; select * from "
+            "worker_api.inspect_kr_calendar_collection_job_v1("
+            "'11111111-1111-4111-8111-111111111111');",
             "permission denied",
         )
     expect_failure(
@@ -982,7 +1079,10 @@ select concat_ws('|',
             "delete from private.kr_calendar_collection_attempt_ledger where true;",
             "append_only_table_mutation_forbidden",
         )
-    print("PASS service-only RPC, helper/table denial, forced RLS and append-only ledger")
+    print(
+        "PASS service-only mutation/inspection RPCs, helper/table denial, "
+        "forced RLS and append-only ledger"
+    )
 
 
 def job_store_counts(container: str) -> str:
@@ -991,6 +1091,20 @@ def job_store_counts(container: str) -> str:
         "select concat_ws('|',"
         "(select count(*) from private.kr_calendar_collection_jobs),"
         "(select count(*) from private.kr_calendar_collection_attempt_ledger));",
+    )
+
+
+def job_store_fingerprint(container: str) -> str:
+    return scalar(
+        container,
+        "select private.pit_sha256_text_v1("
+        "private.kr_calendar_collection_canonical_json_v1("
+        "jsonb_build_object('jobs',coalesce("
+        "(select jsonb_agg(to_jsonb(job) order by job.job_id) "
+        "from private.kr_calendar_collection_jobs as job),'[]'::jsonb),"
+        "'ledger',coalesce((select jsonb_agg(to_jsonb(event) order by "
+        "event.job_id,event.job_revision,event.event_id) from "
+        "private.kr_calendar_collection_attempt_ledger as event),'[]'::jsonb))));",
     )
 
 
@@ -1008,6 +1122,65 @@ def job_state_fingerprint(container: str, job_id: str) -> str:
     )
 
 
+def verify_read_only_inspection(container: str) -> None:
+    missing_job_id = str(uuid4())
+    counts_before = job_store_counts(container)
+    store_fingerprint_before = job_store_fingerprint(container)
+    domain_before = domain_snapshot(container)
+    for invalid_job_id in (
+        "not-a-uuid",
+        missing_job_id.upper(),
+        "11111111-1111-1111-8111-111111111111",
+    ):
+        expect_failure(
+            container,
+            jwt_claim_sql(WORKER_ID, role="service_role")
+            + "select * from "
+            "worker_api.inspect_kr_calendar_collection_job_v1("
+            f"{sql_text(invalid_job_id)});",
+            "kr_calendar_collection_job_argument_invalid",
+        )
+    expect_failure(
+        container,
+        jwt_claim_sql(WORKER_ID, role="service_role")
+        + "select * from "
+        "worker_api.inspect_kr_calendar_collection_job_v1(null);",
+        "kr_calendar_collection_job_argument_invalid",
+    )
+    job_found, snapshot = inspect_job(container, missing_job_id)
+    if job_found or snapshot is not None:
+        raise VerificationError("missing direct inspection did not return null")
+    if (
+        job_store_counts(container) != counts_before
+        or job_store_fingerprint(container) != store_fingerprint_before
+        or domain_snapshot(container) != domain_before
+    ):
+        raise VerificationError("missing direct inspection performed a write")
+
+    session = calendar_fixture(day_offset=55)
+    spec = job_spec(start=session.session_date, days=1)
+    created = load_or_create(
+        container,
+        spec,
+        session.observed_at - timedelta(minutes=10),
+    )
+    counts_before = job_store_counts(container)
+    store_fingerprint_before = job_store_fingerprint(container)
+    fingerprint_before = job_state_fingerprint(container, spec.job_id)
+    domain_before = domain_snapshot(container)
+    job_found, inspected = inspect_job(container, spec.job_id)
+    if not job_found or inspected != created:
+        raise VerificationError("existing direct inspection snapshot mismatch")
+    if (
+        job_store_counts(container) != counts_before
+        or job_store_fingerprint(container) != store_fingerprint_before
+        or job_state_fingerprint(container, spec.job_id) != fingerprint_before
+        or domain_snapshot(container) != domain_before
+    ):
+        raise VerificationError("existing direct inspection performed a write")
+    print("PASS direct missing/present inspection is canonical and zero-write")
+
+
 def verify_postgrest_contract(container: str, root: str) -> None:
     service = jwt_token("service_role", WORKER_ID)
     authenticated = jwt_token("authenticated", str(uuid4()))
@@ -1015,7 +1188,9 @@ def verify_postgrest_contract(container: str, root: str) -> None:
     created_at = session.observed_at - timedelta(minutes=10)
     denied_spec = job_spec(start=session.session_date + timedelta(days=2), days=1)
     denied_body = load_rpc_payload(denied_spec, created_at)
+    denied_inspection_body = inspect_rpc_payload(str(uuid4()))
     before_denials = job_store_counts(container)
+    before_denials_fingerprint = job_store_fingerprint(container)
 
     status, raw, _ = http_post_rpc(
         root,
@@ -1043,6 +1218,30 @@ def verify_postgrest_contract(container: str, root: str) -> None:
     )
     status, raw, _ = http_post_rpc(
         root,
+        "inspect_kr_calendar_collection_job_v1",
+        None,
+        denied_inspection_body,
+    )
+    require_postgrest_error(
+        status,
+        raw,
+        expected_status=401,
+        expected_code="42501",
+    )
+    status, raw, _ = http_post_rpc(
+        root,
+        "inspect_kr_calendar_collection_job_v1",
+        authenticated,
+        denied_inspection_body,
+    )
+    require_postgrest_error(
+        status,
+        raw,
+        expected_status=403,
+        expected_code="42501",
+    )
+    status, raw, _ = http_post_rpc(
+        root,
         "load_or_create_kr_calendar_collection_job_v1",
         service,
         denied_body,
@@ -1055,10 +1254,79 @@ def verify_postgrest_contract(container: str, root: str) -> None:
         expected_code="PGRST202",
         require_null_context=False,
     )
-    if job_store_counts(container) != before_denials:
+    status, raw, _ = http_post_rpc(
+        root,
+        "inspect_kr_calendar_collection_job_v1",
+        service,
+        denied_inspection_body,
+        profile="api",
+    )
+    require_postgrest_error(
+        status,
+        raw,
+        expected_status=404,
+        expected_code="PGRST202",
+        require_null_context=False,
+    )
+    if (
+        job_store_counts(container) != before_denials
+        or job_store_fingerprint(container) != before_denials_fingerprint
+    ):
         raise VerificationError("denied PostgREST calls changed durable job state")
 
     domain_before = domain_snapshot(container)
+    missing_job_id = str(uuid4())
+    missing_counts = job_store_counts(container)
+    missing_fingerprint = job_store_fingerprint(container)
+    missing_found, missing_snapshot, _ = postgrest_inspection(
+        root,
+        service,
+        missing_job_id,
+    )
+    if missing_found or missing_snapshot is not None:
+        raise VerificationError("PostgREST missing inspection returned a snapshot")
+    if (
+        job_store_counts(container) != missing_counts
+        or job_store_fingerprint(container) != missing_fingerprint
+    ):
+        raise VerificationError("PostgREST missing inspection performed a write")
+    for invalid_job_id in (
+        "not-a-uuid",
+        missing_job_id.upper(),
+        "11111111-1111-1111-8111-111111111111",
+    ):
+        status, raw, _ = http_post_rpc(
+            root,
+            "inspect_kr_calendar_collection_job_v1",
+            service,
+            inspect_rpc_payload(invalid_job_id),
+        )
+        require_postgrest_error(
+            status,
+            raw,
+            expected_status=400,
+            expected_code="22023",
+            expected_message="kr_calendar_collection_job_argument_invalid",
+        )
+    status, raw, _ = http_post_rpc(
+        root,
+        "inspect_kr_calendar_collection_job_v1",
+        service,
+        {"p_job_id": None},
+    )
+    require_postgrest_error(
+        status,
+        raw,
+        expected_status=400,
+        expected_code="22023",
+        expected_message="kr_calendar_collection_job_argument_invalid",
+    )
+    if (
+        job_store_counts(container) != missing_counts
+        or job_store_fingerprint(container) != missing_fingerprint
+    ):
+        raise VerificationError("invalid PostgREST inspection performed a write")
+
     spec = job_spec(start=session.session_date, days=1)
     created, _ = postgrest_snapshot(
         root,
@@ -1068,6 +1336,18 @@ def verify_postgrest_contract(container: str, root: str) -> None:
     )
     if created["state"] != "ready" or created["revision"] != 1:
         raise VerificationError(f"PostgREST load transition mismatch: {created}")
+    inspection_counts = job_store_counts(container)
+    inspection_store_fingerprint = job_store_fingerprint(container)
+    inspection_fingerprint = job_state_fingerprint(container, spec.job_id)
+    found, inspected, _ = postgrest_inspection(root, service, spec.job_id)
+    if not found or inspected != created:
+        raise VerificationError("PostgREST existing inspection snapshot mismatch")
+    if (
+        job_store_counts(container) != inspection_counts
+        or job_store_fingerprint(container) != inspection_store_fingerprint
+        or job_state_fingerprint(container, spec.job_id) != inspection_fingerprint
+    ):
+        raise VerificationError("PostgREST existing inspection performed a write")
     raw_receipt = append_calendar(container, session)
     receipt = receipt_payload(raw_receipt)
     holder = str(uuid4())
@@ -1253,7 +1533,7 @@ def verify_postgrest_contract(container: str, root: str) -> None:
         raise VerificationError("PostgREST job flows changed trading/order domain rows")
     print(
         "PASS actual PostgREST worker_api profiles, role boundary, five RPC "
-        "envelopes and stale CAS safe error"
+        "mutation envelopes, read-only inspection and stale CAS safe error"
     )
 
 
@@ -1412,6 +1692,27 @@ def verify_maximum_postgrest_snapshot(container: str, root: str) -> None:
             f"maximum response lacks 4 MiB headroom: {response_bytes} bytes"
         )
 
+    inspection_store_fingerprint = job_store_fingerprint(container)
+    inspection_fingerprint = job_state_fingerprint(container, spec.job_id)
+    found, inspected, inspection_bytes = postgrest_inspection(
+        root,
+        service,
+        spec.job_id,
+    )
+    if not found or inspected != terminal:
+        raise VerificationError("maximum job inspection snapshot mismatch")
+    if (
+        job_store_fingerprint(container) != inspection_store_fingerprint
+        or job_state_fingerprint(container, spec.job_id) != inspection_fingerprint
+    ):
+        raise VerificationError("maximum job inspection performed a write")
+    inspection_headroom_bytes = MAX_RPC_RESPONSE_BYTES - inspection_bytes
+    if inspection_headroom_bytes < MINIMUM_RESPONSE_HEADROOM_BYTES:
+        raise VerificationError(
+            "maximum inspection lacks 4 MiB response headroom: "
+            f"{inspection_bytes} bytes"
+        )
+
     ledger_before = scalar(
         container,
         "select count(*) from private.kr_calendar_collection_attempt_ledger "
@@ -1437,6 +1738,8 @@ def verify_maximum_postgrest_snapshot(container: str, root: str) -> None:
         "PASS 366 contiguous checkpoints, revision 733, 732 ledger rows, "
         "Python/SQL manifest parity and identity response "
         f"response_bytes={response_bytes} headroom_bytes={headroom_bytes} "
+        f"inspection_bytes={inspection_bytes} "
+        f"inspection_headroom_bytes={inspection_headroom_bytes} "
         f"append_seconds={append_seconds:.3f} "
         f"transition_seconds={transition_seconds:.3f} "
         f"reload_seconds={reload_seconds:.3f}"
@@ -1477,6 +1780,9 @@ def verify_populated_upgrade(container: str) -> None:
         raise VerificationError("populated upgrade did not preserve durable source/job state")
     for migration in migrations[target_index + 1 :]:
         psql(container, migration.read_text(encoding="utf-8"))
+    found, inspected = inspect_job(container, spec.job_id)
+    if not found or inspected != created:
+        raise VerificationError("populated upgrade inspection snapshot mismatch")
     verify_security_contract(container)
     print("PASS populated upgrade and reconnect durability")
 
@@ -1543,6 +1849,7 @@ def main() -> int:
         verify_completion_manifest(fresh)
         verify_malformed_fail_closed(fresh)
         verify_security_contract(fresh)
+        verify_read_only_inspection(fresh)
         postgrest_root = start_postgrest(fresh, network, postgrest)
         verify_postgrest_contract(fresh, postgrest_root)
         verify_maximum_postgrest_snapshot(fresh, postgrest_root)

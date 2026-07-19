@@ -14,6 +14,7 @@ from app.application.ports.calendar_observation_store_port import (
     CalendarObservationWriteReceipt,
 )
 from app.application.ports.kr_calendar_collection_job_store_port import (
+    KrCalendarCollectionJobInspectorPort,
     KrCalendarCollectionJobSnapshotV1,
     KrCalendarCollectionJobSpecV1,
     KrCalendarCollectionJobStoreError,
@@ -376,6 +377,19 @@ async def test_fresh_in_memory_store_has_no_restart_durability() -> None:
 
     assert await first.inspect_job(JOB_ID) is not None
     assert await second.inspect_job(JOB_ID) is None
+
+
+async def test_inspect_implements_separate_port_and_requires_canonical_uuid4() -> None:
+    store = InMemoryKrCalendarCollectionJobStore()
+    inspector: KrCalendarCollectionJobInspectorPort = store
+
+    with pytest.raises(
+        KrCalendarCollectionJobStoreError,
+        match="job_id_invalid",
+    ):
+        await inspector.inspect_job("00000000-0000-1000-8000-000000000101")
+
+    assert await inspector.inspect_job(JOB_ID) is None
 
 
 async def _begin(

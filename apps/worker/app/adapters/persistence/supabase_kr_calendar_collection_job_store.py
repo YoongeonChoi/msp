@@ -37,6 +37,7 @@ from app.infrastructure.supabase_headers import supabase_api_headers
 
 KrCalendarCollectionJobRpc = Literal[
     "load_or_create_kr_calendar_collection_job_v1",
+    "inspect_kr_calendar_collection_job_v1",
     "begin_kr_calendar_collection_date_attempt_v1",
     "pause_kr_calendar_collection_date_attempt_v1",
     "block_kr_calendar_collection_date_attempt_v1",
@@ -46,6 +47,7 @@ KrCalendarCollectionJobRpc = Literal[
 KR_CALENDAR_COLLECTION_JOB_RPC_ALLOWLIST: frozenset[str] = frozenset(
     {
         "load_or_create_kr_calendar_collection_job_v1",
+        "inspect_kr_calendar_collection_job_v1",
         "begin_kr_calendar_collection_date_attempt_v1",
         "pause_kr_calendar_collection_date_attempt_v1",
         "block_kr_calendar_collection_date_attempt_v1",
@@ -194,6 +196,23 @@ class SupabaseKrCalendarCollectionJobStore:
             )
         )
         if snapshot.spec != canonical_spec:
+            raise KrCalendarCollectionJobStoreError(
+                "kr_calendar_collection_job_store_response_binding_invalid"
+            )
+        return snapshot
+
+    async def inspect_job(
+        self,
+        job_id: str,
+    ) -> KrCalendarCollectionJobSnapshotV1 | None:
+        canonical_job_id = _uuid4_text(job_id, "job_id")
+        snapshot = _inspection_from_rpc(
+            await self._rpc(
+                "inspect_kr_calendar_collection_job_v1",
+                {"p_job_id": canonical_job_id},
+            )
+        )
+        if snapshot is not None and snapshot.spec.job_id != canonical_job_id:
             raise KrCalendarCollectionJobStoreError(
                 "kr_calendar_collection_job_store_response_binding_invalid"
             )
@@ -567,9 +586,42 @@ def _snapshot_from_rpc(value: object) -> KrCalendarCollectionJobSnapshotV1:
         raise KrCalendarCollectionJobStoreError(
             "kr_calendar_collection_job_store_rpc_result_invalid"
         )
+    return _snapshot_from_payload(value[0]["snapshot"])
+
+
+def _inspection_from_rpc(value: object) -> KrCalendarCollectionJobSnapshotV1 | None:
+    if (
+        type(value) is not list
+        or len(value) != 1
+        or type(value[0]) is not dict
+        or set(value[0]) != {"job_found", "snapshot"}
+    ):
+        raise KrCalendarCollectionJobStoreError(
+            "kr_calendar_collection_job_store_rpc_result_invalid"
+        )
+    job_found = value[0]["job_found"]
+    snapshot_payload = value[0]["snapshot"]
+    if type(job_found) is not bool:
+        raise KrCalendarCollectionJobStoreError(
+            "kr_calendar_collection_job_store_rpc_result_invalid"
+        )
+    if job_found is False:
+        if snapshot_payload is not None:
+            raise KrCalendarCollectionJobStoreError(
+                "kr_calendar_collection_job_store_rpc_result_invalid"
+            )
+        return None
+    if snapshot_payload is None:
+        raise KrCalendarCollectionJobStoreError(
+            "kr_calendar_collection_job_store_rpc_result_invalid"
+        )
+    return _snapshot_from_payload(snapshot_payload)
+
+
+def _snapshot_from_payload(value: object) -> KrCalendarCollectionJobSnapshotV1:
     snapshot: KrCalendarCollectionJobSnapshotV1 | None = None
     with suppress(Exception):
-        candidate = _parse_snapshot(value[0]["snapshot"])
+        candidate = _parse_snapshot(value)
         snapshot = canonical_kr_calendar_collection_job_snapshot(candidate)
     if snapshot is None:
         raise KrCalendarCollectionJobStoreError(

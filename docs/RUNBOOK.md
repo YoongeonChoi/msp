@@ -29,7 +29,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719040000_pit_calendar_observation_store.sql`, and
 `20260719050000_pit_calendar_as_of_reader.sql`, followed by
 `20260719060000_kr_calendar_collection_job_store.sql`, followed by
-`20260719070000_kr_calendar_collection_job_conflict_boundary.sql`.
+`20260719070000_kr_calendar_collection_job_conflict_boundary.sql`, followed by
+`20260719080000_kr_calendar_collection_job_inspection.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -127,7 +128,7 @@ disposable-database verifier:
 python supabase/verify_kr_calendar_collection_job_store.py
 ```
 
-The five Worker-only RPCs must remain service-role-only. Confirm reconnect
+The six Worker-only RPCs must remain service-role-only. Confirm reconnect
 durability, concurrent create/begin serialization, exact spec/revision/attempt/
 holder/target fencing, pause followed only by a new explicit manual attempt,
 blocked-attempt takeover denial, immutable calendar occurrence binding,
@@ -137,10 +138,36 @@ parity, response-size headroom, forced RLS, append-only attempt history, and zer
 writes to trading/order rows. Never add TTL takeover or automatic retry for an
 unresolved attempt.
 
-The adapter is not selected by the runtime container or scheduler. Its presence
-does not approve a manual recovery procedure, automatic backfill, dataset/DQ
+For `inspect_kr_calendar_collection_job_v1`, confirm valid missing and present
+job UUIDs return the exact `job_found`/`snapshot` envelope, invalid or non-v4
+UUIDs fail closed, and only `service_role` can execute it through the actual
+PostgREST `worker_api` profile. Compare the private job and attempt-ledger
+fingerprint before and after inspection of an existing job; for missing or
+invalid IDs, confirm the exact job/ledger counts and trading/order domain
+snapshot are unchanged.
+
+The durable mutation and inspector adapters are implemented but are not
+selected by the runtime container or scheduler. Their presence does not approve
+a recovery command, manual recovery procedure, automatic backfill, dataset/DQ
 certification, research/feature/backtest/strategy/order use, Hosted Staging, or
 Production Live.
+
+The codebase includes a read-only calendar job recovery assessment service, but
+there is no operator command or runtime wiring for it. Given one exact canonical
+spec and spec SHA, it may call an inspector once and classify the durable state:
+
+- `missing`: review whether a separate explicit manual invocation should create it.
+- `ready`: review whether a separate explicit manual invocation should advance one date.
+- `paused_retryable`: review the proven pre-write failure before any explicit invocation.
+- `collecting`: investigate the in-flight attempt without retrying it.
+- `blocked_unknown`: reconcile the unknown write outcome without retrying it.
+- `completed`: no recovery action is indicated.
+
+These labels and recommended review directions do not authorize mutation,
+retry, manual execution, manual recovery, scheduling, or Production Live. A
+spec mismatch, spec-SHA mismatch, invalid snapshot, or inspector exception must
+return only a fixed fail-closed error. Do not operate directly on the private
+tables to turn an assessment into a recovery action.
 
 ## Start-of-day Paper checklist
 

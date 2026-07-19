@@ -26,6 +26,7 @@ from app.application.ports.calendar_observation_store_port import (
 from app.application.ports.kr_calendar_collection_job_store_port import (
     KrCalendarCollectionDateAttemptV1,
     KrCalendarCollectionDateCheckpointV1,
+    KrCalendarCollectionJobInspectorPort,
     KrCalendarCollectionJobSnapshotV1,
     KrCalendarCollectionJobSpecV1,
     KrCalendarCollectionJobStoreError,
@@ -67,15 +68,22 @@ async def test_store_uses_exact_rpc_payloads_and_reconstructs_every_transition()
         "pause_kr_calendar_collection_date_attempt_v1": paused,
         "block_kr_calendar_collection_date_attempt_v1": blocked,
         "confirm_kr_calendar_collection_date_v1": completed,
+        "inspect_kr_calendar_collection_job_v1": ready,
     }
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         rpc = request.url.path.rsplit("/", 1)[-1]
-        return httpx.Response(200, json=_rpc_response(responses[rpc]))
+        body = (
+            _inspection_rpc_response(responses[rpc])
+            if rpc == "inspect_kr_calendar_collection_job_v1"
+            else _rpc_response(responses[rpc])
+        )
+        return httpx.Response(200, json=body)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     store = SupabaseKrCalendarCollectionJobStore(_settings(), client=client)
+    inspector: KrCalendarCollectionJobInspectorPort = store
     try:
         loaded = await store.load_or_create_job(spec, now=NOW)
         begun = await store.begin_date_attempt(
@@ -93,6 +101,7 @@ async def test_store_uses_exact_rpc_payloads_and_reconstructs_every_transition()
             **_transition_args(spec, expected_revision=2, now=FINISHED_AT),
             collection=collection,
         )
+        inspected = await inspector.inspect_job(JOB_ID)
         await store.close()
         assert client.is_closed is False
     finally:
@@ -103,6 +112,7 @@ async def test_store_uses_exact_rpc_payloads_and_reconstructs_every_transition()
     assert paused_result == paused
     assert blocked_result == blocked
     assert confirmed == completed
+    assert inspected == ready
     assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == list(
         responses
     )
@@ -144,6 +154,105 @@ async def test_store_uses_exact_rpc_payloads_and_reconstructs_every_transition()
         "p_session": collection.session.to_payload(),
         "p_receipt": _receipt_payload(collection.receipt),
     }
+    assert payloads[5] == {"p_job_id": JOB_ID}
+
+
+async def test_inspect_returns_none_for_exact_not_found_envelope() -> None:
+    store, client = _store_for_body(
+        [{"job_found": False, "snapshot": None}]
+    )
+    try:
+        assert await store.inspect_job(JOB_ID) is None
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {},
+        [],
+        [
+            {"job_found": False, "snapshot": None},
+            {"job_found": False, "snapshot": None},
+        ],
+        [None],
+        [{"snapshot": None}],
+        [{"job_found": False}],
+        [{"job_found": False, "snapshot": None, "unexpected": True}],
+        [{"job_found": 0, "snapshot": None}],
+        [{"job_found": "false", "snapshot": None}],
+        [{"job_found": True, "snapshot": None}],
+        [{"job_found": False, "snapshot": {}}],
+    ],
+)
+async def test_inspect_requires_exact_singleton_found_snapshot_envelope(
+    body: object,
+) -> None:
+    store, client = _store_for_body(body)
+    try:
+        with pytest.raises(
+            KrCalendarCollectionJobStoreError,
+            match="rpc_result_invalid",
+        ):
+            await store.inspect_job(JOB_ID)
+    finally:
+        await client.aclose()
+
+
+async def test_inspect_revalidates_found_snapshot_and_job_binding() -> None:
+    malformed_store, malformed_client = _store_for_body(
+        [{"job_found": True, "snapshot": {}}]
+    )
+    wrong_job_store, wrong_job_client = _store_for_body(
+        _inspection_rpc_response(_ready(_spec(job_id=OTHER_JOB_ID)))
+    )
+    try:
+        with pytest.raises(
+            KrCalendarCollectionJobStoreError,
+            match="rpc_snapshot_invalid",
+        ):
+            await malformed_store.inspect_job(JOB_ID)
+        with pytest.raises(
+            KrCalendarCollectionJobStoreError,
+            match="response_binding_invalid",
+        ):
+            await wrong_job_store.inspect_job(JOB_ID)
+    finally:
+        await malformed_client.aclose()
+        await wrong_job_client.aclose()
+
+
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        cast(Any, None),
+        cast(Any, UUID(JOB_ID)),
+        "invalid",
+        "00000000-0000-1000-8000-000000000201",
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    ],
+)
+async def test_inspect_rejects_noncanonical_uuid4_before_network(job_id: str) -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseKrCalendarCollectionJobStore(_settings(), client=client)
+    try:
+        with pytest.raises(
+            KrCalendarCollectionJobStoreError,
+            match="job_id_invalid",
+        ):
+            await store.inspect_job(job_id)
+    finally:
+        await client.aclose()
+    assert requests == 0
 
 
 @pytest.mark.parametrize(
@@ -900,6 +1009,12 @@ def _transition_args(
 
 def _rpc_response(snapshot: KrCalendarCollectionJobSnapshotV1) -> list[object]:
     return [{"snapshot": _snapshot_payload(snapshot)}]
+
+
+def _inspection_rpc_response(
+    snapshot: KrCalendarCollectionJobSnapshotV1,
+) -> list[object]:
+    return [{"job_found": True, "snapshot": _snapshot_payload(snapshot)}]
 
 
 def _snapshot_payload(snapshot: KrCalendarCollectionJobSnapshotV1) -> dict[str, object]:

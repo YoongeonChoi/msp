@@ -135,8 +135,13 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   reference이고, 별도 Supabase adapter는 private job snapshot과 append-only attempt
   ledger를 service-role-only RPC로 보존한다. 재접속 복원·동시 begin·stale CAS·blocked
   무인 takeover 금지·terminal manifest·ACL/RLS를 disposable PostgreSQL에서 검증하지만
-  runtime selection, manual recovery 또는 scheduler 연결은 제공하지 않는다. 기존 timing
-  RPC의 monotonic source-stream guard도 유지되어,
+  runtime selection, manual recovery 또는 scheduler 연결은 제공하지 않는다. 별도
+  read-only recovery assessment service는 inspector를 한 번만 읽어 missing/ready/
+  paused_retryable/collecting/blocked_unknown/completed를 보수적으로 분류하고 다음 검토
+  방향을 표시하지만 mutation·retry·manual execution·manual recovery·Live 권한은 모두
+  부여하지 않는다. service-role-only inspect RPC와 Supabase inspector adapter는
+  구현됐지만 recovery command·runtime/container 선택·scheduler·hosted 연결은 아직
+  없다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
   calendar head가 전진한 뒤 과거 occurrence를 새 timing 요청으로 backfill하는 경로는
   fail closed이며 별도 계약이 필요하다.
 - 별도 Worker-only calendar as-of reader는 한 provider의 `KR` 개장·휴장
@@ -575,6 +580,7 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E3` 단일 날짜 calendar source→observation store collection use case 로컬 구현
 - [x] `E3` default-disabled 수동 calendar range-job CAS/fencing 계약과 in-memory reference adapter 로컬 구현
 - [x] `E3` service-role-only durable Supabase range-job snapshot·attempt ledger와 CAS verifier 로컬 구현
+- [x] `E3` 단일 inspector read 기반의 read-only range-job recovery assessment 로컬 구현
 - [x] `E3` retained calendar date-range coverage gate와 canonical scope/data-lineage fingerprint 로컬 구현
 - [ ] `E3` durable range-job runtime 선택·manual recovery, scheduler/자동 range collection과 feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현

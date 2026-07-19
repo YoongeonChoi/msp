@@ -52,7 +52,8 @@ approval and dedicated staging credentials.
 42. `20260719050000_pit_calendar_as_of_reader.sql`
 43. `20260719060000_kr_calendar_collection_job_store.sql`
 44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
-45. `seed.sql`
+45. `20260719080000_kr_calendar_collection_job_inspection.sql`
+46. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -148,6 +149,10 @@ The timestamp migrations extend that boundary in this order:
   conflicts at the exposed Worker RPC boundary to bounded PostgREST `PT409`
   responses. The private state machine keeps its fail-closed checks; callers
   must reload state and must not auto-retry.
+- `20260719080000_kr_calendar_collection_job_inspection.sql` adds one stable,
+  service-role-only Worker RPC for exact job UUID inspection. A missing job
+  returns `job_found=false` with a null snapshot; a present job returns the
+  canonical snapshot. The RPC does not create, mutate, retry, or recover a job.
 
 ## Required project configuration
 
@@ -224,12 +229,26 @@ parser error.
 The calendar collection-job verifier additionally checks reconnect durability,
 concurrent create/begin, stale CAS zero-change, pause/rebegin, blocked-attempt
 takeover denial, immutable occurrence binding, and canonical UTC. It also starts
-the pinned local PostgREST image to verify the five exact Worker RPC envelopes,
-service-role/profile denial matrix, and bounded `PT409` stale-CAS response. A
-366-day job must finish with revision 733, 732 ledger events, 366 contiguous
-checkpoints, Python/SQL terminal-manifest parity, an identity response below the
-4 MiB adapter limit, forced RLS/ACL, append-only history, and zero order-domain
-writes.
+the pinned local PostgREST image to verify the five mutation RPC envelopes and
+the inspection RPC's missing/present envelope, invalid UUID rejection,
+service-role/profile denial matrix, unchanged counts and existing-job
+zero-write fingerprint, and bounded `PT409` stale-CAS response. A 366-day job
+must finish with revision 733, 732
+ledger events, 366 contiguous checkpoints, Python/SQL terminal-manifest parity,
+an identity response below the 4 MiB adapter limit, forced RLS/ACL, append-only
+history, and zero order-domain writes.
+
+The application-layer calendar recovery assessment is read-only and performs
+exactly one `KrCalendarCollectionJobInspectorPort.inspect_job` call for a valid
+request. It canonicalizes the requested spec, requires the caller-provided spec
+SHA to match, revalidates the returned snapshot, and then reports only a
+conservative state classification and review direction. It performs no RPC
+mutation and grants no retry, manual-execution, manual-recovery, scheduler, or
+Production Live authority. The service-role-only inspection RPC and Supabase
+inspector adapter are implemented, but no recovery command, runtime/container
+selection, scheduler, or hosted operation invokes the assessment service. The
+migration verifier therefore does not claim that recovery is operational
+against a hosted project.
 
 For the calendar reader, `occurrence.observed_at <= as_of` is the semantic
 source cutoff. `received_at` remains lineage and cannot reconstruct which rows

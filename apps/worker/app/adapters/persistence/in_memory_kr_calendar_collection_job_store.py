@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 from app.application.ports.kr_calendar_collection_job_store_port import (
     KrCalendarCollectionDateAttemptV1,
@@ -254,8 +256,9 @@ class InMemoryKrCalendarCollectionJobStore:
         self,
         job_id: str,
     ) -> KrCalendarCollectionJobSnapshotV1 | None:
+        canonical_job_id = _uuid4_text(job_id)
         async with self._lock:
-            current = self._jobs.get(job_id)
+            current = self._jobs.get(canonical_job_id)
             return None if current is None else _clone(current)
 
     def _current(
@@ -353,3 +356,15 @@ def _utc(value: object) -> datetime:
     if converted is None:
         raise KrCalendarCollectionJobStoreError("kr_calendar_collection_job_store_clock_invalid")
     return converted
+
+
+def _uuid4_text(value: object) -> str:
+    parsed: UUID | None = None
+    if type(value) is str:
+        with suppress(AttributeError, TypeError, ValueError):
+            parsed = UUID(value)
+    if parsed is None or parsed.version != 4 or str(parsed) != value:
+        raise KrCalendarCollectionJobStoreError(
+            "kr_calendar_collection_job_store_job_id_invalid"
+        )
+    return value

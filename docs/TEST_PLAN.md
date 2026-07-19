@@ -62,11 +62,28 @@
   무인 takeover 금지, complete manifest의 Python/SQL 동일성, ACL/RLS, 주문 경로
   zero-write를 검증한다. runtime/container/scheduler 연결이나 manual recovery 승인은
   별도 항목으로 남긴다.
-- pinned local PostgREST에서 service-role-only profile과 다섯 RPC envelope를 확인하고,
-  deterministic stale CAS가 retryable serialization failure 대신 bounded `PT409`로
-  종료되는지 검증한다. 별도 366일 batch는 checkpoint 366개, revision 733, ledger
-  732건, Python/SQL manifest parity와 4 MiB response headroom을 검증한다. 이는
-  Gateway/Kong, Hosted Supabase 또는 Production Live 승인 증거가 아니다.
+- pinned local PostgREST의 실제 `worker_api` profile에서 다섯 mutation RPC envelope와
+  read-only inspect RPC를 확인한다. inspect는 유효한 missing/present UUID의
+  `job_found`/`snapshot` envelope, invalid/non-v4 UUID 거부, service-role-only ACL과
+  `anon`/`authenticated`/잘못된 profile 차단을 검증하고, 호출 전후 job·attempt-ledger
+  count가 같으며 기존 job은 전체 fingerprint도 같아 zero-write임을 증명해야 한다.
+  deterministic stale CAS는 retryable
+  serialization failure 대신 bounded `PT409`로 종료되어야 한다. 별도 366일 batch는
+  checkpoint 366개, revision 733, ledger 732건, Python/SQL manifest parity와 4 MiB
+  response headroom을 검증한다. 이는 Gateway/Kong, Hosted Supabase 또는 Production
+  Live 승인 증거가 아니다.
+- read-only recovery assessment는 유효한 요청마다 inspector를 정확히 한 번만 호출하고
+  missing/ready/paused_retryable/collecting/blocked_unknown/completed를 분류한다. 각 상태의
+  recommended operator action은 검토 방향일 뿐이며 mutation 수행·retry·manual execution·
+  manual recovery·Live authorization은 항상 false여야 한다. collecting/blocked_unknown은
+  unresolved write outcome으로 표시하고 explicit manual invocation 후보로 만들지 않는다.
+  spec/spec SHA 불일치, 변조 snapshot, inspector 예외는 payload나 credential 없이 고정
+  오류로 fail closed해야 한다.
+- assessment unit test는 service의 순수 분류·단일 inspector-read 계약을 증명한다.
+  별도 migration/adapter/DB verifier는 service-role-only RPC, 실제 PostgREST profile,
+  missing/present/invalid UUID, ACL과 zero-write fingerprint를 증명한다. Supabase
+  inspector adapter는 구현됐지만 recovery command, runtime/container 선택, scheduler,
+  Hosted operation은 아직 미구현이다.
 - 성공 결과도 provider authenticity/finality, official exchange completeness,
   corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
   승인을 의미하지 않는다.

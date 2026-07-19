@@ -130,6 +130,18 @@ PostgreSQL verifier. It has no TTL takeover or automatic retry. The adapter is
 not selected by the runtime container, and a reviewed manual recovery workflow
 remains unimplemented.
 
+`KrCalendarCollectionRecoveryAssessmentService` is a separate read-only
+classification boundary over one `KrCalendarCollectionJobInspectorPort` read.
+It rebinds the inspected snapshot to the caller's exact canonical spec and spec
+SHA before classifying `missing`, `ready`, `paused_retryable`, `collecting`,
+`blocked_unknown`, or `completed`. Its `recommended_operator_action` describes
+only the next review question. Mutation, retry, manual recovery, manual
+execution, and Production Live authorization remain false; an in-flight or
+unknown write outcome is never converted into a retry. A service-role-only
+Worker RPC and the Supabase job-store adapter implement the durable inspection
+read. No recovery command, runtime/container selector, scheduler, or hosted
+operation invokes the assessment service yet.
+
 This calendar collection path is not wired into the runtime container, the
 scheduler, automatic range backfill, Desktop, timing, features, backtests,
 strategy, or orders. Preserving one open- or closed-day observation is source

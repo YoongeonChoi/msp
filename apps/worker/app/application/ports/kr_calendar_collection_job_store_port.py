@@ -338,6 +338,13 @@ class KrCalendarCollectionJobStorePort(Protocol):
     ) -> KrCalendarCollectionJobSnapshotV1: ...
 
 
+class KrCalendarCollectionJobInspectorPort(Protocol):
+    async def inspect_job(
+        self,
+        job_id: str,
+    ) -> KrCalendarCollectionJobSnapshotV1 | None: ...
+
+
 def canonical_kr_calendar_collection_job_spec(
     value: object,
 ) -> KrCalendarCollectionJobSpecV1:

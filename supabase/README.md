@@ -46,7 +46,8 @@ SQL migration 순서:
 42. `20260719050000_pit_calendar_as_of_reader.sql`
 43. `20260719060000_kr_calendar_collection_job_store.sql`
 44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
-45. `seed.sql` (로컬 non-live 기본값만)
+45. `20260719080000_kr_calendar_collection_job_inspection.sql`
+46. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -71,7 +72,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 
 `verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
 Docker의 새 `postgres:17-alpine`에 `0001`부터
-`20260719060000_kr_calendar_collection_job_store.sql`까지 적용하는
+`20260719080000_kr_calendar_collection_job_inspection.sql`까지 적용하는
 clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
 적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
 적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
@@ -151,10 +152,14 @@ continuation·non-identity response encoding·4 MiB 초과 RPC 응답을 payload
 takeover 금지, immutable calendar occurrence 결합, canonical UTC, forced RLS/ACL,
 append-only ledger와 zero-order-write를 검증합니다. fresh DB와 같은 disposable
 Docker network에 pinned `postgrest/postgrest:v12.2.8`을 연결하고 실제
-`Accept-Profile: worker_api`와 `Content-Profile: worker_api` 요청으로 다섯 RPC의
-singleton `[{"snapshot": ...}]` envelope를 확인합니다. token이 없는 `anon`과
-`authenticated` JWT는 거부되고 `service_role` JWT만 성공하며, 같은 service token도
-`api` profile에서는 해당 Worker RPC를 호출할 수 없어야 합니다. 실제 HTTP 경로로
+`Accept-Profile: worker_api`와 `Content-Profile: worker_api` 요청으로 다섯 mutation
+RPC의 singleton `[{"snapshot": ...}]` envelope와 read-only inspect RPC의
+`job_found`/`snapshot` envelope를 확인합니다. inspect는 valid missing/present UUID,
+invalid/non-v4 UUID 거부, service-role-only ACL과 호출 전후 job·attempt-ledger
+count가 같고 existing job 전체 fingerprint도 같은 zero-write를 검증합니다. token이
+없는 `anon`과 `authenticated`
+JWT는 거부되고 `service_role` JWT만 성공하며, 같은 service token도 `api`
+profile에서는 해당 Worker RPC를 호출할 수 없어야 합니다. 실제 HTTP 경로로
 load→begin→confirm, begin→pause→rebegin→block과 stale revision CAS의 bounded
 `PT409` safe error 및 zero-write를 검증합니다. 이 conflict boundary는 deterministic
 CAS rejection을 retryable PostgreSQL serialization failure로 노출하지 않고 state
@@ -167,6 +172,15 @@ manifest parity를 확인하고, completed job을 실제 PostgREST로 다시 읽
 encoding raw 응답 크기와 4 MiB 제한까지 남은 headroom을 출력합니다. completed reload는
 snapshot과 ledger를 바꾸지 않아야 합니다. 이 durable adapter는
 runtime/container/scheduler에서 아직 선택되지 않습니다.
+
+별도 `KrCalendarCollectionRecoveryAssessmentService`는 유효한 요청에서 inspector를
+정확히 한 번 읽고 exact spec/spec SHA와 canonical snapshot을 다시 결합한 뒤
+missing/ready/paused_retryable/collecting/blocked_unknown/completed만 분류합니다. 상태별
+`recommended_operator_action`은 후속 검토 방향이며 mutation, retry, manual execution,
+manual recovery 또는 Production Live 권한이 아닙니다. collecting/blocked_unknown의
+write outcome은 unresolved로 유지됩니다. 이 서비스에 연결된 Supabase inspector
+adapter와 service-role-only RPC는 구현됐지만 recovery command, runtime/container
+selector, scheduler 또는 hosted operation 연결은 아직 없습니다.
 
 이 검증은 disposable PostgreSQL에 직접 연결한 PostgREST Data API 계약만 다룹니다.
 Supabase Gateway/Kong의 `apikey` 처리, hosted project 설정, 프록시 fault injection,
