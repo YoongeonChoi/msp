@@ -60,7 +60,7 @@ Jobs:
 Triggers:
 
 - `pull_request`
-- `push` to `main`
+- `push` to `main` and `develop`
 - weekly schedule
 
 Jobs:
@@ -79,7 +79,10 @@ Jobs:
 Dependency and code-audit findings fail the workflow. Third-party actions are
 pinned to immutable full commit SHAs, and the workflow policy guard rejects
 floating action tags, unpinned Docker actions, protected secret references, and
-unsafe workflow triggers.
+unsafe workflow triggers. Every `develop` push starts CodeQL, `npm audit`,
+`pip-audit`, Bandit, secret scans, and the workflow policy guard. Dependency
+Review remains a PR-only diff check. The exact current `develop` head must have
+a successful security run before it can become a `main` integration candidate.
 
 ### `.github/workflows/migration-check.yml`
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from types import ModuleType
 
@@ -17,6 +18,15 @@ def _module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _workflow_job_block(text: str, job_name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(job_name)}:\n.*?(?=^  [a-z0-9-]+:\n|\Z)",
+        text,
+    )
+    assert match is not None
+    return match.group(0)
 
 
 def _safe_repository(tmp_path: Path) -> Path:
@@ -602,3 +612,32 @@ def test_security_audits_are_blocking_gates() -> None:
         next_step = text.find("\n      - name:", start + 1)
         block = text[start:] if next_step == -1 else text[start:next_step]
         assert "continue-on-error" not in block
+
+
+def test_security_workflow_runs_on_develop_and_main_pushes() -> None:
+    text = (ROOT / ".github" / "workflows" / "security.yml").read_text(
+        encoding="utf-8"
+    )
+
+    lines = text.splitlines()
+    push_index = lines.index("  push:")
+    branches_line = lines[push_index + 1].strip()
+    assert branches_line.startswith("branches: [")
+    assert branches_line.endswith("]")
+    branches = {
+        branch.strip().strip("'\"")
+        for branch in branches_line.removeprefix("branches: [")[:-1].split(",")
+    }
+    assert {"main", "develop"}.issubset(branches)
+
+    for job_name in (
+        "codeql",
+        "security-audits",
+        "secret-scan",
+        "secret-pattern-scan",
+        "workflow-policy",
+    ):
+        assert "\n    if:" not in _workflow_job_block(text, job_name)
+
+    dependency_review = _workflow_job_block(text, "dependency-review")
+    assert "\n    if: github.event_name == 'pull_request'" in dependency_review
