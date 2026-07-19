@@ -45,7 +45,8 @@ SQL migration 순서:
 41. `20260719040000_pit_calendar_observation_store.sql`
 42. `20260719050000_pit_calendar_as_of_reader.sql`
 43. `20260719060000_kr_calendar_collection_job_store.sql`
-44. `seed.sql` (로컬 non-live 기본값만)
+44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
+45. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -147,9 +148,30 @@ continuation·non-identity response encoding·4 MiB 초과 RPC 응답을 payload
 오류로 거부하는 Worker adapter 동작은 별도 unit test로 검증합니다.
 `verify_kr_calendar_collection_job_store.py`는 fresh/populated-upgrade PostgreSQL에서
 동시 create/begin, 재접속 복원, stale CAS, pause 후 새 수동 attempt, blocked 상태의
-takeover 금지, immutable calendar occurrence 결합, canonical UTC, 366일 경계,
-terminal manifest, forced RLS/ACL, append-only ledger와 zero-order-write를 검증합니다.
-이 durable adapter는 runtime/container/scheduler에서 아직 선택되지 않습니다.
+takeover 금지, immutable calendar occurrence 결합, canonical UTC, forced RLS/ACL,
+append-only ledger와 zero-order-write를 검증합니다. fresh DB와 같은 disposable
+Docker network에 pinned `postgrest/postgrest:v12.2.8`을 연결하고 실제
+`Accept-Profile: worker_api`와 `Content-Profile: worker_api` 요청으로 다섯 RPC의
+singleton `[{"snapshot": ...}]` envelope를 확인합니다. token이 없는 `anon`과
+`authenticated` JWT는 거부되고 `service_role` JWT만 성공하며, 같은 service token도
+`api` profile에서는 해당 Worker RPC를 호출할 수 없어야 합니다. 실제 HTTP 경로로
+load→begin→confirm, begin→pause→rebegin→block과 stale revision CAS의 bounded
+`PT409` safe error 및 zero-write를 검증합니다. 이 conflict boundary는 deterministic
+CAS rejection을 retryable PostgreSQL serialization failure로 노출하지 않고 state
+reload와 다음 명시적 operator 판단을 요구합니다.
+
+별도의 366일 job은 366개 immutable calendar occurrence를 만든 뒤 단일 local SQL
+batch에서 366개 begin/confirm을 순서대로 완료합니다. 최종 revision `733`, ledger
+`732`건, 날짜와 fencing revision이 연속인 checkpoint `366`개, Python/SQL terminal
+manifest parity를 확인하고, completed job을 실제 PostgREST로 다시 읽어 identity
+encoding raw 응답 크기와 4 MiB 제한까지 남은 headroom을 출력합니다. completed reload는
+snapshot과 ledger를 바꾸지 않아야 합니다. 이 durable adapter는
+runtime/container/scheduler에서 아직 선택되지 않습니다.
+
+이 검증은 disposable PostgreSQL에 직접 연결한 PostgREST Data API 계약만 다룹니다.
+Supabase Gateway/Kong의 `apikey` 처리, hosted project 설정, 프록시 fault injection,
+모든 PostgREST 오류 코드 조합, 전체 DB digest, Hosted Staging 또는 Production Live
+준비 증거가 아닙니다. Production Live는 승인되지 않았습니다.
 
 `worker_api.list_pit_kr_daily_sessions_as_of_v1`의 `as_of` 의미는
 `occurrence.observed_at <= as_of`인 현재 보존 source evidence를 재구성하는

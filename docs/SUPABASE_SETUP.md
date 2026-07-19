@@ -51,7 +51,8 @@ approval and dedicated staging credentials.
 41. `20260719040000_pit_calendar_observation_store.sql`
 42. `20260719050000_pit_calendar_as_of_reader.sql`
 43. `20260719060000_kr_calendar_collection_job_store.sql`
-44. `seed.sql`
+44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
+45. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -142,6 +143,11 @@ The timestamp migrations extend that boundary in this order:
   manual KR calendar range job. Every mutation is bound to the spec SHA,
   revision, attempt, holder, target date, and canonical clock. There is no TTL
   takeover, automatic retry, runtime-container selection, or scheduler wiring.
+- `20260719070000_kr_calendar_collection_job_conflict_boundary.sql` remaps only
+  deterministic spec-hash, revision, clock-regression, and attempt-fence
+  conflicts at the exposed Worker RPC boundary to bounded PostgREST `PT409`
+  responses. The private state machine keeps its fail-closed checks; callers
+  must reload state and must not auto-retry.
 
 ## Required project configuration
 
@@ -217,9 +223,13 @@ and RPC response bodies above 4 MiB before returning a fixed, payload-free
 parser error.
 The calendar collection-job verifier additionally checks reconnect durability,
 concurrent create/begin, stale CAS zero-change, pause/rebegin, blocked-attempt
-takeover denial, immutable occurrence binding, canonical UTC, the 366-day
-boundary, Python/SQL terminal-manifest parity, forced RLS/ACL, append-only
-attempt history, and zero order-domain writes.
+takeover denial, immutable occurrence binding, and canonical UTC. It also starts
+the pinned local PostgREST image to verify the five exact Worker RPC envelopes,
+service-role/profile denial matrix, and bounded `PT409` stale-CAS response. A
+366-day job must finish with revision 733, 732 ledger events, 366 contiguous
+checkpoints, Python/SQL terminal-manifest parity, an identity response below the
+4 MiB adapter limit, forced RLS/ACL, append-only history, and zero order-domain
+writes.
 
 For the calendar reader, `occurrence.observed_at <= as_of` is the semantic
 source cutoff. `received_at` remains lineage and cannot reconstruct which rows

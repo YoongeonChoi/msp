@@ -28,7 +28,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719030000_pit_daily_candle_as_of_reader.sql`, followed by
 `20260719040000_pit_calendar_observation_store.sql`, and
 `20260719050000_pit_calendar_as_of_reader.sql`, followed by
-`20260719060000_kr_calendar_collection_job_store.sql`.
+`20260719060000_kr_calendar_collection_job_store.sql`, followed by
+`20260719070000_kr_calendar_collection_job_conflict_boundary.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content
@@ -130,9 +131,11 @@ The five Worker-only RPCs must remain service-role-only. Confirm reconnect
 durability, concurrent create/begin serialization, exact spec/revision/attempt/
 holder/target fencing, pause followed only by a new explicit manual attempt,
 blocked-attempt takeover denial, immutable calendar occurrence binding,
-canonical UTC timestamps, the 366-day bound, terminal-manifest parity, forced
-RLS, append-only attempt history, and zero writes to trading/order rows. Never
-add TTL takeover or automatic retry for an unresolved attempt.
+canonical UTC timestamps, actual PostgREST `worker_api` profiles, bounded
+`PT409` stale-CAS completion, a fully completed 366-day job, terminal-manifest
+parity, response-size headroom, forced RLS, append-only attempt history, and zero
+writes to trading/order rows. Never add TTL takeover or automatic retry for an
+unresolved attempt.
 
 The adapter is not selected by the runtime container or scheduler. Its presence
 does not approve a manual recovery procedure, automatic backfill, dataset/DQ

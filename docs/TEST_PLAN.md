@@ -62,6 +62,11 @@
   무인 takeover 금지, complete manifest의 Python/SQL 동일성, ACL/RLS, 주문 경로
   zero-write를 검증한다. runtime/container/scheduler 연결이나 manual recovery 승인은
   별도 항목으로 남긴다.
+- pinned local PostgREST에서 service-role-only profile과 다섯 RPC envelope를 확인하고,
+  deterministic stale CAS가 retryable serialization failure 대신 bounded `PT409`로
+  종료되는지 검증한다. 별도 366일 batch는 checkpoint 366개, revision 733, ledger
+  732건, Python/SQL manifest parity와 4 MiB response headroom을 검증한다. 이는
+  Gateway/Kong, Hosted Supabase 또는 Production Live 승인 증거가 아니다.
 - 성공 결과도 provider authenticity/finality, official exchange completeness,
   corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
   승인을 의미하지 않는다.

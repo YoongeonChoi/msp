@@ -120,6 +120,88 @@ def test_verifier_is_wired_for_fresh_upgrade_concurrency_and_security() -> None:
         "verify_pause_rebegin_block",
         "verify_completion_manifest",
         "verify_security_contract",
+        "verify_postgrest_contract",
+        "verify_maximum_postgrest_snapshot",
         "FINAL=PASS kr_calendar_collection_job_store_verifier",
     ):
         assert marker in verifier
+
+
+def test_verifier_exercises_actual_worker_api_postgrest_envelopes() -> None:
+    verifier = VERIFIER.read_text(encoding="utf-8")
+
+    for marker in (
+        'POSTGREST_IMAGE',
+        'PGRST_DB_SCHEMAS=api,worker_api',
+        'PGRST_DB_ANON_ROLE=anon',
+        '"Accept-Profile": profile',
+        '"Content-Profile": profile',
+        '"Accept-Encoding": "identity"',
+        '"127.0.0.1::3000"',
+        'port_lines[0].startswith("127.0.0.1:")',
+        "not 1 <= int(port) <= 65535",
+        'profile="api"',
+        'jwt_token("authenticated"',
+        'jwt_token("service_role"',
+        'set(envelope[0]) != {"snapshot"}',
+    ):
+        assert marker in verifier
+
+    for rpc in (
+        "load_or_create_kr_calendar_collection_job_v1",
+        "begin_kr_calendar_collection_date_attempt_v1",
+        "pause_kr_calendar_collection_date_attempt_v1",
+        "block_kr_calendar_collection_date_attempt_v1",
+        "confirm_kr_calendar_collection_date_v1",
+    ):
+        assert rpc in verifier
+
+
+def test_verifier_covers_stale_cas_and_maximum_terminal_response() -> None:
+    verifier = VERIFIER.read_text(encoding="utf-8")
+
+    for marker in (
+        'expected_code="PT409"',
+        "expected_status=409",
+        'expected_message="kr_calendar_collection_job_revision_conflict"',
+        "for rpc, payload in stale_calls",
+        "private.pit_sha256_text_v1(",
+        "private.kr_calendar_collection_canonical_json_v1(",
+        "jsonb_agg(to_jsonb(event) order by event.job_revision,event.event_id)",
+        "range(366)",
+        'revision != 733',
+        'ledger_contract != "732|366|366"',
+        'len(checkpoints) != 366',
+        "python_terminal_manifest(terminal)",
+        "MAX_RPC_RESPONSE_BYTES = 4 * 1024 * 1024",
+        "MINIMUM_RESPONSE_HEADROOM_BYTES",
+        "response_bytes=",
+        'set local statement_timeout = \'180s\';',
+        "transition_seconds=",
+        "completed maximum job reload was not zero-write stable",
+        "domain_snapshot(fresh) != domain_before",
+    ):
+        assert marker in verifier
+
+    for timestamp_field in (
+        "regular_start_at",
+        "regular_end_at",
+        "next_regular_start_at",
+        "next_regular_end_at",
+    ):
+        assert f'"{timestamp_field}"' in verifier
+
+
+def test_verifier_cleans_up_postgrest_database_containers_and_network() -> None:
+    verifier = VERIFIER.read_text(encoding="utf-8")
+
+    assert "def cleanup_disposable_resources(" in verifier
+    assert 'run(["docker", "rm", "-f", container], check=False)' in verifier
+    assert 'run(["docker", "network", "rm", network], check=False)' in verifier
+    assert '["docker", "ps", "-a", "--format", "{{.Names}}"]' in verifier
+    assert '["docker", "network", "ls", "--format", "{{.Name}}"]' in verifier
+    assert "disposable_resource_cleanup_incomplete" in verifier
+    assert "if cleanup_failure is not None:" in verifier
+    assert verifier.index("if cleanup_failure is not None:") < verifier.index(
+        'print("FINAL=PASS kr_calendar_collection_job_store_verifier")'
+    )
