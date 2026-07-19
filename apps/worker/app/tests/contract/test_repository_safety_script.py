@@ -655,9 +655,9 @@ def test_security_audit_tools_use_complete_hashed_lock() -> None:
     )
     assert "\n    runs-on: ubuntu-24.04\n" in audit_job
     assert 'python-version: "3.12.13"' in audit_job
-    assert install_command in audit_job
+    assert f'run: "{install_command}"' in audit_job
     pip_install_commands = [
-        line.strip().removeprefix("run:").strip()
+        line.strip().removeprefix("run:").strip().strip('"')
         for line in audit_job.splitlines()
         if re.search(r"\bpip\s+install\b", line)
     ]
