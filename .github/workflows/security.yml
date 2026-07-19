@@ -134,6 +134,41 @@ jobs:
             exit 1
           fi
 
+  dependency-evidence:
+    name: Lock-derived dependency evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12.13"
+      - name: Verify lock-derived dependency inventory
+        shell: bash
+        env:
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: >-
+          python .github/scripts/dependency_manifest.py
+          --check
+          --expected-revision "$EXPECTED_REVISION"
+          --emit-provenance "$RUNNER_TEMP/dependency-provenance.json"
+      - name: Publish bounded provenance summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Lock-derived dependency evidence"
+            echo
+            echo "Unsigned CI receipt; not a standard SBOM, attestation, or release authorization."
+            echo '```json'
+            cat "$RUNNER_TEMP/dependency-provenance.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   workflow-policy:
     name: Workflow policy guard
     runs-on: ubuntu-latest

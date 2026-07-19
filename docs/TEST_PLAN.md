@@ -185,7 +185,40 @@
 - ESLint, TypeScript, component/unit, Vite build, Playwright, Cargo check/test/build를
   CI 필수 job으로 실행한다.
 
-## 6. 운영 증거 — 로컬 자동 테스트 밖
+## 6. 공급망 명세와 commit 결속
+
+- npm lock v3의 root/workspace package, workspace link와 모든 nested
+  `node_modules` locator를 보존한다. root/workspace의 5개 dependency map을 local
+  lock descriptor와 exact 비교하고, registry artifact의 실제 name/version URL,
+  alias 선언, SHA-512 integrity, 정규 locator를 검증한다.
+- Worker production lock과 보안 도구 lock은 exact `name==version`, 하나 이상의
+  SHA-256, 중복 없는 정규화 이름만 허용한다. `pyproject.toml`과
+  `requirements.txt` 선언은 일치해야 한다. continuation과 Win32 marker는 의미를
+  보존하고 direct dependency marker는 lock과 같아야 한다. URL·editable·index
+  option·지원하지 않는 version/marker를 거부한다.
+- Cargo lock v4의 crates.io package는 모두 SHA-256 checksum을 가져야 한다. checksum
+  없는 package는 `Cargo.toml`과 같은 local root 하나만 허용하고 alternate registry와
+  Git source는 거부한다. local root의 direct dependency 이름은 manifest와 정확히
+  같아야 한다.
+- 같은 input은 byte-identical canonical inventory를 만들고 timestamp, 절대 경로,
+  runner 정보는 포함하지 않는다. lock 세 종류의 parse 가능한 한 글자 변조와
+  committed inventory 수동 편집은 모두 stale failure가 되어야 한다.
+- CI receipt는 full lowercase `${{ github.sha }}`, 실제 `HEAD^{commit}`과 tree,
+  각 regular-file Git blob, canonical inventory digest를 다시 결속한다. evidence file이
+  checkout 뒤 바뀌거나 revision이 다르면 receipt를 만들지 않는다.
+- 새 job은 명시적 `contents: read`, full commit SHA-pinned Action,
+  `persist-credentials: false`로 실행한다. project dependency를 설치하지 않고 앱·배포
+  secret, OIDC·deploy·order 권한, job/step skip이나 `continue-on-error`를 허용하지
+  않는다. 실패는 Security workflow를 실패시킨다. PR에서는 merge candidate SHA를
+  검증하며 source branch head 또는 release artifact라고 부르지 않는다.
+- 이 검증은 custom lock inventory와 unsigned CI receipt만 증명한다. 표준 SBOM,
+  실제 설치 closure, Tauri/Worker artifact digest, signing, attestation, promotion,
+  G0/G1/G2 또는 Production Live 승인은 별도 미완료 항목이다.
+- dependency range와 resolver 호환성은 이 parser가 재구현하지 않는다. 기존
+  `npm ci`, Worker production-lock packaging contract, Cargo `--locked` 검증이 각각
+  담당한다.
+
+## 7. 운영 증거 — 로컬 자동 테스트 밖
 
 다음은 실제 환경과 서로 다른 두 명의 운영 사용자가 필요하므로 별도 사용자 승인
 전에는 완료로 표시하지 않는다.

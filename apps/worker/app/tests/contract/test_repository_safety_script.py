@@ -636,6 +636,7 @@ def test_security_workflow_runs_on_develop_and_main_pushes() -> None:
         "security-audits",
         "secret-scan",
         "secret-pattern-scan",
+        "dependency-evidence",
         "workflow-policy",
     ):
         assert "\n    if:" not in _workflow_job_block(text, job_name)

@@ -112,6 +112,16 @@ Tauri/Rust checks, migration application, RLS/GRANT assertions, secret scanning,
 dependency review, CodeQL, and production-order network denial. Scanners report
 only masked findings and never print suspected secret values.
 
+The security workflow also verifies a deterministic lock-derived dependency
+inventory for npm, the Worker production lock, the pinned Python audit-tool
+closure, and Cargo. A separate unsigned CI receipt binds the canonical inventory
+digest and each regular-file Git blob to the exact checked-out commit. The job
+installs no project dependency package, persists no checkout credential, and
+references no application/deployment secret or OIDC, deploy, or order permission.
+This is a tamper/staleness control, not a standard SBOM, signature, artifact
+attestation, runtime inventory, or deployment authorization. Package-manager
+semantic compatibility remains enforced by the separate install/locked gates.
+
 ## Residual operational conditions
 
 Repository implementation and local verification do not prove hosted G2. Final

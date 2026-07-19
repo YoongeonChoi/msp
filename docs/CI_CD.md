@@ -77,6 +77,7 @@ Jobs:
 - Gitleaks secret scan
 - common secret pattern scan that prints only file paths, not matched secret text
 - committed `.env` file block, allowing only `.env.example`
+- deterministic lock-derived dependency inventory and exact checked-out revision receipt
 - Workflow policy guard
 
 Dependency and code-audit findings fail the workflow. Third-party actions are
@@ -95,6 +96,59 @@ When `.github/security-tools.lock` changes, resolve both top-level tools on the
 pinned Ubuntu/Python target, download wheel artifacts with
 `--only-binary=:all:`, recompute every SHA-256 digest, and rerun the exact
 force-reinstall, `pip check`, and both `pip-audit` gates before review.
+
+#### Lock-derived dependency evidence
+
+The `dependency-evidence` job runs on a fresh hosted checkout with effective
+`contents: read` permission. It installs no project dependency package, persists
+no checkout credential, and references no application or deployment secret. It
+verifies `.github/dependency-lock-manifest.v1.json` against these normalized
+UTF-8 inputs:
+
+- root and declared workspace `package.json` files plus `package-lock.json` v3
+- `apps/worker/pyproject.toml`, `requirements.txt`, and the hashed production
+  `requirements.lock`
+- the platform-pinned `.github/security-tools.lock`
+- `apps/desktop/src-tauri/Cargo.toml` and `Cargo.lock` v4
+- the generator `.github/scripts/dependency_manifest.py`
+
+The committed inventory has stable key and component ordering, contains no
+timestamp or machine path, and preserves registry, nested, workspace, and
+workspace-link npm locators. Root/workspace npm dependency maps are exact-bound
+to their lock descriptors. Worker declaration files must agree. Python lock
+markers are parsed through an explicit safe subset without rewriting literal
+content, and direct dependency markers must match the declarations. Every retained
+artifact hash and crates.io checksum is recorded. A
+changed normalized input makes the committed inventory stale and fails the job.
+Malformed locks, noncanonical paths, symlinks or junctions, unapproved lockfile
+registry or Git sources, URL credentials, unhashed Python requirements,
+unsupported npm/Python version or marker forms, declaration drift, and checksum
+gaps fail closed.
+
+After the static inventory passes, the verifier requires the checked-out commit
+to equal the workflow's full `${{ github.sha }}`. It also verifies that every
+evidence path is a regular file in that Git tree, records each Git blob ID and
+raw SHA-256, and writes a bounded unsigned receipt outside the repository. The
+job publishes that receipt to `GITHUB_STEP_SUMMARY`. On `pull_request`,
+`${{ github.sha }}` is the checked-out merge candidate commit; it is not claimed
+to be the source branch head.
+
+To update an intentionally changed lock set, inspect the lock and manifest
+diffs, then run in the candidate checkout:
+
+```bash
+python .github/scripts/dependency_manifest.py --write
+python .github/scripts/dependency_manifest.py --check
+```
+
+The result is a custom lock-derived inventory and unsigned CI receipt. It is not
+a CycloneDX/SPDX SBOM, installed runtime inventory, SLSA attestation, signature,
+release artifact digest, deployment provenance, or release authorization.
+Python dev extras, runner/OS packages, GitHub Actions, and final Worker/Tauri
+artifacts remain outside this evidence and require separate release controls.
+Dependency range semantics and resolver compatibility remain the responsibility
+of the existing `npm ci`, Worker production-lock contract, and Cargo `--locked`
+checks; this inventory does not reimplement those package managers.
 
 ### `.github/workflows/migration-check.yml`
 
