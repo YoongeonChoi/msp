@@ -3,9 +3,25 @@ import React, { act } from "react";
 import { JSDOM } from "jsdom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
+import { AppLayout } from "../src/components/Layout";
+import type {
+  DeviceConnectionGuardSnapshot,
+  DeviceConnectionGuardStore
+} from "../src/lib/authData";
 import type { OperationCommandRequest, StepUpGrantDraftRequest } from "../src/lib/operationsContracts";
-import type { OperationsDataApi } from "../src/lib/operationsData";
+import {
+  OperationsTransportError,
+  operationsSnapshotQueryKey,
+  type OperationsDataApi,
+  type UnknownResolutionDataApi
+} from "../src/lib/operationsData";
+import {
+  OperationsSnapshotProvider,
+  type OperationsSnapshotContextValue,
+  useOperationsSnapshot
+} from "../src/lib/operationsSnapshotContext";
 import { OperationsPage } from "../src/pages/OperationsPage";
+import { SettingsPage } from "../src/pages/SettingsPage";
 import { makeOperationsSnapshot } from "./operationsFixture";
 
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
@@ -104,9 +120,283 @@ assert.equal(requested[0].schema_version, 1);
 
 await act(async () => rendered.unmount());
 queryClient.clear();
+
+const effectiveGuardQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const effectiveGuardContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(effectiveGuardContainer);
+const commandsBeforeEffectiveGuard = requested.length;
+const grantsBeforeEffectiveGuard = issued.length;
+let blockedUnknownFetchCalls = 0;
+const blockedUnknownDataApi: UnknownResolutionDataApi = {
+  fetchSnapshot: async () => {
+    blockedUnknownFetchCalls += 1;
+    throw new Error("effective guard must block unknown-resolution reads");
+  },
+  issueStepUpGrant: async () => {
+    throw new Error("not used");
+  },
+  requestResolution: async () => {
+    throw new Error("not used");
+  },
+  reviewResolution: async () => {
+    throw new Error("not used");
+  }
+};
+const effectiveBlockedSource = {
+  dataApi,
+  query: {
+    data: snapshot,
+    error: null,
+    isLoading: false
+  },
+  snapshot: undefined,
+  error: new Error("discarded device connection cleanup is incomplete"),
+  isLoading: false,
+  isFetching: false,
+  isOnline: true,
+  realtime: {
+    connected: true,
+    connectedAt: "2099-07-14T00:00:00.000Z",
+    lastSignalAt: "2099-07-14T00:00:00.000Z"
+  },
+  updatedAt: Date.now(),
+  refetchSnapshot: async () => {
+    throw new Error("effective guard must block refetch actions");
+  },
+  invalidateSnapshot: async () => undefined
+} as unknown as OperationsSnapshotContextValue;
+const effectiveGuardShell = render(
+  <QueryClientProvider client={effectiveGuardQueryClient}>
+    <OperationsPage
+      snapshotSource={effectiveBlockedSource}
+      dataApi={dataApi}
+      unknownDataApi={blockedUnknownDataApi}
+    />
+  </QueryClientProvider>,
+  { container: effectiveGuardContainer }
+);
+await waitFor(() => effectiveGuardContainer.textContent?.includes("운영 데이터 확인 실패") === true);
+assert.equal(
+  Array.from(effectiveGuardContainer.querySelectorAll("button")).some((button) =>
+    button.textContent?.includes("모의거래 일시정지")
+  ),
+  false,
+  "effective cleanup error must hide command actions even when the raw query still has data"
+);
+assert.equal(requested.length, commandsBeforeEffectiveGuard, "effective cleanup error must keep command RPC at zero");
+assert.equal(issued.length, grantsBeforeEffectiveGuard, "effective cleanup error must keep grant RPC at zero");
+assert.equal(
+  blockedUnknownFetchCalls,
+  0,
+  "effective cleanup error must keep auxiliary unknown-resolution reads at zero"
+);
+await act(async () => effectiveGuardShell.unmount());
+effectiveGuardQueryClient.clear();
+effectiveGuardContainer.remove();
+
+const disabledProviderClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const disabledProviderContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(disabledProviderContainer);
+let disabledFetchCalls = 0;
+let observedDisabledSource: OperationsSnapshotContextValue | null = null;
+const disabledProviderApi: OperationsDataApi = {
+  ...dataApi,
+  fetchSnapshot: async () => {
+    disabledFetchCalls += 1;
+    return snapshot;
+  }
+};
+const disabledProviderShell = render(
+  <QueryClientProvider client={disabledProviderClient}>
+    <OperationsSnapshotProvider
+      dataApi={disabledProviderApi}
+      enabled={false}
+      realtimeOverride={null}
+      pollIntervalMs={false}
+    >
+      <SnapshotSourceProbe onValue={(value) => { observedDisabledSource = value; }} />
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: disabledProviderContainer }
+);
+await act(async () => Promise.resolve());
+assert.equal(disabledFetchCalls, 0, "a disconnected device must not fetch the operations snapshot");
+assert.equal(observedDisabledSource?.snapshot, undefined);
+assert.equal(observedDisabledSource?.error, null);
+await act(async () => {
+  disabledProviderShell.rerender(
+    <QueryClientProvider client={disabledProviderClient}>
+      <OperationsSnapshotProvider
+        dataApi={disabledProviderApi}
+        enabled
+        realtimeOverride={null}
+        pollIntervalMs={false}
+      >
+        <SnapshotSourceProbe onValue={(value) => { observedDisabledSource = value; }} />
+      </OperationsSnapshotProvider>
+    </QueryClientProvider>
+  );
+});
+await waitFor(() => disabledFetchCalls === 1 && observedDisabledSource?.snapshot === snapshot);
+await act(async () => disabledProviderShell.unmount());
+disabledProviderClient.clear();
+disabledProviderContainer.remove();
+
+const guardedProviderClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const guardedProviderContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(guardedProviderContainer);
+let guardedFetchCalls = 0;
+let observedGuardedSource: OperationsSnapshotContextValue | null = null;
+let guardSnapshot: DeviceConnectionGuardSnapshot = {
+  shouldDiscardAuthenticatedSession: false,
+  cleanupError: null
+};
+const guardListeners = new Set<() => void>();
+const guardStore: DeviceConnectionGuardStore = {
+  subscribe: (listener) => {
+    guardListeners.add(listener);
+    return () => guardListeners.delete(listener);
+  },
+  getSnapshot: () => guardSnapshot
+};
+const guardedProviderApi: OperationsDataApi = {
+  ...dataApi,
+  fetchSnapshot: async () => {
+    guardedFetchCalls += 1;
+    return snapshot;
+  }
+};
+const guardedProviderShell = render(
+  <QueryClientProvider client={guardedProviderClient}>
+    <OperationsSnapshotProvider
+      dataApi={guardedProviderApi}
+      guardStore={guardStore}
+      realtimeOverride={null}
+      pollIntervalMs={false}
+    >
+      <SnapshotSourceProbe onValue={(value) => { observedGuardedSource = value; }} />
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: guardedProviderContainer }
+);
+await waitFor(() => guardedFetchCalls === 1 && observedGuardedSource?.snapshot === snapshot);
+const syntheticCleanupError = new Error("synthetic storage cleanup failure");
+await act(async () => {
+  guardSnapshot = {
+    shouldDiscardAuthenticatedSession: true,
+    cleanupError: syntheticCleanupError
+  };
+  guardListeners.forEach((listener) => listener());
+});
+await waitFor(() => observedGuardedSource?.error === syntheticCleanupError);
+assert.equal(observedGuardedSource?.snapshot, undefined);
+assert.equal(observedGuardedSource?.realtime.connected, false);
+assert.equal(guardedFetchCalls, 1, "guard transition must not restart authenticated snapshot reads");
+await act(async () => guardedProviderShell.unmount());
+guardedProviderClient.clear();
+guardedProviderContainer.remove();
+
+const failingQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const failingContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(failingContainer);
+const failingDataApi: OperationsDataApi = {
+  ...dataApi,
+  fetchSnapshot: async () => {
+    throw new OperationsTransportError("api.get_desktop_operations_snapshot_v1", "backend-setup");
+  }
+};
+const failingShell = render(
+  <QueryClientProvider client={failingQueryClient}>
+    <OperationsSnapshotProvider dataApi={failingDataApi} realtimeOverride={null} pollIntervalMs={false}>
+      <AppLayout page="control" setPage={() => undefined} connectionState="connected">
+        <div />
+      </AppLayout>
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: failingContainer }
+);
+await waitFor(() => failingContainer.textContent?.includes("운영 API 준비 상태 확인 필요") === true);
+assert.match(failingContainer.textContent ?? "", /운영 API 준비 상태 확인 필요/);
+assert.match(failingContainer.textContent ?? "", /운영 권한 확인 대기/);
+assert.match(failingContainer.textContent ?? "", /운영 API 준비 상태를 확인해야 해 모든 운영 변경을 차단했습니다/);
+assert.doesNotMatch(failingContainer.textContent ?? "", /로그인 확인 중/);
+await act(async () => failingShell.unmount());
+failingQueryClient.clear();
+failingContainer.remove();
+
+const staleQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const staleContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(staleContainer);
+let staleFetchCount = 0;
+const staleDataApi: OperationsDataApi = {
+  ...dataApi,
+  fetchSnapshot: async () => {
+    staleFetchCount += 1;
+    if (staleFetchCount === 1) {
+      return snapshot;
+    }
+    throw new OperationsTransportError("api.get_desktop_operations_snapshot_v1", "request");
+  }
+};
+const staleShell = render(
+  <QueryClientProvider client={staleQueryClient}>
+    <OperationsSnapshotProvider dataApi={staleDataApi} realtimeOverride={null} pollIntervalMs={false}>
+      <AppLayout page="control" setPage={() => undefined} connectionState="connected">
+        <div />
+      </AppLayout>
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: staleContainer }
+);
+await waitFor(() => staleContainer.textContent?.includes("위험 승인자") === true);
+assert.match(staleContainer.textContent ?? "", /2단계 인증/);
+await act(async () => {
+  await staleQueryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey, exact: true });
+});
+await waitFor(() => staleContainer.textContent?.includes("운영 데이터 확인 실패") === true);
+const staleText = staleContainer.textContent ?? "";
+assert.match(staleText, /운영 데이터 확인 실패/);
+assert.match(staleText, /운영 권한 확인 대기/);
+assert.doesNotMatch(staleText, /위험 승인자/);
+await act(async () => staleShell.unmount());
+staleQueryClient.clear();
+staleContainer.remove();
+
+const settingsQueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const settingsContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(settingsContainer);
+const settingsShell = render(
+  <QueryClientProvider client={settingsQueryClient}>
+    <OperationsSnapshotProvider dataApi={dataApi} realtimeOverride={null} pollIntervalMs={false}>
+      <SettingsPage />
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: settingsContainer }
+);
+await waitFor(() => settingsContainer.textContent?.includes("운영 연결이 설정되지 않았습니다") === true);
+const settingsText = settingsContainer.textContent ?? "";
+assert.match(settingsText, /다시 빌드·설치/);
+assert.match(settingsText, /설치 후 \.env\.local을 추가해도 반영되지 않습니다/);
+assert.match(settingsText, /VITE_SUPABASE_URL/);
+assert.match(settingsText, /VITE_SUPABASE_PUBLISHABLE_KEY/);
+assert.match(settingsText, /연결 설정미설정/);
+assert.doesNotMatch(settingsText, /로그인|비밀번호/);
+assert.equal(settingsContainer.querySelector('input[type="password"]'), null);
+await act(async () => settingsShell.unmount());
+settingsQueryClient.clear();
+settingsContainer.remove();
 dom.window.close();
 
 console.log("operations hydrated mutation guards passed");
+
+function SnapshotSourceProbe({
+  onValue
+}: {
+  readonly onValue: (value: OperationsSnapshotContextValue) => void;
+}) {
+  onValue(useOperationsSnapshot());
+  return null;
+}
 
 function installDom(value: JSDOM): void {
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { value: true, configurable: true, writable: true });

@@ -62,13 +62,30 @@ export const operationsRpcCatalog = {
 export const operationsSnapshotQueryKey = ["operations", "snapshot", 1] as const;
 export const unknownResolutionSnapshotQueryKey = ["operations", "unknown-resolution", 2] as const;
 
+export type OperationsTransportFailureReason = "configuration" | "backend-setup" | "request";
+
+interface OperationsTransportErrorOptions {
+  readonly backendCode?: string | null;
+  readonly cause?: unknown;
+}
+
 export class OperationsTransportError extends Error {
   readonly operation: string;
+  readonly reason: OperationsTransportFailureReason;
+  readonly backendCode: string | null;
+  readonly cause: unknown;
 
-  constructor(operation: string) {
+  constructor(
+    operation: string,
+    reason: OperationsTransportFailureReason = "request",
+    options: OperationsTransportErrorOptions = {}
+  ) {
     super(`운영 제어 API 호출에 실패했습니다: ${operation}`);
     this.name = "OperationsTransportError";
     this.operation = operation;
+    this.reason = reason;
+    this.backendCode = options.backendCode ?? null;
+    this.cause = options.cause;
   }
 }
 
@@ -371,6 +388,12 @@ export function operationsErrorMessage(error: unknown): string {
     return "응답이 schema_version=1 계약과 일치하지 않아 모든 운영 변경을 차단했습니다.";
   }
   if (error instanceof OperationsTransportError) {
+    if (error.reason === "configuration") {
+      return "운영 연결 설정이 없어 모든 운영 변경을 차단했습니다.";
+    }
+    if (error.reason === "backend-setup") {
+      return "운영 API 준비 상태를 확인해야 해 모든 운영 변경을 차단했습니다.";
+    }
     return "운영 연결을 사용할 수 없어 모든 운영 변경을 차단했습니다.";
   }
   if (error instanceof OperationsResponseMismatchError) {
@@ -379,15 +402,69 @@ export function operationsErrorMessage(error: unknown): string {
   return "운영 상태를 확인할 수 없어 모든 운영 변경을 차단했습니다.";
 }
 
+export function operationsErrorTitle(error: unknown): string {
+  if (error instanceof OperationsTransportError) {
+    if (error.reason === "backend-setup") {
+      return "운영 API 준비 상태 확인 필요";
+    }
+    if (error.reason === "configuration") {
+      return "운영 연결 설정 필요";
+    }
+  }
+  if (error instanceof DataContractError) {
+    return "운영 데이터 계약 확인 실패";
+  }
+  if (error instanceof OperationsResponseMismatchError) {
+    return "운영 응답 확인 실패";
+  }
+  return "운영 데이터 확인 실패";
+}
+
+export function operationsErrorDetail(error: unknown): string {
+  if (error instanceof OperationsTransportError) {
+    if (error.reason === "backend-setup") {
+      return "현재 연결된 Supabase 프로젝트에서 데스크톱 V2 운영 API에 접근할 수 없습니다. API 스키마 설치 여부, Data API 노출 설정과 스키마 캐시를 확인한 뒤 다시 시도하세요.";
+    }
+    if (error.reason === "configuration") {
+      return "이 기기의 운영 연결 설정을 완료한 뒤 다시 확인하세요.";
+    }
+  }
+  if (error instanceof DataContractError) {
+    return "서버 응답 형식이 현재 데스크톱 계약과 다릅니다. 서버와 데스크톱 버전을 함께 확인하세요.";
+  }
+  return "운영 상태 전체를 확인할 수 없어 변경 작업을 안전하게 차단했습니다. 네트워크와 서버 상태를 확인한 뒤 다시 시도하세요.";
+}
+
+export function classifyOperationsRpcError(error: unknown): OperationsTransportFailureReason {
+  return readOperationsRpcErrorCode(error) === "PGRST106" ? "backend-setup" : "request";
+}
+
+export function toOperationsTransportError(
+  operation: string,
+  error: unknown
+): OperationsTransportError {
+  return new OperationsTransportError(operation, classifyOperationsRpcError(error), {
+    backendCode: readOperationsRpcErrorCode(error),
+    cause: error
+  });
+}
+
 function requireOperationsClient(operation: string) {
   if (!hasSupabaseConfig || supabase === null) {
-    throw new OperationsTransportError(operation);
+    throw new OperationsTransportError(operation, "configuration");
   }
   return supabase;
 }
 
 function failOnRpcError(operation: string, error: unknown): void {
   if (error) {
-    throw new OperationsTransportError(operation);
+    throw toOperationsTransportError(operation, error);
   }
+}
+
+function readOperationsRpcErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return null;
+  }
+  return typeof error.code === "string" ? error.code : null;
 }

@@ -10,6 +10,7 @@ import { OperationsStatusRailView } from "../src/components/operations/Operation
 import { operationsSnapshotQueryKey } from "../src/lib/operationsData";
 import type { OperationsDataApi } from "../src/lib/operationsData";
 import type { OperationCommandReceipt, OperationsSnapshot } from "../src/lib/operationsContracts";
+import { buildSafetyRailModel } from "../src/lib/operationsStatusModel";
 import {
   canMutateIncidentOperations,
   canMutateOperations,
@@ -82,7 +83,7 @@ function renderOperations({
   };
   const markup = renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <AppLayout page="control" setPage={() => undefined}>
+      <AppLayout page="control" setPage={() => undefined} connectionState="connected">
         <OperationsPage
           dataApi={dataApi}
           onlineOverride={!offline}
@@ -108,6 +109,12 @@ assert.deepEqual(
 assert.ok(freshDocument.querySelector('[aria-label="운영 상태 레일"]'));
 assert.equal((freshText.match(/LIVE 잠금/g) ?? []).length, 1, "LIVE lock is shown once in the shared header rail");
 assert.doesNotMatch(freshText, /LIVE 금지/, "legacy repeated LIVE warnings are removed from page content");
+const unavailableLiveState = buildSafetyRailModel(null, true).items.find((item) => item.key === "live");
+assert.ok(unavailableLiveState);
+assert.equal(unavailableLiveState.value, "확인 불가", "missing snapshot must not imply that the LIVE lock is verified");
+assert.equal(unavailableLiveState.tone, "warning");
+assert.notEqual(unavailableLiveState.value, "잠금 유지");
+assert.doesNotMatch(freshText, /로그인/, "the shared header uses device-session language instead of a persistent login state");
 assert.match(freshText, /현재 실행 상태/);
 assert.match(freshText, /지금 확인할 항목/);
 assert.match(freshText, /검토 승인 · Worker 대기/);

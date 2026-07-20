@@ -6,7 +6,8 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState
+  useState,
+  useSyncExternalStore
 } from "react";
 import {
   useQuery,
@@ -24,8 +25,13 @@ import {
 import type { ClientRealtimeHealth } from "./controlPlaneRealtime";
 import { supabase } from "./supabaseClient";
 import { useOnlineStatus } from "./useOnlineStatus";
+import {
+  deviceConnectionGuardStore,
+  type DeviceConnectionGuardStore
+} from "./authData";
 
 const DEFAULT_POLL_INTERVAL_MS = 15_000;
+const deviceConnectionDiscardError = new Error("Cancelled device connection cleanup is incomplete");
 
 const disconnectedRealtimeHealth: ClientRealtimeHealth = {
   connected: false,
@@ -59,6 +65,13 @@ export interface OperationsSnapshotContextValue {
 export interface OperationsSnapshotProviderProps {
   readonly children: ReactNode;
   readonly dataApi?: OperationsDataApi;
+  readonly guardStore?: DeviceConnectionGuardStore;
+  /**
+   * Starts authenticated snapshot polling and Realtime only after the current
+   * device session has been confirmed. Disabled providers expose no cached
+   * snapshot or transport error from a previous session.
+   */
+  readonly enabled?: boolean;
   readonly onlineOverride?: boolean;
   /**
    * Test-only health injection. Omit this prop in production so the provider
@@ -79,6 +92,8 @@ const OperationsSnapshotContext = createContext<OperationsSnapshotContextValue |
 export function OperationsSnapshotProvider({
   children,
   dataApi = operationsDataApi,
+  guardStore = deviceConnectionGuardStore,
+  enabled = true,
   onlineOverride,
   realtimeOverride,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS
@@ -89,16 +104,29 @@ export function OperationsSnapshotProvider({
     disconnectedRealtimeHealth
   );
   const lastSignalVersion = useRef<number | null>(null);
+  const deviceConnectionGuard = useSyncExternalStore(
+    guardStore.subscribe,
+    guardStore.getSnapshot,
+    guardStore.getSnapshot
+  );
+  const effectiveEnabled = enabled && !deviceConnectionGuard.shouldDiscardAuthenticatedSession;
 
   const query = useQuery({
     queryKey: operationsSnapshotQueryKey,
     queryFn: dataApi.fetchSnapshot,
+    enabled: effectiveEnabled,
     retry: false,
     refetchInterval: pollIntervalMs,
     refetchIntervalInBackground: false
   });
 
   useEffect(() => {
+    if (!effectiveEnabled) {
+      setObservedRealtime(disconnectedRealtimeHealth);
+      lastSignalVersion.current = null;
+      return;
+    }
+
     if (realtimeOverride !== undefined) {
       return;
     }
@@ -156,7 +184,7 @@ export function OperationsSnapshotProvider({
       lastSignalVersion.current = null;
       void client.removeChannel(channel);
     };
-  }, [queryClient, realtimeOverride]);
+  }, [effectiveEnabled, queryClient, realtimeOverride]);
 
   const invalidateSnapshot = useCallback(
     () =>
@@ -167,22 +195,31 @@ export function OperationsSnapshotProvider({
     [queryClient]
   );
 
-  const realtime = realtimeOverride === undefined ? observedRealtime : realtimeOverride;
+  const effectiveError = enabled
+    ? deviceConnectionGuard.shouldDiscardAuthenticatedSession
+      ? deviceConnectionGuard.cleanupError ?? deviceConnectionDiscardError
+      : query.error
+    : null;
+  const effectiveRealtime = effectiveEnabled
+    ? realtimeOverride === undefined
+      ? observedRealtime
+      : realtimeOverride
+    : disconnectedRealtimeHealth;
   const value = useMemo<OperationsSnapshotContextValue>(
     () => ({
       dataApi,
       query,
-      snapshot: query.data,
-      error: query.error,
-      isLoading: query.isLoading,
-      isFetching: query.isFetching,
+      snapshot: effectiveEnabled && effectiveError === null ? query.data : undefined,
+      error: effectiveError,
+      isLoading: effectiveEnabled && query.isLoading,
+      isFetching: effectiveEnabled && query.isFetching,
       isOnline,
-      realtime,
-      updatedAt: query.dataUpdatedAt,
+      realtime: effectiveRealtime,
+      updatedAt: effectiveEnabled ? query.dataUpdatedAt : 0,
       refetchSnapshot: query.refetch,
       invalidateSnapshot
     }),
-    [dataApi, invalidateSnapshot, isOnline, query, realtime]
+    [dataApi, effectiveEnabled, effectiveError, effectiveRealtime, invalidateSnapshot, isOnline, query]
   );
 
   return (

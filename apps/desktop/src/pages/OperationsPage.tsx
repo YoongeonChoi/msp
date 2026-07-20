@@ -5,7 +5,9 @@ import type { UnknownResolutionEvidenceInput } from "../lib/unknownResolutionReq
 import type { OperationIdFactory, OperationCommandType } from "../lib/operationRequests";
 import {
   operationsDataApi,
+  operationsErrorDetail,
   operationsErrorMessage,
+  operationsErrorTitle,
   operationsSnapshotQueryKey,
   unknownResolutionDataApi,
   unknownResolutionSnapshotQueryKey
@@ -64,6 +66,11 @@ export interface OperationsPageProps {
   readonly snapshotSource?: OperationsSnapshotContextValue;
 }
 
+type OperationsSnapshotView = Pick<
+  UseQueryResult<OperationsSnapshot, Error>,
+  "data" | "error" | "isLoading"
+>;
+
 export function OperationsPage(props: OperationsPageProps = {}) {
   if (props.snapshotSource) {
     return (
@@ -72,7 +79,11 @@ export function OperationsPage(props: OperationsPageProps = {}) {
         unknownDataApi={props.unknownDataApi}
         idFactory={props.idFactory}
         nowFactory={props.nowFactory}
-        snapshotQuery={props.snapshotSource.query}
+        snapshotQuery={{
+          data: props.snapshotSource.snapshot,
+          error: props.snapshotSource.error,
+          isLoading: props.snapshotSource.isLoading
+        }}
         isOnline={props.onlineOverride ?? props.snapshotSource.isOnline}
         clientRealtime={props.snapshotSource.realtime}
       />
@@ -123,16 +134,18 @@ function OperationsPageContent({
   readonly unknownDataApi?: UnknownResolutionDataApi;
   readonly idFactory?: OperationIdFactory;
   readonly nowFactory?: () => Date;
-  readonly snapshotQuery: UseQueryResult<OperationsSnapshot, Error>;
+  readonly snapshotQuery: OperationsSnapshotView;
   readonly isOnline: boolean;
   readonly clientRealtime: ClientRealtimeHealth | null;
 }) {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
+  const operationsSnapshotReady = snapshotQuery.error === null && snapshotQuery.data !== undefined;
   const unknownSnapshotQuery = useQuery({
     queryKey: unknownResolutionSnapshotQueryKey,
     queryFn: unknownDataApi.fetchSnapshot,
+    enabled: operationsSnapshotReady,
     retry: false,
     refetchInterval: 15_000
   });
@@ -382,14 +395,14 @@ function OperationsPageContent({
   if (snapshotQuery.error || !snapshotQuery.data) {
     return (
       <div className="space-y-3">
-        <div className="rounded-lg border border-danger/30 bg-dangerSoft p-4" role="alert">
-          <div className="font-semibold text-danger">운영 데이터 확인 실패</div>
+        <section className="rounded-lg border border-danger/30 bg-dangerSoft p-4" aria-labelledby="operations-error-title">
+          <div id="operations-error-title" className="font-semibold text-danger">{operationsErrorTitle(snapshotQuery.error)}</div>
           <p className="mt-2 text-sm text-danger">{operationsErrorMessage(snapshotQuery.error)} 불완전한 값은 정상으로 추정하지 않습니다.</p>
           <details className="mt-3 text-sm text-danger">
             <summary className="min-h-control cursor-pointer py-2 font-semibold">연결 상세</summary>
-            <p>운영 상태 전체를 확인할 수 없어 변경 작업을 안전하게 차단했습니다.</p>
+            <p>{operationsErrorDetail(snapshotQuery.error)}</p>
           </details>
-        </div>
+        </section>
       </div>
     );
   }
@@ -399,7 +412,9 @@ function OperationsPageContent({
   const clientFresh = isOperationsSnapshotFresh(snapshot, snapshotEvaluationTime, clientRealtime);
   const mutationsAllowed = canMutateOperations(snapshot, isOnline, snapshotEvaluationTime, clientRealtime);
   const incidentMutationsAllowed = canMutateIncidentOperations(snapshot, isOnline, snapshotEvaluationTime, clientRealtime);
-  const unknownSnapshot = unknownSnapshotQuery.error ? null : unknownSnapshotQuery.data ?? null;
+  const unknownSnapshot = operationsSnapshotReady && !unknownSnapshotQuery.error
+    ? unknownSnapshotQuery.data ?? null
+    : null;
   const unknownMutationsAllowed = mutationsAllowed &&
     unknownSnapshot !== null &&
     isTimestampFresh(

@@ -166,7 +166,7 @@ Supabase 값을 비워 둔 경우 UI는 연결 설정 안내를 표시합니다.
 4. 별도 hosted-staging 승인을 받은 뒤에만 Worker에 서버용 URL과 secret key를
    제공하고 `EXECUTION_V2_ENABLED=true`, `EXECUTION_V2_WORKER_API_ENABLED=true`를
    함께 설정합니다. 기존 `USE_SUPABASE_REPOSITORY` 경로는 V2 원장이 아닙니다.
-5. Desktop의 **설정** 화면에서 개인 운영 계정으로 로그인하고 TOTP challenge를 완료합니다.
+5. Desktop의 **계정·보안** 화면에서 `이 기기 연결`을 한 번 완료하고 TOTP challenge를 진행합니다. 저장된 세션은 다음 실행부터 자동으로 복구되지만, 위험 작업의 AAL2 확인은 별도로 유지됩니다.
 
 ```dotenv
 # apps/desktop/.env.local — 공개 가능한 client 설정만
@@ -316,7 +316,7 @@ Render는 fencing qualification 전까지 Background Worker 한 개만 실행하
 
 ### Desktop에 `권한 필요`가 표시됨
 
-**Access & MFA** 화면에서 개인 Supabase Auth 계정으로 로그인하고 TOTP AAL2를
+**계정·보안** 화면에서 이 기기가 개인 Supabase Auth 계정에 연결됐고 TOTP AAL2를
 완료했는지, UUID에 필요한 V2 역할이 할당됐는지 확인하세요. 권한이 없는 mutation은
 안전하게 차단되어야 합니다.
 

@@ -102,7 +102,7 @@ export function ErrorState({ message }: { readonly message: string }) {
         데이터 접근 오류
       </div>
       <p className="mt-1">{message}</p>
-      <p className="mt-1">로그인 상태, 현재 계정 권한과 연결 정책을 확인하세요.</p>
+      <p className="mt-1">운영 세션 상태, 현재 계정 권한과 연결 정책을 확인하세요.</p>
     </div>
   );
 }

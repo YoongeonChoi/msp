@@ -10,6 +10,7 @@ const allSource = sourceFiles.map((path) => readFileSync(path, "utf8")).join("\n
 const appSource = readFileSync(resolve(sourceRoot, "App.tsx"), "utf8");
 const navigationSource = readFileSync(resolve(sourceRoot, "lib/navigation.ts"), "utf8");
 const authSource = readFileSync(resolve(sourceRoot, "lib/authData.ts"), "utf8");
+const settingsSource = readFileSync(resolve(sourceRoot, "pages/SettingsPage.tsx"), "utf8");
 const operationsSource = readFileSync(resolve(sourceRoot, "lib/operationsData.ts"), "utf8");
 const snapshotProviderSource = readFileSync(
   resolve(sourceRoot, "lib/operationsSnapshotContext.tsx"),
@@ -30,9 +31,26 @@ assert.match(navigationSource, /export type PageKey = "control" \| "settings"/);
 assert.equal(existsSync(resolve(sourceRoot, "lib/rows.ts")), false, "silent-default row parser must be removed");
 assert.equal(existsSync(resolve(sourceRoot, "lib/supabaseData.ts")), false, "legacy public adapter must be removed");
 assert.doesNotMatch(authSource, /fetchOperationsSnapshot/);
+assert.doesNotMatch(
+  settingsSource,
+  /mutationFn:\s*signInWithPassword|mutationFn:\s*authApi\.connectDevice/,
+  "credential input must never be stored in the React Query mutation cache"
+);
+assert.match(authSource, /signOut\(\{\s*scope:\s*"local"\s*\}\)/);
 assert.match(appSource, /OperationsSnapshotProvider/);
+assert.match(appSource, /shouldDiscardPendingDeviceConnection/);
+assert.match(appSource, /blockDeviceConnectionCleanup/);
+assert.match(appSource, /authRole\.data\?\.signedIn === true && sessionGuarded/);
+assert.match(appSource, /invalidateQueries\(\{ queryKey: authRoleQueryKey, exact: true \}\)/);
+assert.doesNotMatch(appSource, /invalidateQueries\(\)/);
+assert.doesNotMatch(settingsSource, /invalidateQueries\(\)/);
 assert.doesNotMatch(appSource, /ControlPlaneRealtimeProvider/);
 assert.match(snapshotProviderSource, /refetchInterval:\s*pollIntervalMs/);
+assert.match(snapshotProviderSource, /useSyncExternalStore/);
+assert.match(
+  snapshotProviderSource,
+  /effectiveEnabled = enabled && !deviceConnectionGuard\.shouldDiscardAuthenticatedSession/
+);
 assert.match(snapshotProviderSource, /queryKey:\s*operationsSnapshotQueryKey,\s*exact:\s*true/);
 assert.doesNotMatch(sharedSource, /\.default\s*\(/, "strict shared contracts must not repair missing fields");
 assert.match(operationsSource, /\.schema\("api"\)\.rpc\(/);

@@ -5,7 +5,8 @@ import {
   captureAuthSessionEpoch,
   isAuthSessionEpochCurrent,
   resetQueryCacheAfterSignOut,
-  shouldPurgeAuthSession
+  shouldPurgeAuthSession,
+  shouldRefreshAuthenticatedQueries
 } from "../src/lib/authSessionCache";
 import type { AuthRoleState } from "../src/lib/authData";
 import type { Session } from "@supabase/supabase-js";
@@ -44,7 +45,7 @@ assert.deepEqual(queryClient.getQueryData(["auth_role"]), {
   email: null,
   role: null,
   roles: [],
-  warning: "운영 계정 로그인 세션이 필요합니다."
+  warning: "이 기기를 운영 계정에 연결해야 합니다."
 });
 
 const activeSession = {} as Session;
@@ -52,5 +53,10 @@ assert.equal(shouldPurgeAuthSession("SIGNED_OUT", activeSession), true);
 assert.equal(shouldPurgeAuthSession("INITIAL_SESSION", null), true);
 assert.equal(shouldPurgeAuthSession("TOKEN_REFRESHED", null), true);
 assert.equal(shouldPurgeAuthSession("SIGNED_IN", activeSession), false);
+assert.equal(shouldRefreshAuthenticatedQueries("INITIAL_SESSION", activeSession), true);
+assert.equal(shouldRefreshAuthenticatedQueries("SIGNED_IN", activeSession), true);
+assert.equal(shouldRefreshAuthenticatedQueries("TOKEN_REFRESHED", activeSession), true);
+assert.equal(shouldRefreshAuthenticatedQueries("SIGNED_OUT", null), false);
+assert.equal(shouldRefreshAuthenticatedQueries("INITIAL_SESSION", null), false);
 
 console.log("authenticated query cache reset fixtures passed");

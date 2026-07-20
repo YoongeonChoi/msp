@@ -8,7 +8,7 @@ const signedOutRole: AuthRoleState = {
   email: null,
   role: null,
   roles: [],
-  warning: "운영 계정 로그인 세션이 필요합니다."
+  warning: "이 기기를 운영 계정에 연결해야 합니다."
 };
 
 let authSessionEpoch = 0;
@@ -33,4 +33,15 @@ export function shouldPurgeAuthSession(
   session: Session | null
 ): boolean {
   return event === "SIGNED_OUT" || session === null;
+}
+
+export function shouldRefreshAuthenticatedQueries(
+  event: AuthChangeEvent,
+  session: Session | null
+): boolean {
+  return session !== null && (
+    event === "INITIAL_SESSION" ||
+    event === "SIGNED_IN" ||
+    event === "TOKEN_REFRESHED"
+  );
 }

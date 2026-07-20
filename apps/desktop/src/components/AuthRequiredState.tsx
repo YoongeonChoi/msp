@@ -18,7 +18,7 @@ export function AuthRequiredBlock({ surface = "운영 데이터" }: { readonly s
         <Pill tone="warning">권한 필요</Pill>
       </div>
       <p>
-        {surface}는 운영 관리자 세션이 있어야 표시됩니다. 거래 봇 정지와는 별개이며, 계정·보안에서 관리자 계정으로 로그인하세요.
+        {surface}는 운영 관리자 세션이 있어야 표시됩니다. 거래 봇 정지와는 별개이며, 계정·보안에서 이 기기를 운영 계정에 연결하세요.
       </p>
     </div>
   );
