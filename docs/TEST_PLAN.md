@@ -5,10 +5,17 @@
 
 ## 1. 데이터베이스와 권한
 
-- fresh PostgreSQL과 기존 `0015` fixture에서 전체 migration과 seed를 실제 적용한다.
+- raw PG17, `extensions.pgcrypto`가 선설치된 Supabase-like PG17, 기존
+  `0015/public`, 기존 `0015/extensions`, 기존 `0023` fixture에서 preflight와 전체
+  migration/seed를 실제 적용한다. 기존 migration checksum은 변경하지 않는다.
 - base에 존재한 migration의 수정·삭제·rename·type change와 중간 commit 변경 후
   원복, staged/unstaged 상쇄를 거부한다. 신규 migration은 base tail보다 큰 고유
   version의 canonical 이름과 regular `100644` blob/file만 허용한다.
+- pgcrypto extension/member 소유권 분리, PG17 `pgcrypto 1.3`의 36개 member
+  signature/metadata drift, empty·retained public/extensions의 untrusted direct,
+  inherited 또는 `SET ROLE` reachable `CREATE`, SQL comment가 섞인 문자열 body의
+  qualified 호출, 함수 및 global/database/role 기본 `search_path` 호출을 변경 전에
+  거부한다.
 - `private` source of truth, 최소 `api` surface, allowlist된 `worker_api` RPC만 남는다.
 - exposed table/view마다 RLS와 명시적 GRANT를 검증한다.
 - `anon`, `authenticated`, `service_role` 및 7개 application role의 positive/negative

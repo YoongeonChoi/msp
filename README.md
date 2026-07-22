@@ -160,7 +160,8 @@ Supabase 값을 비워 둔 경우 UI는 연결 설정 안내를 표시합니다.
 
 > Hosted staging에 아래 절차를 적용하는 작업은 별도 사용자 승인이 필요합니다. 기본 구현·검증은 disposable local PostgreSQL에서 수행합니다.
 
-1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 migration과 `seed.sql`을 순서대로 적용합니다.
+1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 PG17 pgcrypto preflight를 먼저
+   실행하고, checksum이 고정된 migration과 `seed.sql`을 순서대로 적용합니다.
 2. Supabase Auth TOTP를 켜고 서로 다른 운영 사용자 두 명 이상을 AAL2로 등록한 뒤 V2 역할을 UUID에 할당합니다.
 3. `apps/desktop/.env.local`에는 URL과 publishable key만 넣습니다.
 4. 별도 hosted-staging 승인을 받은 뒤에만 Worker에 서버용 URL과 secret key를

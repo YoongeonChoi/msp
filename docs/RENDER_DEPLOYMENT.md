@@ -23,18 +23,32 @@ separate explicit user approval and dedicated credentials.
 1. Obtain explicit approval identifying the staging Supabase/Render projects,
    synthetic dataset, alert channel, operators, release SHA, and time window.
 2. Confirm the repository and hosted control plane are Paper disabled.
-3. Apply every migration in `supabase/README.md` to staging and retain the exact
-   output, catalog/RLS/GRANT matrix, and Supabase advisor results.
-4. Build from the reviewed release SHA. The build writes release metadata before
+3. Acquire and record one external single-deployment mutex for the staging
+   project. Record the PG major version, migration-history inventory, pgcrypto
+   schema, owner/version/digest OIDs, canonical migration-checksum inventory,
+   and the approved preflight SHA-256. With Worker/Desktop traffic stopped,
+   execute the PG17 preflight from `docs/SUPABASE_SETUP.md` immediately before
+   the migration runner. The mutex must remain held through postflight; the SQL
+   advisory lock does not protect replay. Abort on any warning that requires
+   review; do not bypass it or use migration-history repair as remediation.
+4. Apply every pending migration in `supabase/README.md` to staging with the same
+   approved role and immutable connection profile used for preflight. Require a
+   sanitized actual-runner `current_user`/`current_schemas(false)` start receipt,
+   a persistent `public`-first default, and no client/session `search_path`
+   override. If the runner cannot enforce and report this contract, stop. Retain
+   the exact output, final pgcrypto schema/owner/OID/ACL receipt,
+   catalog/RLS/GRANT matrix, and Supabase advisor results. Do not retain a
+   connection string, token, JWT, or secret.
+5. Build from the reviewed release SHA. The build writes release metadata before
    installing the hash-locked Python dependencies.
-5. Deploy manually; Git push alone must not deploy.
-6. Verify a fresh heartbeat reports the expected release SHA, execution
+6. Deploy manually; Git push alone must not deploy.
+7. Verify a fresh heartbeat reports the expected release SHA, execution
    environment, control epoch, lease holder/fencing token, and ledger checkpoint.
-7. Enrol two distinct TOTP AAL2 users, validate all role negative cases, and run
+8. Enrol two distinct TOTP AAL2 users, validate all role negative cases, and run
    maker/checker command/ACK/postcondition tests.
-8. Validate alert outbox delivery, recipient dedupe, critical human ACK,
+9. Validate alert outbox delivery, recipient dedupe, critical human ACK,
    immutable audit receipt, dead-man monitor, and the isolated restore drill.
-9. Resume Paper only through a new request approved by a different risk approver.
+10. Resume Paper only through a new request approved by a different risk approver.
 
 ## Fail-closed startup
 

@@ -1,5 +1,35 @@
 # Supabase
 
+## PostgreSQL 17 pgcrypto replay preflight
+
+기존 migration 파일은 적용 이력과 checksum을 보존하기 위해 수정하지 않습니다.
+PostgreSQL 17에서 repository migration runner를 실행하기 직전에 승인된 DB owner
+session으로 `preflight/pgcrypto_replay_preflight.sql`을 먼저 실행합니다. 이 파일은
+numbered migration이 아니며 `supabase_migrations.schema_migrations`를 변경하지
+않습니다.
+
+preflight는 빈 DB의 pgcrypto 부재, replay 전 `public`, replay 전 `extensions`, 이미
+최종 convergence가 적용된 `extensions` 상태만 허용합니다. `extensions`에서 과거
+migration replay가 필요한 경우에는 owner/relocatable/ACL/caller/collision, 전체
+extension member OID, 그리고 PG17 `pgcrypto 1.3`의 exact 36-member
+signature/metadata contract를 검증한 뒤 transaction 안에서만 `public`으로
+staging합니다. extension이 없는 빈 DB도 `public` owner와 direct/inherited/`SET
+ROLE` reachable `CREATE`를 먼저 검사합니다.
+`20260718165749`가 최종적으로 extension을 다시 잠긴 `extensions` schema로
+수렴시킵니다. migration history 누락, retained DB의 extension 부재, catalog에서
+발견된 unsafe caller, 예상 밖 owner/schema/ACL/member contract는 변경 없이
+실패합니다.
+
+실행 전 Worker와 Desktop traffic을 중지하고 exact release SHA, target project ref,
+PostgreSQL version, `migration-checksums.v1.json`, preflight SHA-256 및 실행 출력을
+보존합니다. connection string, token, JWT, secret은 evidence에 포함하지 않습니다.
+외부 single-deployment mutex를 preflight부터 postflight까지 유지하고, preflight와
+실제 runner는 동일한 승인 role·immutable connection profile·persistent public-first
+기본 경로를 사용해야 합니다. `psql`과 runner는 별도 session이므로 actual runner의
+`current_user`/`current_schemas(false)` 시작 receipt가 없거나 session override를
+배제할 수 없으면 실행을 중단합니다.
+자세한 판정·실행·postflight 절차는 `docs/SUPABASE_SETUP.md`를 따릅니다.
+
 SQL migration 순서:
 
 1. `0001_schema.sql`
@@ -73,11 +103,16 @@ python supabase/verify_hosted_live_enable_flow.py \
 ```
 
 `verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
-Docker의 새 `postgres:17-alpine`에 `0001`부터
+실행 시 checksum/RLS repository safety와 `supabase/config.toml`의 PostgreSQL major를
+먼저 검증합니다. `--skip-postgrest`는 완전 PASS가 아니며 `FINAL=PARTIAL`과 exit 2를
+반환합니다.
+Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
+`extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
 `20260719080000_kr_calendar_collection_job_inspection.sql`까지 적용하는
-clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
-적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
-적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
+clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
+`public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
+전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail
+직후의 단계별 fail-closed 수렴을 검증합니다. clean-install 경로에서는 실제 PostgREST
 컨테이너도 실행해
 `anon`/`authenticated`/`service_role` RPC 경계를 확인합니다. 추가로 다음을
 검증합니다.

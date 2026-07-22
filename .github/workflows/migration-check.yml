@@ -17,6 +17,8 @@ on:
       - "apps/worker/app/adapters/persistence/supabase_calendar_as_of_reader.py"
       - "apps/worker/app/adapters/persistence/supabase_kr_calendar_collection_job_store.py"
       - "supabase/migrations/**"
+      - "supabase/preflight/**"
+      - "supabase/config.toml"
       - "supabase/migration-checksums.v1.json"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
@@ -49,6 +51,8 @@ on:
       - "apps/worker/app/adapters/persistence/supabase_calendar_as_of_reader.py"
       - "apps/worker/app/adapters/persistence/supabase_kr_calendar_collection_job_store.py"
       - "supabase/migrations/**"
+      - "supabase/preflight/**"
+      - "supabase/config.toml"
       - "supabase/migration-checksums.v1.json"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
@@ -76,7 +80,7 @@ jobs:
   migration-check:
     name: Supabase migration safety
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

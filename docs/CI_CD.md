@@ -44,10 +44,13 @@ Jobs:
   - new migrations append after the base tail with a unique canonical version
     and remain regular `100644` Git blobs/files
   - canonical UTF-8/LF SHA-256 inventory for every historical migration
+  - `supabase/config.toml` and the disposable verifier use the same PostgreSQL major
+  - PG17 pgcrypto preflight guard and raw/preinstalled/retained replay lanes
   - required migration presence
   - RLS coverage for `public`/`api` tables and invoker-security API views
   - fixed `worker_api` function allowlist and no desktop/public execution grants
-  - disposable PostgreSQL fresh/retained-0015 apply and invariant assertions
+  - disposable PostgreSQL raw/preinstalled fresh, retained-0015
+    `public`/`extensions`, and retained-0023 apply/invariant assertions
   - no anon/public write policy patterns
   - singleton seed keeps `enabled=false`, `mode='paper'`, `live_order_allowed=false`
   - destructive migration patterns require rollback note
@@ -157,8 +160,8 @@ checks; this inventory does not reimplement those package managers.
 
 ### `.github/workflows/migration-check.yml`
 
-Triggers when Supabase migration, checksum, seed, verifier, migration
-safety/history scripts, or either migration workflow definition changes.
+Triggers when Supabase migration, preflight, config, checksum, seed, verifier,
+migration safety/history scripts, or either migration workflow definition changes.
 
 Checks:
 
@@ -167,6 +170,7 @@ Checks:
   must append after the base tail with a unique canonical version and a regular
   `100644` Git blob/file
 - exact migration checksum inventory and regular-file/UTF-8 boundary
+- PG17 pgcrypto preflight fail-closed contract
 - RLS/invoker security for every exposed table/view
 - actual disposable PostgreSQL migration application and G1/G2 assertions
 - no anon/public writes

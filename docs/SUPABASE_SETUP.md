@@ -4,6 +4,74 @@ This procedure covers repository-local verification. Creating or changing a
 hosted Supabase project is a separate change that requires explicit user
 approval and dedicated staging credentials.
 
+## PostgreSQL 17 replay boundary
+
+Historical migration files are immutable. Their canonical UTF-8/LF SHA-256
+inventory is `supabase/migration-checksums.v1.json`; a mismatch blocks the
+migration safety check. Do not edit an old migration or use `migration repair`
+to hide a schema/history mismatch.
+
+Before any repository migration runner on PostgreSQL 17:
+
+1. Acquire one approved external single-deployment mutex for the target project.
+   Hold it without interruption through preflight, migration replay, and final
+   verification. The SQL advisory lock protects concurrent preflight
+   transactions only; it is released before replay.
+2. Stop Worker and Desktop traffic and keep Paper disabled.
+3. Record the exact release SHA, target project ref, PostgreSQL version, current
+   `supabase_migrations.schema_migrations` inventory, and current pgcrypto
+   schema/owner/version. Do not record credentials or JWTs.
+4. Verify `supabase/migration-checksums.v1.json`, calculate the SHA-256 of
+   `supabase/preflight/pgcrypto_replay_preflight.sql`, and retain both digests.
+5. Fix one approved database-owner role and immutable connection profile for
+   both preflight and replay. Its persistent role/database default must resolve
+   `public` as the first effective non-system schema. Client/session overrides,
+   including `PGOPTIONS`, URI `options`, and runner-side `SET search_path`, are
+   prohibited. In that profile, immediately before the migration runner,
+   execute:
+
+   ```bash
+   psql -X -v ON_ERROR_STOP=1 \
+     -f supabase/preflight/pgcrypto_replay_preflight.sql
+   ```
+
+   Connection configuration must come from the approved secret store and must
+   not be printed or committed. Record sanitized `current_user` and
+   `current_schemas(false)` values from this connection. The preflight does not
+   create pgcrypto or edit
+   migration history. It serializes itself, requires PG17, and fails closed on
+   an inconsistent ledger/sentinel, retained database without pgcrypto,
+   unexpected owner/schema/ACL/version/member class, untrusted extension member
+   owner, drift from the exact PG17 `pgcrypto 1.3` 36-member signature/metadata
+   contract, non-relocatable extension, signature collision, or catalog-visible
+   unsafe caller. Empty databases receive the same `public` owner and direct,
+   inherited, and `SET ROLE` reachable `CREATE` checks before the no-extension
+   no-op is accepted.
+6. Run `supabase migration list --linked` and `supabase db push --dry-run`, then
+   apply only the pending migrations through a controlled wrapper that uses the
+   same approved role and connection profile. The actual replay connection must
+   emit a sanitized `current_user` and `current_schemas(false)` start receipt
+   before executing SQL; compare it with step 5 and require `public` first. A dry
+   run lists pending files; it does not prove SQL execution or connection state.
+   If the runner cannot enforce and report this contract, stop. Do not treat the
+   preflight session as proof for the separate runner session.
+7. Verify the final pgcrypto schema is `extensions`, both digest overloads retain
+   their OIDs, `public.digest` is absent, runtime roles have no `CREATE` on
+   `extensions`, and the migration inventory matches the approved release. Then
+   release the external mutex.
+
+The same preflight handles an empty database, a retained pre-convergence DB with
+pgcrypto in `public`, a retained Supabase-like DB with pgcrypto in `extensions`,
+and an already-converged DB. It returns a verified no-op for empty/no-extension,
+public, and final states; only the pre-convergence `extensions` state is staged
+temporarily to `public`. Static catalog-visible callers are checked after SQL
+comments are removed. External dynamic SQL and prepared statements cannot be
+proven safe by a catalog scan, so maintenance mode and Hosted Staging evidence
+remain mandatory. `psql -f` and `supabase db push` use separate sessions, so the
+preflight can validate only its own session state; the same-role/profile and
+runner-start receipt requirements above are separate release gates, not an SQL
+guarantee. Any ambiguous state stops the release.
+
 ## Migration order
 
 `supabase/README.md` is the canonical list. Apply every file in this exact order:
@@ -189,9 +257,13 @@ python supabase/verify_pit_calendar_as_of_reader.py
 python supabase/verify_kr_calendar_collection_job_store.py
 ```
 
-It must apply a fresh database through the latest timestamp migration, apply the
-same tail to the retained `0015` fixture path, and converge the retained `0023`
-operational fixture. It then checks schema/grant/RLS assertions, Paper-only
+It must apply a raw fresh PG17 database and a Supabase-like fresh PG17 database
+with preinstalled `extensions.pgcrypto` through the latest timestamp migration.
+It must also apply the same tail to separate retained `0015` fixtures whose
+pgcrypto starts in `public` and `extensions`, and converge the retained `0023`
+operational fixture. The `0023` lane checks both the immediate `0024` state and
+the intentional later `qualification_v1_required` fail-closed transition after
+the complete tail. It then checks schema/grant/RLS assertions, Paper-only
 constraints, ledger invariants, command separation, append-only audit behavior,
 Paper source publication, KST cash settlement, Unknown V2 dedicated
 maker/checker application, aggregate Paper bar participation, lease-bound
