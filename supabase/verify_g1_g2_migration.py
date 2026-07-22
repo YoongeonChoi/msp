@@ -4172,7 +4172,7 @@ select
     )::text,
     'UTF8'
   ),'sha256'),'hex')
-from generate_series(0,3) as offsets(offset_value);
+from generate_series(-1,3) as offsets(offset_value);
 insert into private.paper_execution_model_registry (
   environment,model_version,tick_size_evidence_sha256,
   volume_model_evidence_sha256,corporate_action_evidence_sha256,
@@ -4181,7 +4181,7 @@ insert into private.paper_execution_model_registry (
 ) values (
   'paper','dedupe-model','{tick_hash}','{volume_hash}',
   '{corporate_action_hash}','{calendar_id}','approved','{EVIDENCE}',
-  '{ADMIN_1}','{ADMIN_2}',clock_timestamp()-interval '1 day',
+  '{ADMIN_1}','{ADMIN_2}',clock_timestamp()-interval '2 days',
   clock_timestamp()+interval '1 day'
 );
 insert into private.paper_execution_policies (
@@ -4198,7 +4198,7 @@ insert into private.paper_execution_policies (
     'tick_size_evidence_sha256','{tick_hash}',
     'volume_model_evidence_sha256','{volume_hash}'
   ),'{EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
-  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+  clock_timestamp()-interval '2 days',clock_timestamp()+interval '1 day'
 );
 insert into private.execution_cost_schedules (
   account_id,schedule_version,schedule_sha256,buy_commission_rate,
@@ -4207,7 +4207,7 @@ insert into private.execution_cost_schedules (
 ) values (
   'paper-primary','dedupe-cost','{cost_schedule_hash}',0.001,0.001,0.002,0,
   'approved','{EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
-  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+  clock_timestamp()-interval '2 days',clock_timestamp()+interval '1 day'
 );
 alter table private.execution_controls
   disable trigger guard_execution_control_qualification_freshness_v1;
