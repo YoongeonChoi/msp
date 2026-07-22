@@ -56,6 +56,8 @@ Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 s
 ```bash
 for f in supabase/migrations/*.sql; do echo "$f"; done
 rg "enable row level security" supabase/migrations/0002_rls.sql
+python .github/scripts/migration_history_guard.py --worktree
+python .github/scripts/repository_safety.py migrations
 python supabase/verify_live_enable_migration.py
 python supabase/verify_g1_g2_migration.py
 python supabase/verify_pit_candle_revision_store.py

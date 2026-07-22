@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -179,6 +181,62 @@ def _qualified_objects(
     }
 
 
+def _check_migration_checksums(repo_root: Path, paths: list[Path]) -> list[str]:
+    manifest_path = repo_root / "supabase" / "migration-checksums.v1.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return ["supabase/migration-checksums.v1.json: regular file required"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ["supabase/migration-checksums.v1.json: invalid UTF-8 JSON"]
+    if not isinstance(manifest, dict):
+        return ["supabase/migration-checksums.v1.json: object required"]
+    if manifest.get("algorithm") != "sha256":
+        return ["supabase/migration-checksums.v1.json: sha256 required"]
+    if manifest.get("canonicalization") != "utf-8-lf":
+        return ["supabase/migration-checksums.v1.json: utf-8-lf required"]
+    expected = manifest.get("migrations")
+    if not isinstance(expected, dict) or any(
+        not isinstance(name, str) or not isinstance(digest, str)
+        for name, digest in expected.items()
+    ):
+        return ["supabase/migration-checksums.v1.json: migration map required"]
+
+    findings: list[str] = []
+    actual_names = {path.name for path in paths}
+    expected_names = set(expected)
+    findings.extend(
+        f"migration checksum missing: {name}"
+        for name in sorted(actual_names - expected_names)
+    )
+    findings.extend(
+        f"migration checksum references missing file: {name}"
+        for name in sorted(expected_names - actual_names)
+    )
+    for path in paths:
+        if path.name not in expected:
+            continue
+        if path.is_symlink() or not path.is_file():
+            findings.append(f"migration must be a regular file: {path.name}")
+            continue
+        expected_digest = expected[path.name]
+        if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
+            findings.append(f"invalid migration checksum: {path.name}")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            findings.append(f"migration is not canonical UTF-8: {path.name}")
+            continue
+        if text.startswith("\ufeff"):
+            findings.append(f"migration contains UTF-8 BOM: {path.name}")
+            continue
+        actual_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if actual_digest != expected_digest:
+            findings.append(f"historical migration checksum changed: {path.name}")
+    return findings
+
+
 def check_migration_safety(repo_root: Path) -> list[str]:
     migration_dir = repo_root / "supabase" / "migrations"
     paths = sorted(migration_dir.glob("*.sql"))
@@ -190,10 +248,11 @@ def check_migration_safety(repo_root: Path) -> list[str]:
     normalized = _strip_sql_comments(sql)
     exposed_tables = _qualified_objects(_EXPOSED_TABLE_PATTERN, normalized)
     rls_tables = _qualified_objects(_RLS_PATTERN, normalized)
-    findings = [
+    findings = _check_migration_checksums(repo_root, paths)
+    findings.extend(
         f"exposed table missing RLS: {schema}.{table}"
         for schema, table in sorted(exposed_tables - rls_tables)
-    ]
+    )
     findings.extend(
         f"{path.relative_to(repo_root).as_posix()}: destructive migration "
         "missing rollback note or approval"

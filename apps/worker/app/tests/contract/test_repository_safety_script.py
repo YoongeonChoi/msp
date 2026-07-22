@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import re
 from pathlib import Path
 from types import ModuleType
@@ -33,10 +35,32 @@ def _workflow_job_block(text: str, job_name: str) -> str:
 def _safe_repository(tmp_path: Path) -> Path:
     migration_dir = tmp_path / "supabase" / "migrations"
     migration_dir.mkdir(parents=True)
-    (migration_dir / "0001.sql").write_text(
+    migration_text = (
         "create table if not exists public.events (id bigint);\n"
-        "alter table public.events enable row level security;\n",
+        "alter table public.events enable row level security;\n"
+    )
+    (migration_dir / "0001.sql").write_text(
+        migration_text,
         encoding="utf-8",
+        newline="\n",
+    )
+    (tmp_path / "supabase" / "migration-checksums.v1.json").write_text(
+        json.dumps(
+            {
+                "algorithm": "sha256",
+                "canonicalization": "utf-8-lf",
+                "migrations": {
+                    "0001.sql": hashlib.sha256(
+                        migration_text.encode("utf-8")
+                    ).hexdigest(),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     workflow_dir = tmp_path / ".github" / "workflows"
     workflow_dir.mkdir(parents=True)

@@ -39,6 +39,11 @@ Jobs:
   - `cargo build --locked`
 - Migrations
   - migration filename/order check
+  - base-to-merge-candidate commit history rejects modification, deletion,
+    rename, or type change of every migration already present in the base
+  - new migrations append after the base tail with a unique canonical version
+    and remain regular `100644` Git blobs/files
+  - canonical UTF-8/LF SHA-256 inventory for every historical migration
   - required migration presence
   - RLS coverage for `public`/`api` tables and invoker-security API views
   - fixed `worker_api` function allowlist and no desktop/public execution grants
@@ -152,11 +157,16 @@ checks; this inventory does not reimplement those package managers.
 
 ### `.github/workflows/migration-check.yml`
 
-Triggers only when Supabase migration/seed files or the migration workflow change.
+Triggers when Supabase migration, checksum, seed, verifier, migration
+safety/history scripts, or either migration workflow definition changes.
 
 Checks:
 
 - sequential migration filenames
+- immutable base migration objects across every candidate commit; new migrations
+  must append after the base tail with a unique canonical version and a regular
+  `100644` Git blob/file
+- exact migration checksum inventory and regular-file/UTF-8 boundary
 - RLS/invoker security for every exposed table/view
 - actual disposable PostgreSQL migration application and G1/G2 assertions
 - no anon/public writes

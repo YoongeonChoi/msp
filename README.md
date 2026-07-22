@@ -279,6 +279,7 @@ npm run desktop:e2e
 Migration·repository safety:
 
 ```bash
+python .github/scripts/migration_history_guard.py --worktree
 python .github/scripts/repository_safety.py migrations
 python .github/scripts/repository_safety.py workflows
 python supabase/verify_g1_g2_migration.py

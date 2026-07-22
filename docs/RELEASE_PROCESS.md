@@ -27,6 +27,9 @@ Branches:
 - Desktop Playwright E2E and Tauri/Rust check, test, and build pass.
 - Migration check passes.
 - Fresh and retained-0015 migration application/invariant checks pass.
+- Every migration present in the PR base is byte/mode-identical in every
+  candidate commit and in the merge candidate; only a new migration may be
+  added. The canonical checksum inventory covers every migration.
 - Repository safety check passes: no tracked non-example `.env`, no production secrets in workflows, Render auto deploy remains off.
 - Security workflow has no unresolved critical finding.
 - Secret scans have no unresolved finding.

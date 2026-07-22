@@ -17,6 +17,7 @@ on:
       - "apps/worker/app/adapters/persistence/supabase_calendar_as_of_reader.py"
       - "apps/worker/app/adapters/persistence/supabase_kr_calendar_collection_job_store.py"
       - "supabase/migrations/**"
+      - "supabase/migration-checksums.v1.json"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
@@ -26,6 +27,10 @@ on:
       - "supabase/verify_pit_calendar_observation_store.py"
       - "supabase/verify_pit_calendar_as_of_reader.py"
       - "supabase/verify_kr_calendar_collection_job_store.py"
+      - ".github/scripts/repository_safety.py"
+      - ".github/scripts/migration_history_guard.py"
+      - ".github/scripts/test_migration_safety_guards.py"
+      - ".github/workflows/ci.yml"
       - ".github/workflows/migration-check.yml"
   push:
     branches: [main, develop]
@@ -44,6 +49,7 @@ on:
       - "apps/worker/app/adapters/persistence/supabase_calendar_as_of_reader.py"
       - "apps/worker/app/adapters/persistence/supabase_kr_calendar_collection_job_store.py"
       - "supabase/migrations/**"
+      - "supabase/migration-checksums.v1.json"
       - "supabase/seed.sql"
       - "supabase/verify_g1_g2_migration.py"
       - "supabase/verify_pit_candle_revision_store.py"
@@ -53,6 +59,10 @@ on:
       - "supabase/verify_pit_calendar_observation_store.py"
       - "supabase/verify_pit_calendar_as_of_reader.py"
       - "supabase/verify_kr_calendar_collection_job_store.py"
+      - ".github/scripts/repository_safety.py"
+      - ".github/scripts/migration_history_guard.py"
+      - ".github/scripts/test_migration_safety_guards.py"
+      - ".github/workflows/ci.yml"
       - ".github/workflows/migration-check.yml"
 
 permissions:
@@ -69,6 +79,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Test migration safety guards
+        run: >-
+          python -m unittest discover -s .github/scripts
+          -p 'test_migration_safety_guards.py' -v
+      - name: Block historical migration rewrites
+        env:
+          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_REVISION: ${{ github.sha }}
+        run: >-
+          python .github/scripts/migration_history_guard.py
+          --base "$BASE_REVISION" --head "$HEAD_REVISION"
       - name: Block committed env files
         shell: bash
         run: |

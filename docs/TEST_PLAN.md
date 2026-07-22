@@ -6,6 +6,9 @@
 ## 1. 데이터베이스와 권한
 
 - fresh PostgreSQL과 기존 `0015` fixture에서 전체 migration과 seed를 실제 적용한다.
+- base에 존재한 migration의 수정·삭제·rename·type change와 중간 commit 변경 후
+  원복, staged/unstaged 상쇄를 거부한다. 신규 migration은 base tail보다 큰 고유
+  version의 canonical 이름과 regular `100644` blob/file만 허용한다.
 - `private` source of truth, 최소 `api` surface, allowlist된 `worker_api` RPC만 남는다.
 - exposed table/view마다 RLS와 명시적 GRANT를 검증한다.
 - `anon`, `authenticated`, `service_role` 및 7개 application role의 positive/negative
