@@ -31,7 +31,18 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719060000_kr_calendar_collection_job_store.sql`, followed by
 `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`, followed by
 `20260719080000_kr_calendar_collection_job_inspection.sql`, followed by
-`20260719090000_pit_daily_candle_collection_job_store.sql`.
+`20260719090000_pit_daily_candle_collection_job_store.sql`, followed by
+`20260723162000_desktop_operations_sensitive_projection_gate.sql`.
+
+After the Desktop sensitive-projection migration, run the complete
+`python supabase/verify_g1_g2_migration.py` verifier without
+`--skip-postgrest`. Confirm that every admitted AAL2 non-auditor role receives
+both `audit_events` and `reconciliation_cases` as exact empty arrays through
+direct PostgreSQL and PostgREST, while an AAL2 `auditor` receives both
+permissions and the exact known audit/reconciliation fixture. `anon` and
+`service_role` must remain unable to call the Desktop RPC. Do not treat the
+identifier-free reconciliation health state as auditor evidence; it remains
+part of minimum-status availability.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content

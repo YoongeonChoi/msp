@@ -33,7 +33,8 @@ declare
     '20260715020752','20260715041903','20260715041909','20260715041912',
     '20260715041915','20260718165749','20260719001947','20260719010000',
     '20260719020000','20260719030000','20260719040000','20260719050000',
-    '20260719060000','20260719070000','20260719080000','20260719090000'
+    '20260719060000','20260719070000','20260719080000','20260719090000',
+    '20260723162000'
   ];
   expected_names constant text[] := array[
     'schema','rls','realtime','retention','schema_alignment','outcome_tracking',
@@ -57,7 +58,8 @@ declare
     'kr_calendar_collection_job_store',
     'kr_calendar_collection_job_conflict_boundary',
     'kr_calendar_collection_job_inspection',
-    'pit_daily_candle_collection_job_store'
+    'pit_daily_candle_collection_job_store',
+    'desktop_operations_sensitive_projection_gate'
   ];
   trusted_role_names constant text[] := array[
     'postgres', 'supabase_admin', 'pg_database_owner'

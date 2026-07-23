@@ -23,6 +23,10 @@
 - `worker_api`는 authenticated/anon/public 실행이 불가능하고 service role만 호출한다.
 - exposed wrapper는 `SECURITY INVOKER`; private definer는 `search_path=''`와 제한된
   EXECUTE만 가진다.
+- Desktop snapshot은 `view_audit`와 `view_reconciliation`을 각각 private SELECT
+  전에 검사한다. viewer와 나머지 non-auditor role은 두 응답 키를 유지한 exact
+  `[]`를 받고, auditor는 두 permission과 known evidence를 direct PostgreSQL 및
+  실제 PostgREST에서 받는다. `anon`과 `service_role`의 RPC 거부도 유지한다.
 - legacy public order/control write, Live command 생성·변경, Live settings tuple을
   모두 거부한다.
 - `audit_events` UPDATE/DELETE와 hash-chain mutation을 일반 사용자·Worker 모두

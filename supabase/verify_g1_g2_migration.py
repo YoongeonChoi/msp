@@ -48,6 +48,16 @@ VIEWER = "66666666-6666-4666-8666-666666666666"
 STRATEGY = "67676767-6767-4767-8767-676767676767"
 AUDITOR = "68686868-6868-4868-8868-686868686868"
 RELEASE_MANAGER = "69696969-6969-4969-8969-696969696969"
+NON_AUDITOR_HUMAN_ROLES = (
+    ("platform_admin", ADMIN_1),
+    ("operator", OPERATOR),
+    ("risk_approver", RISK),
+    ("strategy_reviewer", STRATEGY),
+    ("release_manager", RELEASE_MANAGER),
+    ("viewer", VIEWER),
+)
+SNAPSHOT_EVIDENCE_INTENT_ID = "87878787-8787-4787-8787-878787878787"
+SNAPSHOT_AUDIT_RESOURCE_ID = "94949494-9494-4949-8949-949494949494"
 LEGACY_USER = "77777777-7777-4777-8777-777777777778"
 EVIDENCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 CONTRACT_EVIDENCE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -6820,11 +6830,49 @@ insert into private.position_projection (
   account_id,symbol,quantity,average_cost_krw,projection_version
 ) values ('paper-primary','005930',10,8000,1);
 """)
-    raw = psql(
-        container,
-        jwt_claim_sql(VIEWER) + "select api.get_desktop_operations_snapshot_v1();",
-    ).stdout.strip().splitlines()[-1]
-    snapshot = json.loads(raw)
+    snapshot_audit_id = psql(container, f"""
+select private.write_audit_event(
+  'system',null,'snapshot_verifier',null,null,null,
+  'incident_resolved','incident','{SNAPSHOT_AUDIT_RESOURCE_ID}',
+  '{SNAPSHOT_AUDIT_RESOURCE_ID}',null,
+  'snapshot_auditor_positive_control',null,array[]::text[],null,null,null
+);
+""").stdout.strip()
+    if not snapshot_audit_id:
+        raise VerificationError("snapshot audit positive-control fixture is missing")
+    expected_reconciliation = psql(container, f"""
+select concat_ws('|', break_row.id, break_row.run_id)
+from private.order_events as event
+join private.reconciliation_breaks as break_row
+  on event.event_summary->>'reconciliation_break_id' = break_row.id::text
+where event.intent_id='{SNAPSHOT_EVIDENCE_INTENT_ID}'
+  and event.event_type='manual_check_quarantined'
+order by event.occurred_at desc, event.id desc
+limit 1;
+""").stdout.strip()
+    if "|" not in expected_reconciliation:
+        raise VerificationError("snapshot evidence fixture break is missing")
+    expected_break_id, expected_run_id = expected_reconciliation.split("|", 1)
+    non_auditor_snapshots: dict[str, dict[str, object]] = {}
+    for role_name, user_id in NON_AUDITOR_HUMAN_ROLES:
+        role_raw = psql(
+            container,
+            jwt_claim_sql(user_id)
+            + "select api.get_desktop_operations_snapshot_v1();",
+        ).stdout.strip().splitlines()[-1]
+        role_snapshot = json.loads(role_raw)
+        if role_snapshot.get("audit_events") != []:
+            raise VerificationError(
+                f"{role_name} snapshot leaked audit events: "
+                f"{role_snapshot.get('audit_events')}"
+            )
+        if role_snapshot.get("reconciliation_cases") != []:
+            raise VerificationError(
+                f"{role_name} snapshot leaked reconciliation cases: "
+                f"{role_snapshot.get('reconciliation_cases')}"
+            )
+        non_auditor_snapshots[role_name] = role_snapshot
+    snapshot = non_auditor_snapshots["viewer"]
     position = snapshot["positions"][0]
     if any(position[key] is not None for key in (
         "market_price_krw", "market_value_krw", "unrealized_pnl_krw",
@@ -6836,7 +6884,59 @@ insert into private.position_projection (
         raise VerificationError("snapshot fabricated client Realtime connectivity")
     if "access_changes" not in snapshot:
         raise VerificationError("snapshot omitted access changes")
-    print("PASS snapshot null valuation, causal safety and fail-closed Realtime")
+
+    auditor_raw = psql(
+        container,
+        jwt_claim_sql(AUDITOR) + "select api.get_desktop_operations_snapshot_v1();",
+    ).stdout.strip().splitlines()[-1]
+    auditor_snapshot = json.loads(auditor_raw)
+    auditor_permissions = auditor_snapshot.get("access", {}).get("permissions")
+    if not isinstance(auditor_permissions, list) \
+            or "view_audit" not in auditor_permissions:
+        raise VerificationError("auditor snapshot omitted view_audit permission")
+    if "view_reconciliation" not in auditor_permissions:
+        raise VerificationError(
+            "auditor snapshot omitted view_reconciliation permission"
+        )
+    audit_evidence = next(
+        (
+            item
+            for item in auditor_snapshot.get("audit_events", [])
+            if item.get("audit_id") == snapshot_audit_id
+            and item.get("resource_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+            and item.get("resource_type") == "incident"
+            and item.get("action") == "incident_resolved"
+            and item.get("reason_code") == "snapshot_auditor_positive_control"
+            and item.get("outcome") == "success"
+            and item.get("correlation_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        ),
+        None,
+    )
+    if audit_evidence is None:
+        raise VerificationError("auditor snapshot omitted known audit evidence")
+    reconciliation_evidence = next(
+        (
+            item
+            for item in auditor_snapshot.get("reconciliation_cases", [])
+            if item.get("case_id") == expected_break_id
+            and item.get("order_id") == SNAPSHOT_EVIDENCE_INTENT_ID
+            and item.get("environment") == "paper"
+            and item.get("status") == "investigating"
+            and item.get("reason_code") == "ambiguous_order_state"
+            and item.get("resolution_code") is None
+            and item.get("evidence_refs")
+            == [f"reconciliation-run:{expected_run_id}"]
+        ),
+        None,
+    )
+    if reconciliation_evidence is None:
+        raise VerificationError(
+            "auditor snapshot omitted known reconciliation evidence"
+        )
+    print(
+        "PASS snapshot non-auditor evidence denial, auditor exact evidence "
+        "projection, null valuation, causal safety and fail-closed Realtime"
+    )
 
 
 def verify_arithmetic() -> None:
@@ -6934,7 +7034,12 @@ def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
         raise VerificationError(
             "PostgREST did not become ready:\n" + logs.stdout + logs.stderr
         )
-    auth = jwt_token("authenticated", VIEWER)
+    non_auditor_tokens = tuple(
+        (role_name, jwt_token("authenticated", user_id))
+        for role_name, user_id in NON_AUDITOR_HUMAN_ROLES
+    )
+    auth = dict(non_auditor_tokens)["viewer"]
+    auditor = jwt_token("authenticated", AUDITOR)
     operator = jwt_token("authenticated", OPERATOR)
     service_holder = "00000000-0000-4000-8000-000000000099"
     service = jwt_token("service_role", service_holder)
@@ -6957,9 +7062,89 @@ select fencing_token from worker_api.acquire_worker_lease(
             schema="api",
             label=f"anonymous {endpoint}",
         )
-    status, _ = http_post(f"{root}/rpc/get_desktop_operations_snapshot_v1", auth)
+    for role_name, role_token in non_auditor_tokens:
+        status, body = http_post(
+            f"{root}/rpc/get_desktop_operations_snapshot_v1", role_token
+        )
+        if status != 200:
+            raise VerificationError(
+                f"{role_name} snapshot failed through PostgREST: {status}"
+            )
+        role_snapshot = json.loads(body)
+        if role_snapshot.get("audit_events") != [] \
+                or role_snapshot.get("reconciliation_cases") != []:
+            raise VerificationError(
+                f"{role_name} PostgREST snapshot leaked auditor evidence: "
+                f"{role_snapshot}"
+            )
+    status, body = http_post(
+        f"{root}/rpc/get_desktop_operations_snapshot_v1", auditor
+    )
     if status != 200:
-        raise VerificationError(f"authenticated snapshot failed through PostgREST: {status}")
+        raise VerificationError(
+            f"auditor snapshot failed through PostgREST: {status}"
+        )
+    auditor_snapshot = json.loads(body)
+    auditor_permissions = auditor_snapshot.get("access", {}).get("permissions")
+    if not isinstance(auditor_permissions, list):
+        raise VerificationError(
+            "auditor PostgREST snapshot permissions have invalid type"
+        )
+    if not all(
+        permission in auditor_permissions
+        for permission in ("view_audit", "view_reconciliation")
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted evidence permissions"
+        )
+    expected_audit_id = psql(pg, f"""
+select id
+from private.audit_events
+where resource_id='{SNAPSHOT_AUDIT_RESOURCE_ID}'
+  and reason_code='snapshot_auditor_positive_control'
+order by occurred_at desc, id desc
+limit 1;
+""").stdout.strip()
+    expected_reconciliation = psql(pg, f"""
+select concat_ws('|', break_row.id, break_row.run_id)
+from private.order_events as event
+join private.reconciliation_breaks as break_row
+  on event.event_summary->>'reconciliation_break_id' = break_row.id::text
+where event.intent_id='{SNAPSHOT_EVIDENCE_INTENT_ID}'
+  and event.event_type='manual_check_quarantined'
+order by event.occurred_at desc, event.id desc
+limit 1;
+""").stdout.strip()
+    if not expected_audit_id or "|" not in expected_reconciliation:
+        raise VerificationError("PostgREST snapshot evidence fixture is missing")
+    expected_break_id, expected_run_id = expected_reconciliation.split("|", 1)
+    if not any(
+        item.get("audit_id") == expected_audit_id
+        and item.get("resource_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        and item.get("resource_type") == "incident"
+        and item.get("action") == "incident_resolved"
+        and item.get("reason_code") == "snapshot_auditor_positive_control"
+        and item.get("outcome") == "success"
+        and item.get("correlation_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        for item in auditor_snapshot.get("audit_events", [])
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted known audit evidence"
+        )
+    if not any(
+        item.get("case_id") == expected_break_id
+        and item.get("order_id") == SNAPSHOT_EVIDENCE_INTENT_ID
+        and item.get("environment") == "paper"
+        and item.get("status") == "investigating"
+        and item.get("reason_code") == "ambiguous_order_state"
+        and item.get("resolution_code") is None
+        and item.get("evidence_refs")
+        == [f"reconciliation-run:{expected_run_id}"]
+        for item in auditor_snapshot.get("reconciliation_cases", [])
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted known reconciliation evidence"
+        )
     status, body = http_post(
         f"{root}/rpc/get_unknown_resolution_cases_v2", operator
     )

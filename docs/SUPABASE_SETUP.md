@@ -122,7 +122,8 @@ guarantee. Any ambiguous state stops the release.
 44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
 46. `20260719090000_pit_daily_candle_collection_job_store.sql`
-47. `seed.sql`
+47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
+48. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -230,6 +231,12 @@ The timestamp migrations extend that boundary in this order:
   call order because those ports are not fence-aware and no collector is wired.
   The job state has no TTL takeover or automatic retry transition, scheduler
   wiring, Desktop exposure, or order authority.
+- `20260723162000_desktop_operations_sensitive_projection_gate.sql` preserves
+  the strict Desktop v1 response shape while executing the private audit and
+  reconciliation detail queries only for an `auditor`. Other admitted human
+  roles receive exact empty arrays for both fields. The migration leaves the
+  identifier-free reconciliation health signal available to minimum-status
+  viewers and reasserts the invoker/definer and execute-grant contracts.
 
 ## Required project configuration
 
