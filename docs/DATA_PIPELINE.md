@@ -76,6 +76,8 @@ calendar observation RPC over the same append-only calendar content and
 occurrence ledgers. It accepts one canonically validated KR session observation,
 including both open and closed dates, and recomputes the calendar identity,
 evidence hash, canonical timestamps, and KST session geometry in PostgreSQL.
+The Worker adapter requires identity response encoding, rejects duplicate JSON
+keys, and stops reading after 64 KiB before exposing any receipt.
 An exact occurrence replay returns the existing receipt, a later unchanged
 observation adds only an occurrence, and a strictly later correction adds one
 content revision plus its occurrence. A regressed source clock, same-clock
@@ -127,26 +129,40 @@ CAS binds every mutation to the spec SHA, revision, attempt, holder, and target;
 restart/reconnect, concurrent begin, stale-write, blocked-attempt, terminal
 manifest, ACL/RLS, and zero-order-write behavior are exercised in a disposable
 PostgreSQL verifier. It has no TTL takeover or automatic retry. The adapter is
-not selected by the runtime container, and a reviewed manual recovery workflow
-remains unimplemented.
+selected only by a separate, default-disabled one-shot command. It is not
+selected by the normal trading runtime or any scheduler.
 
 `KrCalendarCollectionRecoveryAssessmentService` is a separate read-only
 classification boundary over one `KrCalendarCollectionJobInspectorPort` read.
 It rebinds the inspected snapshot to the caller's exact canonical spec and spec
-SHA before classifying `missing`, `ready`, `paused_retryable`, `collecting`,
-`blocked_unknown`, or `completed`. Its `recommended_operator_action` describes
+SHA before classifying `missing`, `ready`, recognized `paused_retryable`,
+`paused_unrecognized`, `collecting`, `blocked_unknown`, or `completed`. Only the
+exact `collection_failed_before_write` pause reason is a retry candidate. Its
+`recommended_operator_action` describes
 only the next review question. Mutation, retry, manual recovery, manual
 execution, and Production Live authorization remain false; an in-flight or
 unknown write outcome is never converted into a retry. A service-role-only
 Worker RPC and the Supabase job-store adapter implement the durable inspection
-read. No recovery command, runtime/container selector, scheduler, or hosted
-operation invokes the assessment service yet.
+read. `app.tools.assess_kr_calendar_collection_job` exposes that classification
+through a separate default-disabled, read-only command and emits exact execution
+preconditions only for executable states. `app.tools.run_kr_calendar_collection_job_once`
+reassesses before mutation. It is disabled unless the dedicated assessment and
+manual settings plus command-line confirmation are present, and binds execution
+to the reviewed spec SHA, state, state reason, revision, confirmed count, and
+next date. A recognized `paused_retryable` state requires the exact reason and
+an additional reviewed-retry confirmation. `paused_unrecognized`, `collecting`,
+and `blocked_unknown` stop before provider collection, and a race after assessment
+fails the exact revision fence instead of advancing a newly exposed date. One
+process invocation can confirm at most one date and emits the durable attempt,
+holder, fencing, observation, and receipt identities for the processed
+checkpoint.
 
-This calendar collection path is not wired into the runtime container, the
-scheduler, automatic range backfill, Desktop, timing, features, backtests,
-strategy, or orders. Preserving one open- or closed-day observation is source
-evidence, not proof of a complete KRX calendar, provider authenticity or
-finality, corporate-action safety, DQ approval, dataset certification, or
+This command is not wired into the normal runtime container, scheduler,
+automatic range backfill, Desktop, timing, features, backtests, strategy, or
+orders. It does not reconcile an in-flight or unknown write outcome, and it
+does not retry automatically. Preserving one open- or closed-day observation
+is source evidence, not proof of a complete KRX calendar, provider authenticity
+or finality, corporate-action safety, DQ approval, dataset certification, or
 research/order authorization.
 
 `20260719050000_pit_calendar_as_of_reader.sql` adds the independent Worker-only

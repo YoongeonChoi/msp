@@ -26,6 +26,7 @@ from app.application.use_cases.collect_kr_daily_session_observation import (
     KrDailySessionCollectionError,
 )
 from app.application.use_cases.run_kr_calendar_date_range_collection_job import (
+    KR_CALENDAR_DATE_RANGE_COLLECTION_DURABLE_LIMITATIONS,
     KR_CALENDAR_DATE_RANGE_COLLECTION_LIMITATIONS,
     KrCalendarDateRangeCollectionJobError,
     KrCalendarDateRangeCollectionRunResultV1,
@@ -181,6 +182,23 @@ class MutatingLoadSpecStore(InMemoryKrCalendarCollectionJobStore):
         return await super().load_or_create_job(spec, now=now)
 
 
+class DurableCountingJobStore(InMemoryKrCalendarCollectionJobStore):
+    persistence_kind = "durable"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_calls = 0
+
+    async def load_or_create_job(
+        self,
+        spec: KrCalendarCollectionJobSpecV1,
+        *,
+        now: datetime,
+    ) -> KrCalendarCollectionJobSnapshotV1:
+        self.load_calls += 1
+        return await super().load_or_create_job(spec, now=now)
+
+
 class MutatingConfirmCollectionStore(InMemoryKrCalendarCollectionJobStore):
     async def confirm_date(self, **kwargs: Any) -> KrCalendarCollectionJobSnapshotV1:
         source = cast(CollectedKrDailySessionObservationV1, kwargs["collection"])
@@ -280,6 +298,61 @@ async def test_each_manual_invocation_advances_exactly_one_date_then_replays_com
     assert third.automatic_retry_allowed is False
     assert third.durable_runtime_configured is False
     assert third.full_calendar_certified is False
+    snapshot = await store.inspect_job(JOB_ID)
+    assert snapshot is not None
+    checkpoint = snapshot.checkpoints[-1]
+    receipt = checkpoint.collection.receipt
+    assert third.processed_checkpoint_attempt_id == checkpoint.attempt_id
+    assert third.processed_checkpoint_holder_id == checkpoint.holder_id
+    assert third.processed_checkpoint_fencing_revision == checkpoint.fencing_revision
+    assert third.processed_checkpoint_begun_at == checkpoint.begun_at
+    assert third.processed_checkpoint_confirmed_at == checkpoint.confirmed_at
+    assert third.processed_receipt_status == receipt.status
+    assert (
+        third.processed_receipt_calendar_idempotency_key
+        == receipt.calendar_idempotency_key
+    )
+    assert (
+        third.processed_receipt_canonical_evidence_sha256
+        == receipt.canonical_evidence_sha256
+    )
+    assert third.processed_receipt_revision == receipt.revision
+    assert third.processed_receipt_revision_inserted is receipt.revision_inserted
+    assert third.processed_receipt_occurrence_id == str(receipt.occurrence_id)
+    assert third.processed_receipt_occurrence_inserted is receipt.occurrence_inserted
+    assert third.processed_receipt_observed_at == receipt.observed_at
+    assert replay.processed_checkpoint_attempt_id is None
+    assert replay.processed_receipt_canonical_evidence_sha256 is None
+
+
+async def test_durable_store_requires_assessment_before_clock_store_or_collector() -> None:
+    collector = FakeCollector()
+    store = DurableCountingJobStore()
+    clock = CountingClock()
+    attempts = AttemptIdFactory()
+    runner = RunKrCalendarDateRangeCollectionJob(
+        collector,
+        store,
+        holder_id=HOLDER_ID,
+        clock=clock,
+        attempt_id_factory=attempts,
+        manual_execution_enabled=True,
+    )
+
+    with pytest.raises(
+        KrCalendarDateRangeCollectionJobError,
+        match="kr_calendar_date_range_collection_recovery_assessment_required",
+    ):
+        await runner.execute(_spec())
+
+    assert runner.persistence_kind == "durable"
+    assert collector.calls == []
+    assert clock.calls == 0
+    assert attempts.calls == 0
+    assert store.load_calls == 0
+    assert KR_CALENDAR_DATE_RANGE_COLLECTION_DURABLE_LIMITATIONS != (
+        KR_CALENDAR_DATE_RANGE_COLLECTION_LIMITATIONS
+    )
 
 
 async def test_366_day_job_still_advances_only_first_date() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import traceback
 from datetime import timedelta
@@ -10,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.adapters.persistence.supabase_calendar_observation_store import (
+    PIT_KR_DAILY_SESSION_MAX_RPC_RESPONSE_BYTES,
     PIT_KR_DAILY_SESSION_RPC_ALLOWLIST,
     SupabaseCalendarObservationStore,
 )
@@ -37,6 +39,7 @@ async def test_store_posts_canonical_open_or_closed_session_to_only_rpc(
         requests.append(request)
         payload = json.loads(request.content)
         assert request.headers["accept-profile"] == "worker_api"
+        assert request.headers["accept-encoding"] == "identity"
         assert request.headers["content-profile"] == "worker_api"
         assert request.url.path.endswith(
             "/append_pit_kr_daily_session_observation_v1"
@@ -228,6 +231,42 @@ async def test_store_suppresses_secret_bearing_transport_or_json_chain(
     assert error.__cause__ is None
     assert error.__context__ is None
     assert error.__suppress_context__ is False
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            200,
+            content=b"x" * (PIT_KR_DAILY_SESSION_MAX_RPC_RESPONSE_BYTES + 1),
+        ),
+        httpx.Response(
+            200,
+            content=b'[{"status":"stored","status":"replayed"}]',
+        ),
+        httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            content=gzip.compress(b"[]"),
+        ),
+    ],
+)
+async def test_store_rejects_oversized_duplicate_or_encoded_rpc_response(
+    response: httpx.Response,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseCalendarObservationStore(_settings(), client=client)
+    try:
+        with pytest.raises(
+            CalendarObservationStoreError,
+            match="calendar_observation_store_rpc_failed_or_returned_invalid_json",
+        ):
+            await store.append_observation(_session())
+    finally:
+        await client.aclose()
 
 
 async def test_store_revalidates_and_copies_input_before_network() -> None:

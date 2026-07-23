@@ -27,6 +27,7 @@ KrCalendarCollectionJobState = Literal[
     "blocked_unknown",
     "completed",
 ]
+KrCalendarCollectionJobPersistenceKind = Literal["reference", "durable"]
 
 _PROVIDER_RE = re.compile(r"[a-z][a-z0-9._-]{0,63}")
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,127}")
@@ -279,6 +280,9 @@ class KrCalendarCollectionJobSnapshotV1:
 
 
 class KrCalendarCollectionJobStorePort(Protocol):
+    @property
+    def persistence_kind(self) -> KrCalendarCollectionJobPersistenceKind: ...
+
     async def load_or_create_job(
         self,
         spec: KrCalendarCollectionJobSpecV1,

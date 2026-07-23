@@ -39,6 +39,8 @@
   fail closed한다.
 - durable receipt의 calendar identity SHA, evidence SHA, `observed_at`이 source
   session과 정확히 일치해야 하며 유효한 `stored`와 `replayed`만 반환한다.
+- observation RPC는 identity response encoding과 64 KiB 상한을 강제하고,
+  duplicate JSON key·압축 응답·초과 응답을 receipt parsing 전에 거부한다.
 - source/store/clock 오류의 payload, credential, 응답 본문은 application error와
   traceback에 노출하지 않는다. append 시도 후 transport 오류는 write outcome
   unknown으로 취급하고 durable evidence 확인 없이 자동 재시도하지 않는다.
@@ -70,8 +72,8 @@
 - disposable PostgreSQL에서 새 connection의 상태 복원, concurrent begin 단일 winner,
   stale CAS 무변경, attempt UUID 재사용 차단, pause 후 새 수동 attempt, blocked attempt
   무인 takeover 금지, complete manifest의 Python/SQL 동일성, ACL/RLS, 주문 경로
-  zero-write를 검증한다. runtime/container/scheduler 연결이나 manual recovery 승인은
-  별도 항목으로 남긴다.
+  zero-write를 검증한다. 기본 비활성 one-shot 수동 runtime 외의 main runtime,
+  scheduler 연결이나 unresolved-write manual recovery 승인은 별도 항목으로 남긴다.
 - pinned local PostgREST의 실제 `worker_api` profile에서 다섯 mutation RPC envelope와
   read-only inspect RPC를 확인한다. inspect는 유효한 missing/present UUID의
   `job_found`/`snapshot` envelope, invalid/non-v4 UUID 거부, service-role-only ACL과
@@ -83,17 +85,37 @@
   response headroom을 검증한다. 이는 Gateway/Kong, Hosted Supabase 또는 Production
   Live 승인 증거가 아니다.
 - read-only recovery assessment는 유효한 요청마다 inspector를 정확히 한 번만 호출하고
-  missing/ready/paused_retryable/collecting/blocked_unknown/completed를 분류한다. 각 상태의
+  missing/ready/paused_retryable/paused_unrecognized/collecting/blocked_unknown/completed를
+  분류한다. `collection_failed_before_write`와 정확히 일치하는 pause reason만
+  paused_retryable 실행 후보이고, 다른 reason은 paused_unrecognized로 닫혀야 한다. 각 상태의
   recommended operator action은 검토 방향일 뿐이며 mutation 수행·retry·manual execution·
   manual recovery·Live authorization은 항상 false여야 한다. collecting/blocked_unknown은
   unresolved write outcome으로 표시하고 explicit manual invocation 후보로 만들지 않는다.
   spec/spec SHA 불일치, 변조 snapshot, inspector 예외는 payload나 credential 없이 고정
   오류로 fail closed해야 한다.
 - assessment unit test는 service의 순수 분류·단일 inspector-read 계약을 증명한다.
+  별도 default-disabled assessment CLI는 exact canonical spec SHA와 state/revision/
+  count/next-date를 안전한 JSON으로 출력하되 mutation·Toss 호출을 0으로 유지하고,
+  executable state가 아니면 `run_precondition`을 출력하지 않아야 한다.
   별도 migration/adapter/DB verifier는 service-role-only RPC, 실제 PostgREST profile,
   missing/present/invalid UUID, ACL과 zero-write fingerprint를 증명한다. Supabase
-  inspector adapter는 구현됐지만 recovery command, runtime/container 선택, scheduler,
-  Hosted operation은 아직 미구현이다.
+  inspector와 mutation adapter는 기본 비활성 one-shot command에서만 함께 선택한다.
+  command는 exact spec SHA와 operator-reviewed classification/state-reason/revision/
+  confirmed-count/next-date를 요구하고 assessment 결과를 실행 load 직후 다시 결합해야 한다.
+  assessment와 load 사이에 다른 실행이 진행되면 attempt UUID 생성, begin, provider
+  read 전에 실패해야 한다. `paused_retryable`은 exact reason과 별도 review 확인이
+  필요하고, `paused_unrecognized`/`collecting`/`blocked_unknown`/`completed`는 mutation
+  후보가 아니어야 한다.
+- one-shot command는 호출당 정확히 한 날짜만 진행하고 retry loop, TTL takeover,
+  automatic continuation을 만들지 않는다. 성공 결과는 attempt/holder/fencing revision,
+  observation/occurrence identity와 durable receipt를 구조화해 노출하되 calendar
+  idempotency key는 reviewed provider/market/processed date에서 재계산한 값과 정확히
+  일치해야 하며 credential이나 provider payload는 출력하지 않는다. 정상·실패·
+  cancellation·부분 생성 모두에서
+  소유 HTTP client를 닫고 production order network request는 0이어야 한다.
+- main Worker, scheduler, Render, Desktop, timing, feature, backtest, strategy, order에는
+  이 command를 연결하지 않는다. Hosted operation과 unresolved-write reconciliation은
+  아직 미구현이다.
 - 성공 결과도 provider authenticity/finality, official exchange completeness,
   corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
   승인을 의미하지 않는다.

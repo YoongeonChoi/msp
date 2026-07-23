@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ PITKrDailySessionRpc = Literal[
 PIT_KR_DAILY_SESSION_RPC_ALLOWLIST: frozenset[str] = frozenset(
     {"append_pit_kr_daily_session_observation_v1"}
 )
+PIT_KR_DAILY_SESSION_MAX_RPC_RESPONSE_BYTES = 64 * 1024
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _QUARANTINE_REASONS = frozenset(
@@ -54,8 +56,9 @@ _RECEIPT_FIELDS = {
 class SupabaseCalendarObservationStore:
     """Persist independent open or closed KR calendar observations.
 
-    Construction is explicit and this adapter is intentionally not wired into
-    the runtime container, scheduler, research, strategy, or order paths.
+    Construction is explicit. It is available only to the dedicated manual
+    calendar runtime and is not wired into the normal worker loop, scheduler,
+    research, strategy, or order paths.
     """
 
     def __init__(
@@ -72,6 +75,7 @@ class SupabaseCalendarObservationStore:
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
         self.headers = supabase_api_headers(secret) | {
             "accept-profile": "worker_api",
+            "accept-encoding": "identity",
             "content-profile": "worker_api",
             "content-type": "application/json",
         }
@@ -188,20 +192,52 @@ class SupabaseCalendarObservationStore:
         result: object = None
         failed = False
         try:
-            response = await self.client.post(
+            async with self.client.stream(
+                "POST",
                 f"{self.base_url}/{rpc}",
                 headers=self.headers,
                 json=payload,
-            )
-            response.raise_for_status()
-            result = response.json()
-        except (httpx.HTTPError, ValueError):
+            ) as response:
+                content_encoding = response.headers.get(
+                    "content-encoding", "identity"
+                ).strip().lower()
+                if content_encoding not in {"", "identity"}:
+                    failed = True
+                body = bytearray()
+                if not failed:
+                    async for chunk in response.aiter_bytes():
+                        if (
+                            len(body) + len(chunk)
+                            > PIT_KR_DAILY_SESSION_MAX_RPC_RESPONSE_BYTES
+                        ):
+                            failed = True
+                            break
+                        body.extend(chunk)
+                if not failed and response.is_success:
+                    result = json.loads(
+                        body,
+                        object_pairs_hook=_json_object_without_duplicates,
+                    )
+                else:
+                    failed = True
+        except Exception:
             failed = True
         if failed:
             raise CalendarObservationStoreError(
                 "calendar_observation_store_rpc_failed_or_returned_invalid_json"
             )
         return result
+
+
+def _json_object_without_duplicates(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
 
 
 def _canonical_session(value: object) -> PointInTimeKrDailySessionV1:

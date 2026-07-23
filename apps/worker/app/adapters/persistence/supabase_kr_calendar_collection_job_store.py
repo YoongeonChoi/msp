@@ -17,6 +17,7 @@ from app.application.ports.kr_calendar_collection_job_store_port import (
     KR_CALENDAR_COLLECTION_JOB_SCHEMA_VERSION,
     KrCalendarCollectionDateAttemptV1,
     KrCalendarCollectionDateCheckpointV1,
+    KrCalendarCollectionJobPersistenceKind,
     KrCalendarCollectionJobSnapshotV1,
     KrCalendarCollectionJobSpecV1,
     KrCalendarCollectionJobState,
@@ -147,8 +148,11 @@ class SupabaseKrCalendarCollectionJobStore:
     """Durable RPC-only store for manually fenced KR calendar jobs.
 
     Construction is explicit. This adapter has no table CRUD, retry, lease
-    takeover, scheduler, runtime-container, research, strategy, or order path.
+    takeover, normal Worker runtime, scheduler, research, strategy, or order
+    path. The dedicated manual calendar runtime can select it explicitly.
     """
+
+    persistence_kind: KrCalendarCollectionJobPersistenceKind = "durable"
 
     def __init__(
         self,

@@ -8,6 +8,7 @@ from uuid import UUID
 from app.application.ports.kr_calendar_collection_job_store_port import (
     KrCalendarCollectionDateAttemptV1,
     KrCalendarCollectionDateCheckpointV1,
+    KrCalendarCollectionJobPersistenceKind,
     KrCalendarCollectionJobSnapshotV1,
     KrCalendarCollectionJobSpecV1,
     KrCalendarCollectionJobState,
@@ -28,6 +29,8 @@ class InMemoryKrCalendarCollectionJobStore:
     This adapter is intentionally absent from the runtime container. It has no
     TTL, lease takeover, or automatic retry path for unresolved attempts.
     """
+
+    persistence_kind: KrCalendarCollectionJobPersistenceKind = "reference"
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()

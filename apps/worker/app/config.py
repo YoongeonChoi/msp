@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from typing import Literal, Self
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import Field, SecretStr, model_validator
@@ -42,6 +44,18 @@ class Settings(BaseSettings):
     toss_order_capable_credentials: bool | None = Field(
         default=None,
         alias="TOSS_ORDER_CAPABLE_CREDENTIALS",
+    )
+    kr_calendar_collection_assessment_enabled: bool = Field(
+        default=False,
+        alias="KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED",
+    )
+    kr_calendar_collection_manual_execution_enabled: bool = Field(
+        default=False,
+        alias="KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED",
+    )
+    kr_calendar_collection_holder_id: str | None = Field(
+        default=None,
+        alias="KR_CALENDAR_COLLECTION_HOLDER_ID",
     )
     live_order_execution_enabled: bool = Field(
         default=False,
@@ -222,7 +236,51 @@ class Settings(BaseSettings):
                 raise ValueError("contract_test_execution_is_forbidden_in_production")
             if not self.mock_providers:
                 raise ValueError("contract_test_execution_requires_mock_providers")
+        if self.kr_calendar_collection_assessment_enabled:
+            self.require_kr_calendar_collection_assessment()
+        if self.kr_calendar_collection_manual_execution_enabled:
+            self.require_kr_calendar_collection_manual_execution()
         return self
+
+    def require_kr_calendar_collection_assessment(self) -> None:
+        if self.kr_calendar_collection_assessment_enabled is not True:
+            raise ValueError("kr_calendar_collection_assessment_disabled")
+        if not _nonempty_text(self.supabase_url) or not _nonempty_secret(
+            self.supabase_secret_key
+        ):
+            raise ValueError(
+                "kr_calendar_collection_assessment_requires_supabase_credentials"
+            )
+        if not _hosted_supabase_https_origin(self.supabase_url):
+            raise ValueError(
+                "kr_calendar_collection_assessment_requires_hosted_supabase_https_origin"
+            )
+
+    def require_kr_calendar_collection_manual_execution(self) -> None:
+        if self.kr_calendar_collection_manual_execution_enabled is not True:
+            raise ValueError("kr_calendar_collection_manual_execution_disabled")
+        self.require_kr_calendar_collection_assessment()
+        if self.mock_providers is not False:
+            raise ValueError(
+                "kr_calendar_collection_manual_execution_requires_real_providers"
+            )
+        if not _nonempty_secret(self.toss_client_id) or not _nonempty_secret(
+            self.toss_client_secret
+        ):
+            raise ValueError(
+                "kr_calendar_collection_manual_execution_requires_toss_credentials"
+            )
+        if (
+            self.toss_credential_scope != "read_only"
+            or self.toss_order_capable_credentials is not False
+        ):
+            raise ValueError(
+                "kr_calendar_collection_manual_execution_requires_read_only_credentials"
+            )
+        if not _canonical_uuid4(self.kr_calendar_collection_holder_id):
+            raise ValueError(
+                "kr_calendar_collection_manual_execution_requires_uuid4_holder_id"
+            )
 
     def use_supabase_repository(self) -> bool:
         return bool(
@@ -234,3 +292,49 @@ class Settings(BaseSettings):
 
 def load_settings() -> Settings:
     return Settings()
+
+
+def _nonempty_text(value: object) -> bool:
+    return type(value) is str and bool(value.strip())
+
+
+def _nonempty_secret(value: object) -> bool:
+    return type(value) is SecretStr and bool(value.get_secret_value().strip())
+
+
+def _canonical_uuid4(value: object) -> bool:
+    try:
+        parsed = UUID(value) if type(value) is str else None
+    except ValueError:
+        return False
+    return parsed is not None and parsed.version == 4 and str(parsed) == value
+
+
+_SUPABASE_HOST_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?\.supabase\.co"
+)
+
+
+def _hosted_supabase_https_origin(value: object) -> bool:
+    if type(value) is not str or value != value.strip():
+        return False
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if hostname is None:
+        return False
+    expected_netloc = hostname if port is None else f"{hostname}:{port}"
+    return (
+        parts.scheme == "https"
+        and parts.netloc.lower() == expected_netloc
+        and parts.username is None
+        and parts.password is None
+        and parts.path in {"", "/"}
+        and not parts.query
+        and not parts.fragment
+        and port in {None, 443}
+        and _SUPABASE_HOST_RE.fullmatch(hostname) is not None
+    )

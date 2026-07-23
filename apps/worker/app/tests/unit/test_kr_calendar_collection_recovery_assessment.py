@@ -24,6 +24,7 @@ from app.application.ports.kr_daily_session_collection_port import (
 from app.application.services.kr_calendar_collection_recovery_assessment import (
     KR_CALENDAR_COLLECTION_RECOVERY_ASSESSMENT_LIMITATIONS,
     KR_CALENDAR_COLLECTION_RECOVERY_ASSESSMENT_SCHEMA_VERSION,
+    KR_CALENDAR_COLLECTION_RETRYABLE_STATE_REASON,
     KrCalendarCollectionRecommendedOperatorAction,
     KrCalendarCollectionRecoveryAssessmentError,
     KrCalendarCollectionRecoveryAssessmentService,
@@ -99,6 +100,7 @@ async def test_assessment_classifies_one_snapshot_without_authorizing_action(
     assert result.spec_sha256 == spec.spec_sha256
     assert result.classification == classification
     assert result.job_state == (None if snapshot is None else snapshot.state)
+    assert result.state_reason == (None if snapshot is None else snapshot.state_reason)
     assert result.job_revision == (None if snapshot is None else snapshot.revision)
     assert result.confirmed_date_count == (0 if snapshot is None else snapshot.confirmed_count)
     assert result.remaining_date_count == (
@@ -161,6 +163,41 @@ async def test_assessment_classifies_one_snapshot_without_authorizing_action(
     assert result.production_live_authorized is False
     assert result.full_calendar_certified is False
     assert result.limitations == KR_CALENDAR_COLLECTION_RECOVERY_ASSESSMENT_LIMITATIONS
+
+
+async def test_unrecognized_paused_reason_is_visible_but_never_an_execution_candidate() -> None:
+    spec = _spec()
+    store = InMemoryKrCalendarCollectionJobStore()
+    ready = await store.load_or_create_job(spec, now=CREATED_AT)
+    collecting = await store.begin_date_attempt(
+        job_id=spec.job_id,
+        spec_sha256=spec.spec_sha256,
+        expected_revision=ready.revision,
+        attempt_id=ATTEMPT_ID,
+        holder_id=HOLDER_ID,
+        target_date=START_DATE,
+        now=CREATED_AT + timedelta(minutes=1),
+    )
+    paused = await store.pause_retryable(
+        **_active_args(collecting),
+        reason_code="operator_requested_pause",
+        now=CREATED_AT + timedelta(minutes=2),
+    )
+
+    result = await KrCalendarCollectionRecoveryAssessmentService(store).assess(
+        spec,
+        expected_spec_sha256=spec.spec_sha256,
+    )
+
+    assert paused.state == "paused_retryable"
+    assert result.classification == "paused_unrecognized"
+    assert result.job_state == "paused_retryable"
+    assert result.state_reason == "operator_requested_pause"
+    assert result.recommended_operator_action == (
+        "investigate_unrecognized_pause_without_retry"
+    )
+    assert result.explicit_manual_invocation_candidate is False
+    assert result.unresolved_write_outcome is True
 
 
 async def test_request_spec_hash_mismatch_fails_before_inspection() -> None:
@@ -300,7 +337,7 @@ async def _snapshot_for(
     if classification == "paused_retryable":
         return await store.pause_retryable(
             **_active_args(collecting),
-            reason_code="collection_failed_before_write",
+            reason_code=KR_CALENDAR_COLLECTION_RETRYABLE_STATE_REASON,
             now=CREATED_AT + timedelta(minutes=2),
         )
     if classification == "blocked_unknown":

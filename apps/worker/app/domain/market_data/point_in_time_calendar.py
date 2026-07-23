@@ -223,13 +223,12 @@ class PointInTimeKrDailySessionV1:
 
     @property
     def idempotency_key(self) -> str:
-        identity: JsonObject = {
-            "schema_version": self.schema_version,
-            "provider": self.provider,
-            "market": self.market,
-            "session_date": self.session_date.isoformat(),
-        }
-        return hashlib.sha256(_canonical_json(identity)).hexdigest()
+        return kr_daily_session_idempotency_key(
+            provider=self.provider,
+            market=self.market,
+            session_date=self.session_date,
+            schema_version=self.schema_version,
+        )
 
     def to_payload(self) -> JsonObject:
         return {
@@ -251,6 +250,27 @@ class PointInTimeKrDailySessionV1:
             "provider_contract_sha256": self.provider_contract_sha256,
             "canonical_evidence_sha256": self.canonical_evidence_sha256,
         }
+
+
+def kr_daily_session_idempotency_key(
+    *,
+    provider: str,
+    market: str,
+    session_date: date,
+    schema_version: int = 1,
+) -> str:
+    """Derive the canonical identity for one provider/market/session date."""
+    _require_schema_version(schema_version)
+    _require_provider(provider)
+    _require_market(market)
+    _require_date(session_date, "session_date")
+    identity: JsonObject = {
+        "schema_version": schema_version,
+        "provider": provider,
+        "market": market,
+        "session_date": session_date.isoformat(),
+    }
+    return hashlib.sha256(_canonical_json(identity)).hexdigest()
 
 
 def _build_canonical_evidence_sha256(

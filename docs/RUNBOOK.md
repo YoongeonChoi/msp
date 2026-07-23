@@ -146,28 +146,86 @@ fingerprint before and after inspection of an existing job; for missing or
 invalid IDs, confirm the exact job/ledger counts and trading/order domain
 snapshot are unchanged.
 
-The durable mutation and inspector adapters are implemented but are not
-selected by the runtime container or scheduler. Their presence does not approve
-a recovery command, manual recovery procedure, automatic backfill, dataset/DQ
-certification, research/feature/backtest/strategy/order use, Hosted Staging, or
-Production Live.
+The durable mutation and inspector adapters are selected only by the separate
+calendar assessment and one-date execution entry points. They are not part of
+the normal runtime or scheduler. Both are false by default. The assessment
+requires a Worker-only Supabase credential bound to a canonical
+`https://<project>.supabase.co` origin. Execution additionally requires
+read-only Toss credentials, a stable UUIDv4 holder, the assessed exact spec
+SHA, and explicit operator confirmation.
 
-The codebase includes a read-only calendar job recovery assessment service, but
-there is no operator command or runtime wiring for it. Given one exact canonical
-spec and spec SHA, it may call an inspector once and classify the durable state:
+First review the exact canonical job fields and the current read-only assessment:
 
-- `missing`: review whether a separate explicit manual invocation should create it.
-- `ready`: review whether a separate explicit manual invocation should advance one date.
-- `paused_retryable`: review the proven pre-write failure before any explicit invocation.
+- `missing`: confirm revision is absent, count is 0, and next date is the range start.
+- `ready`: confirm the exact revision, confirmed count, and next date.
+- `paused_retryable`: review the proven pre-write failure and confirm the same exact fields.
+- `paused_unrecognized`: investigate the unrecognized pause reason without retrying it.
 - `collecting`: investigate the in-flight attempt without retrying it.
 - `blocked_unknown`: reconcile the unknown write outcome without retrying it.
-- `completed`: no recovery action is indicated.
+- `completed`: no collection action is allowed.
 
-These labels and recommended review directions do not authorize mutation,
-retry, manual execution, manual recovery, scheduling, or Production Live. A
-spec mismatch, spec-SHA mismatch, invalid snapshot, or inspector exception must
-return only a fixed fail-closed error. Do not operate directly on the private
-tables to turn an assessment into a recovery action.
+Obtain those exact values through the supported read-only command. It calls the
+inspector once, performs no mutation or Toss request, and emits `run_precondition`
+only for `missing`, `ready`, or `paused_retryable`:
+
+```powershell
+cd apps/worker
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+python -m app.tools.assess_kr_calendar_collection_job `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD
+```
+
+Review the returned spec SHA and every `run_precondition` field. Do not run the
+mutation command when `explicit_manual_invocation_candidate=false`.
+
+For a reviewed `missing` example, run one date only:
+
+```powershell
+cd apps/worker
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_HOLDER_ID="<stable-uuid-v4>"
+$env:MOCK_PROVIDERS="false"
+$env:TOSS_CREDENTIAL_SCOPE="read_only"
+$env:TOSS_ORDER_CAPABLE_CREDENTIALS="false"
+$env:TOSS_CLIENT_ID="<read-only-client-id>"
+$env:TOSS_CLIENT_SECRET="<read-only-client-secret>"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+python -m app.tools.run_kr_calendar_collection_job_once `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --expected-spec-sha256 <64-lowercase-hex> `
+  --expected-classification missing `
+  --expected-confirmed-count 0 `
+  --expected-next-date YYYY-MM-DD `
+  --confirm-one-date-spec-sha256 <same-64-lowercase-hex>
+```
+
+For `ready` or `paused_retryable`, also pass the reviewed
+`--expected-revision`. A paused retry additionally requires
+`--expected-state-reason collection_failed_before_write` and
+`--confirm-reviewed-paused-retryable-spec-sha256` with the same spec SHA.
+`paused_unrecognized` never emits a run precondition. The command reassesses
+once, then binds execution to the exact assessed state, reason, revision, count,
+and next date. Any drift fails before attempt creation and provider collection.
+Run the command again only after reviewing the new durable state; it never loops
+over the remaining range.
+
+These checks authorize only this one explicit date attempt. They do not approve
+automatic retry, TTL takeover, direct private-table repair, unresolved-write
+recovery, automatic backfill, dataset/DQ certification, research/feature/
+backtest/strategy/order use, Hosted Staging, or Production Live. A spec,
+assessment, snapshot, or adapter error after argument parsing returns only a
+fixed `FINAL=FAIL` line on stdout and exit code 1. Invalid or incomplete CLI
+arguments are rejected by `argparse` with usage/error text on stderr and exit
+code 2. Successful assessment or execution emits its documented evidence on
+stdout and exits with code 0.
 
 ## Start-of-day Paper checklist
 

@@ -18,13 +18,14 @@ from app.domain.common.errors import KnownFailClosedError
 KR_CALENDAR_COLLECTION_RECOVERY_ASSESSMENT_SCHEMA_VERSION = (
     "kr_calendar_collection_recovery_assessment.v1"
 )
+KR_CALENDAR_COLLECTION_RETRYABLE_STATE_REASON = "collection_failed_before_write"
 KR_CALENDAR_COLLECTION_RECOVERY_ASSESSMENT_LIMITATIONS = (
     "read_only_snapshot_assessment_only",
     "recommended_action_requires_separate_operator_review",
     "mutation_not_authorized",
     "retry_not_authorized",
     "manual_recovery_not_authorized",
-    "runtime_and_scheduler_not_connected",
+    "worker_loop_and_scheduler_not_connected",
     "full_calendar_not_certified",
     "calendar_dataset_research_feature_backtest_strategy_order_use_not_authorized",
     "production_live_use_not_authorized",
@@ -34,6 +35,7 @@ KrCalendarCollectionRecoveryClassification = Literal[
     "missing",
     "ready",
     "paused_retryable",
+    "paused_unrecognized",
     "collecting",
     "blocked_unknown",
     "completed",
@@ -42,6 +44,7 @@ KrCalendarCollectionRecommendedOperatorAction = Literal[
     "create_job_by_explicit_manual_invocation",
     "advance_next_date_by_explicit_manual_invocation",
     "review_pre_write_failure_before_explicit_manual_invocation",
+    "investigate_unrecognized_pause_without_retry",
     "investigate_in_flight_attempt_without_retry",
     "reconcile_unknown_write_outcome_without_retry",
     "no_action_completed",
@@ -60,6 +63,7 @@ class KrCalendarCollectionRecoveryAssessmentV1:
     spec_sha256: str
     classification: KrCalendarCollectionRecoveryClassification
     job_state: KrCalendarCollectionJobState | None
+    state_reason: str | None
     job_revision: int | None
     confirmed_date_count: int
     remaining_date_count: int
@@ -135,9 +139,16 @@ def _assessment(
     *,
     snapshot: KrCalendarCollectionJobSnapshotV1 | None,
 ) -> KrCalendarCollectionRecoveryAssessmentV1:
-    classification: KrCalendarCollectionRecoveryClassification = (
-        "missing" if snapshot is None else snapshot.state
-    )
+    classification: KrCalendarCollectionRecoveryClassification
+    if snapshot is None:
+        classification = "missing"
+    elif (
+        snapshot.state == "paused_retryable"
+        and snapshot.state_reason != KR_CALENDAR_COLLECTION_RETRYABLE_STATE_REASON
+    ):
+        classification = "paused_unrecognized"
+    else:
+        classification = snapshot.state
     action, explicit_candidate, review_required, unresolved_write_outcome = (
         _classification_policy(classification)
     )
@@ -148,6 +159,7 @@ def _assessment(
         "spec_sha256": spec.spec_sha256,
         "classification": classification,
         "job_state": None if snapshot is None else snapshot.state,
+        "state_reason": None if snapshot is None else snapshot.state_reason,
         "job_revision": None if snapshot is None else snapshot.revision,
         "confirmed_date_count": 0 if snapshot is None else snapshot.confirmed_count,
         "remaining_date_count": spec.total_days if snapshot is None else snapshot.remaining_count,
@@ -199,6 +211,12 @@ def _classification_policy(
             True,
             True,
             False,
+        ),
+        "paused_unrecognized": (
+            "investigate_unrecognized_pause_without_retry",
+            False,
+            True,
+            True,
         ),
         "collecting": (
             "investigate_in_flight_attempt_without_retry",

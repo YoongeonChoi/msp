@@ -175,3 +175,154 @@ def test_toss_credentials_must_be_explicitly_read_only() -> None:
     )
     assert settings.toss_credential_scope == "read_only"
     assert settings.toss_order_capable_credentials is False
+
+
+def _manual_calendar_settings(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED": True,
+        "KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED": True,
+        "MOCK_PROVIDERS": False,
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SECRET_KEY": SecretStr("dummy-test-token"),
+        "TOSS_CLIENT_ID": SecretStr("dummy-client-id"),
+        "TOSS_CLIENT_SECRET": SecretStr("dummy-client-secret"),
+        "TOSS_CREDENTIAL_SCOPE": "read_only",
+        "TOSS_ORDER_CAPABLE_CREDENTIALS": False,
+        "KR_CALENDAR_COLLECTION_HOLDER_ID": (
+            "00000000-0000-4000-8000-000000000099"
+        ),
+    }
+    return values | overrides
+
+
+def test_manual_calendar_collection_is_disabled_by_default() -> None:
+    settings = Settings()
+
+    assert settings.kr_calendar_collection_assessment_enabled is False
+    assert settings.kr_calendar_collection_manual_execution_enabled is False
+    with pytest.raises(
+        ValueError,
+        match="kr_calendar_collection_assessment_disabled",
+    ):
+        settings.require_kr_calendar_collection_assessment()
+    with pytest.raises(
+        ValueError,
+        match="kr_calendar_collection_manual_execution_disabled",
+    ):
+        settings.require_kr_calendar_collection_manual_execution()
+
+
+def test_calendar_collection_assessment_accepts_only_hosted_worker_read() -> None:
+    settings = Settings(
+        KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED=True,
+        SUPABASE_URL="https://example.supabase.co",
+        SUPABASE_SECRET_KEY=SecretStr("dummy-test-token"),
+    )
+
+    settings.require_kr_calendar_collection_assessment()
+    assert settings.kr_calendar_collection_manual_execution_enabled is False
+
+
+def test_manual_calendar_collection_accepts_only_complete_read_only_runtime() -> None:
+    settings = Settings.model_validate(_manual_calendar_settings())
+
+    settings.require_kr_calendar_collection_manual_execution()
+    assert settings.mock_providers is False
+    assert settings.toss_credential_scope == "read_only"
+    assert settings.toss_order_capable_credentials is False
+
+
+@pytest.mark.parametrize(
+    ("override", "safe_message"),
+    [
+        (
+            {"MOCK_PROVIDERS": True},
+            "kr_calendar_collection_manual_execution_requires_real_providers",
+        ),
+        (
+            {"KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED": False},
+            "kr_calendar_collection_assessment_disabled",
+        ),
+        (
+            {"SUPABASE_URL": "   "},
+            "kr_calendar_collection_assessment_requires_supabase_credentials",
+        ),
+        (
+            {"SUPABASE_SECRET_KEY": SecretStr("   ")},
+            "kr_calendar_collection_assessment_requires_supabase_credentials",
+        ),
+        (
+            {"SUPABASE_URL": "http://example.supabase.co"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": "https://example.invalid"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": "https://user:pass@example.supabase.co"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": "https://example.supabase.co/rest/v1"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": "https://example.supabase.co:444"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": "https://example.supabase.co?test=value"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"SUPABASE_URL": " https://example.supabase.co"},
+            "assessment_requires_hosted_supabase_https_origin",
+        ),
+        (
+            {"TOSS_CLIENT_ID": SecretStr("   ")},
+            "kr_calendar_collection_manual_execution_requires_toss_credentials",
+        ),
+        (
+            {"TOSS_CLIENT_SECRET": SecretStr("   ")},
+            "kr_calendar_collection_manual_execution_requires_toss_credentials",
+        ),
+        (
+            {"TOSS_CREDENTIAL_SCOPE": "unknown"},
+            "toss_credential_scope_must_be_explicitly_read_only",
+        ),
+        (
+            {"TOSS_ORDER_CAPABLE_CREDENTIALS": True},
+            "order_capable_toss_credentials_are_forbidden",
+        ),
+        (
+            {"KR_CALENDAR_COLLECTION_HOLDER_ID": None},
+            "kr_calendar_collection_manual_execution_requires_uuid4_holder_id",
+        ),
+        (
+            {
+                "KR_CALENDAR_COLLECTION_HOLDER_ID": (
+                    "00000000-0000-1000-8000-000000000099"
+                )
+            },
+            "kr_calendar_collection_manual_execution_requires_uuid4_holder_id",
+        ),
+    ],
+)
+def test_manual_calendar_collection_rejects_unsafe_runtime_configuration(
+    override: dict[str, object],
+    safe_message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=safe_message):
+        Settings.model_validate(_manual_calendar_settings(**override))
+
+
+def test_manual_calendar_collection_runtime_rechecks_mutated_settings() -> None:
+    settings = Settings.model_validate(_manual_calendar_settings())
+    settings.mock_providers = True
+
+    with pytest.raises(
+        ValueError,
+        match="kr_calendar_collection_manual_execution_requires_real_providers",
+    ):
+        settings.require_kr_calendar_collection_manual_execution()

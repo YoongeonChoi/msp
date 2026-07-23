@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 durable store의 runtime 선택·manual recovery·자동 수집/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 main runtime/scheduler 선택·unknown-write recovery·자동 수집/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -135,13 +135,17 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   reference이고, 별도 Supabase adapter는 private job snapshot과 append-only attempt
   ledger를 service-role-only RPC로 보존한다. 재접속 복원·동시 begin·stale CAS·blocked
   무인 takeover 금지·terminal manifest·ACL/RLS를 disposable PostgreSQL에서 검증하지만
-  runtime selection, manual recovery 또는 scheduler 연결은 제공하지 않는다. 별도
+  main runtime, unresolved-write manual recovery 또는 scheduler 연결은 제공하지 않는다. 별도
   read-only recovery assessment service는 inspector를 한 번만 읽어 missing/ready/
-  paused_retryable/collecting/blocked_unknown/completed를 보수적으로 분류하고 다음 검토
+  paused_retryable/paused_unrecognized/collecting/blocked_unknown/completed를 보수적으로 분류하고 다음 검토
   방향을 표시하지만 mutation·retry·manual execution·manual recovery·Live 권한은 모두
-  부여하지 않는다. service-role-only inspect RPC와 Supabase inspector adapter는
-  구현됐지만 recovery command·runtime/container 선택·scheduler·hosted 연결은 아직
-  없다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
+  부여하지 않는다. 별도의 default-disabled one-shot command만 exact spec SHA와
+  operator-reviewed state/state-reason/revision/count/next-date를 assessment와 실행 load에 다시
+  결합해 missing/ready 또는 exact `collection_failed_before_write` reason으로 별도
+  확인된 paused_retryable의 다음 날짜 하나를 진행한다. paused_unrecognized/
+  collecting/blocked_unknown/completed, assessment drift, stale revision은 provider read
+  전에 차단하고 자동 retry나 TTL takeover를 만들지 않는다. scheduler·hosted 연결과
+  unresolved-write recovery는 아직 없다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
   calendar head가 전진한 뒤 과거 occurrence를 새 timing 요청으로 backfill하는 경로는
   fail closed이며 별도 계약이 필요하다.
 - 별도 Worker-only calendar as-of reader는 한 provider의 `KR` 개장·휴장
@@ -581,8 +585,9 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E3` default-disabled 수동 calendar range-job CAS/fencing 계약과 in-memory reference adapter 로컬 구현
 - [x] `E3` service-role-only durable Supabase range-job snapshot·attempt ledger와 CAS verifier 로컬 구현
 - [x] `E3` 단일 inspector read 기반의 read-only range-job recovery assessment 로컬 구현
+- [x] `E3` exact assessment·operator confirmation 기반의 default-disabled one-shot range-job runtime 로컬 구현
 - [x] `E3` retained calendar date-range coverage gate와 canonical scope/data-lineage fingerprint 로컬 구현
-- [ ] `E3` durable range-job runtime 선택·manual recovery, scheduler/자동 range collection과 feature 연결, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
+- [ ] `E3` main runtime/scheduler·자동 range collection과 feature 연결, unknown-write recovery, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
 - [ ] `G1`, `G2` 독립 심사

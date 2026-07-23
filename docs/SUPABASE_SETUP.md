@@ -288,6 +288,8 @@ corrections, durable quarantine, fresh and populated upgrades, and concurrent
 serialization with the existing timing RPC. It also verifies the current
 fail-closed limitation that a new timing request cannot bind an older calendar
 occurrence after that calendar stream head advances.
+The Worker observation adapter additionally requires identity encoding, bounds
+one RPC response to 64 KiB, and rejects duplicate JSON keys before receipt use.
 The calendar as-of verifier additionally checks open and closed session reads,
 the 366-day/page/candidate bounds, immutable revision/occurrence lineage,
 15-minute snapshot/cursor/manifest continuity, `observed_at` cutoff semantics,
@@ -317,10 +319,20 @@ SHA to match, revalidates the returned snapshot, and then reports only a
 conservative state classification and review direction. It performs no RPC
 mutation and grants no retry, manual-execution, manual-recovery, scheduler, or
 Production Live authority. The service-role-only inspection RPC and Supabase
-inspector adapter are implemented, but no recovery command, runtime/container
-selection, scheduler, or hosted operation invokes the assessment service. The
-migration verifier therefore does not claim that recovery is operational
-against a hosted project.
+inspector adapter are selected only by the default-disabled, read-only
+`assess_kr_calendar_collection_job` command. It emits an execution precondition
+only for `missing`, `ready`, or a `paused_retryable` snapshot whose state reason
+is exactly `collection_failed_before_write`. The separate default-disabled
+`run_kr_calendar_collection_job_once` mutation command requires the reviewed
+spec SHA, classification, state reason, revision, confirmed count, and next
+date; it rechecks those values after loading the mutation snapshot. It can
+advance at most one date from `missing`/`ready`, or from recognized
+`paused_retryable` after a second explicit review confirmation. It refuses
+`paused_unrecognized`, `collecting`, `blocked_unknown`, `completed`, and any
+assessment drift before provider collection. This does not add a main
+runtime, scheduler, hosted operation, automatic retry, TTL takeover, or
+unresolved-write recovery. The migration verifier therefore does not claim
+that recovery is operational against a hosted project.
 
 For the calendar reader, `occurrence.observed_at <= as_of` is the semantic
 source cutoff. `received_at` remains lineage and cannot reconstruct which rows
