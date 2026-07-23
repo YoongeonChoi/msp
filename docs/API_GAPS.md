@@ -26,3 +26,13 @@ SHA-256은 [Provider Contract Artifacts](PROVIDER_CONTRACT_ARTIFACTS.md)에 고�
 | Naver | rate limits and error schema | verified-readonly-implemented | Official Naver Search News API docs confirm `GET https://openapi.naver.com/v1/search/news.json`, required `X-Naver-Client-Id` and `X-Naver-Client-Secret` headers, `query`/`display`/`start`/`sort` params, response item fields, documented daily call limit, and error envelopes with `errorCode`/`errorMessage`; worker maps auth, rate-limit, schema, timeout, unavailable, and unknown failures to fail-closed provider errors |
 | OpenAI | model/version choice for structured outputs | verified-structured-output-guarded | Official OpenAI docs confirm Responses API structured outputs through `text.format.type=json_schema` with `strict=true` and model support for current GPT-5/GPT-4.1/GPT-4o families; worker default is `gpt-5.5`, and any unverified `OPENAI_MODEL` fails closed with `openai_structured_output_model_not_verified` before an API call |
 | Supabase | Free plan database limit | verified-budget-enforced | Official Supabase plan docs confirm Free project database space is 500MB; MVP keeps an internal 500MB budget and warns at `PAPER_HEALTH_DB_WARNING_BYTES=450000000` before the Free cap |
+
+## 연구 데이터 전용 공백
+
+KR corporate-action coverage와 adjustment evidence의 공식 source는 아직 선택되지
+않았다. Positive corporate-action 또는 full-DQ 인증을 추가하기 전에 공식 source를
+review로 확정하고, event identity/type, ex/effective/record date, split 또는 adjustment
+factor, 명시적 empty-range coverage, correction과 finality를 포함하는 versioned contract와
+exact artifact를 보존해야 한다. Retrieval URI/time, exact bytes, SHA-256과 독립 검증 receipt가
+모두 필요하다. 이 연구 데이터 공백은 위 Live provider-gap 표의 행이나 통과 상태로
+해석하지 않는다.

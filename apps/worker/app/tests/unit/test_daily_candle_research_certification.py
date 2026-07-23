@@ -143,7 +143,11 @@ def test_negative_only_assessment_is_not_imported_by_runtime_code() -> None:
         if (
             "tests" in relative_path.parts
             or "tools" in relative_path.parts
-            or source_path.name == "daily_candle_research_certification.py"
+            or source_path.name
+            in {
+                "daily_candle_research_certification.py",
+                "daily_candle_corporate_action_dq_assessment.py",
+            }
         ):
             continue
         if _imports_negative_only_certification(
@@ -824,6 +828,7 @@ def _coverage_item_for_calendar(
 
 def _source_pair(
     *,
+    adjusted: bool = True,
     as_of: datetime = AS_OF,
     research_page_size: int = 100,
     calendar_page_size: int = 100,
@@ -845,6 +850,7 @@ def _source_pair(
     coverage_revision_received_offset: timedelta = timedelta(0),
     coverage_occurrence_received_offset: timedelta = timedelta(0),
     coverage_occurrence_origin: str = "rpc",
+    research_candidate_count: int = 1,
 ) -> tuple[
     ContiguousDailyCandleResearchSliceV1,
     RetainedKrCalendarDateRangeCoverageV1,
@@ -856,7 +862,7 @@ def _source_pair(
         symbol="005930",
         market="KR",
         interval="1d",
-        adjusted=True,
+        adjusted=adjusted,
         provider_event_at=regular_end_at,
         observed_at=research_calendar.observed_at - timedelta(minutes=5),
         currency="KRW",
@@ -904,7 +910,7 @@ def _source_pair(
         market="KR",
         symbol="005930",
         interval="1d",
-        adjusted=True,
+        adjusted=adjusted,
         start_session_date=SESSION_DATE,
         end_session_date=SESSION_DATE,
         as_of=as_of,
@@ -915,7 +921,7 @@ def _source_pair(
         snapshot_token=research_token,
         snapshot_issued_at=snapshot_issued_at,
         snapshot_manifest_sha256=research_raw_manifest,
-        candidate_count=1,
+        candidate_count=research_candidate_count,
         items=(research_item,),
     )
     research = build_contiguous_daily_candle_research_slice(

@@ -370,12 +370,38 @@ reviewed trusted external-evidence verifier and a new certified type or schema
 version. This assessment is not wired into runtime, scheduler, dataset registry,
 features, backtests, strategy, orders, Desktop, or Live authorization.
 
+`DailyCandleCorporateActionDqManifestV1` adds a versioned local DQ boundary over
+the same canonical research slice and retained calendar coverage. It retains
+detached canonical copies of both source objects and rebuilds them, including
+the cross-source research assessment, whenever the manifest is validated or
+serialized. Ten fixed checks cover only invariants already proved by those
+gates: canonical candle/calendar/timing payloads and hashes, OHLCV structure,
+timing availability, retained open-session and date-range coverage,
+revision/occurrence uniqueness, uniform provider-contract pins, and shared
+calendar lineage. The policy SHA, exact check IDs, source spec/data SHA values,
+cross-source lineage SHA, result SHA, and final manifest SHA are all bound.
+
+A local result may therefore state
+`local_retained_dq_checks_passed=true`. It must also state
+`corporate_action_status=blocked_missing_verified_point_in_time_evidence`.
+The Toss candle `adjusted` request flag, an empty event list, the Paper
+execution fixture, or a caller-supplied opaque SHA is not corporate-action
+evidence. V1 accepts no corporate-action evidence input and fixes coverage and
+adjustment verification, full DQ certification, dataset registration, feature
+or backtest use, strategy promotion, and order use to false.
+`require_corporate_action_dq_certification()` validates even a canonical
+manifest and then rejects it. A positive path requires the independently
+verified official-source contract described in `API_GAPS.md` and a new schema
+version. This local assessment is not wired into runtime, scheduler, dataset
+registry, features, backtests, strategy, orders, Desktop, or Live
+authorization.
+
 The read RPCs are granted only to the server-side `service_role`; they are not
 exposed to Desktop, `public`, authenticated clients, or Realtime. The port and
 adapter are not wired into collection, the runtime container, features, strategy,
 backtests, or any order path. These contracts do not prove collection
-completeness, provider authenticity or finality, corporate-action safety, DQ
-approval, or feature/research/order readiness. An unresolved quarantine is
+completeness, provider authenticity or finality, corporate-action safety,
+full-DQ certification, or feature/research/order readiness. An unresolved quarantine is
 evidence of an ambiguity, not an automated resolution or a promotion decision.
 Production Live remains not authorized.
 

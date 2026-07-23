@@ -214,6 +214,32 @@
 - runtime, dataset registry, feature, backtest, strategy, order 호출 경로는 0이어야 하며
   corporate-action·DQ와 certified replay는 각각 DI-7·FC-5 범위로 남긴다.
 
+### 1.6 Corporate-action 상태와 local DQ assessment
+
+- research slice와 retained calendar coverage를 원래 gate로 다시 구성하고 DI-5의
+  cross-source assessment도 재생성한 뒤에만 local DQ 결과를 만든다. 최종 객체는 두
+  canonical source 사본을 보존하고 serialize·validate·require 때 다시 재구성해야 한다.
+- 고정 policy SHA와 10개 check ID는 canonical candle/calendar/timing payload·hash,
+  OHLCV 구조, next-session timing, retained session/date coverage, revision·occurrence
+  uniqueness, provider-contract pin, shared calendar lineage만 다룬다. 가격 이상치,
+  거래정지, 상장·폐지, corporate-action event 또는 외부 completeness를 통과했다고
+  주장하지 않는다.
+- `adjusted=true|false` 어느 쪽도 corporate-action 증거가 아니다. opaque SHA, 빈 event
+  list, Paper fixture를 입력으로 받거나 `not_required`로 승격하지 않는다.
+- local retained check는 true일 수 있지만 corporate-action evidence는 `None`, coverage와
+  adjustment 검증, full DQ, dataset registration, feature/backtest, strategy/order 사용은
+  모두 false여야 한다. canonical blocked manifest도 require gate에서 거부한다.
+- source top-level·nested field, check ID/count, policy/result SHA, corporate-action field,
+  certification flag, rejection/limitation과 최종 digest를 함께 위조해도 거부해야 한다.
+  source data·lineage 변화는 result/final digest를 바꾸고, page size·snapshot token·issue
+  time만 바뀐 동일 논리 evidence는 digest를 바꾸지 않아야 한다.
+- raw candidate 수가 selected session 수보다 큰 정상 correction/re-observation을 DQ
+  실패 수로 오인하지 않는다. bool/int 혼동, naive clock, noncanonical digest와
+  secret-like exception text를 fail closed한다.
+- runtime, scheduler, dataset registry, feature, backtest, strategy, order 호출 경로에는
+  import가 0이어야 한다. positive corporate-action/full-DQ path는 별도 official-source
+  계약과 independently reviewed verifier 전까지 추가하지 않는다.
+
 ## 2. G1 실행·회계 불변식
 
 - 동일 semantic intent 100개 경쟁 요청에서 정확히 하나만 예약된다.
