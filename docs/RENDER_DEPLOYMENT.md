@@ -15,6 +15,12 @@ separate explicit user approval and dedicated credentials.
 - Production order create/cancel/modify, order endpoints, and order-capable
   credentials are prohibited.
 - Toss credentials, when separately approved, are worker-only and read-only.
+- `ALERT_WEBHOOK_URL` is HTTPS-only and must be deployed with the four
+  `ALERT_WEBHOOK_RECEIVER_ACK_{CURRENT,PREVIOUS}_{KEY_ID,KEY_B64}` entries as
+  `sync: false`; previous ID/key may both be empty outside a rotation window.
+- Never place `DEAD_MAN_ALERT_WEBHOOK_*` secrets on the main Worker. A future
+  independently approved dead-man service receives only its own namespace. Each
+  process rejects startup when the opposite receiver namespace is present.
 - Keep `numInstances: 1` until lease/fencing qualification passes. A warm standby
   is a later operational configuration, not horizontal dispatch.
 
@@ -39,16 +45,19 @@ separate explicit user approval and dedicated credentials.
    the exact output, final pgcrypto schema/owner/OID/ACL receipt,
    catalog/RLS/GRANT matrix, and Supabase advisor results. Do not retain a
    connection string, token, JWT, or secret.
-5. Build from the reviewed release SHA. The build writes release metadata before
+5. Provision the approved receiver URL and current 32-byte ACK key as Render
+   secrets. Confirm no literal URL/key is present in the blueprint, the receiver
+   accepts the current key ID, and any previous pair is either complete or absent.
+6. Build from the reviewed release SHA. The build writes release metadata before
    installing the hash-locked Python dependencies.
-6. Deploy manually; Git push alone must not deploy.
-7. Verify a fresh heartbeat reports the expected release SHA, execution
+7. Deploy manually; Git push alone must not deploy.
+8. Verify a fresh heartbeat reports the expected release SHA, execution
    environment, control epoch, lease holder/fencing token, and ledger checkpoint.
-8. Enrol two distinct TOTP AAL2 users, validate all role negative cases, and run
+9. Enrol two distinct TOTP AAL2 users, validate all role negative cases, and run
    maker/checker command/ACK/postcondition tests.
-9. Validate alert outbox delivery, recipient dedupe, critical human ACK,
+10. Validate authenticated alert outbox delivery, recipient dedupe, critical human ACK,
    immutable audit receipt, dead-man monitor, and the isolated restore drill.
-10. Resume Paper only through a new request approved by a different risk approver.
+11. Resume Paper only through a new request approved by a different risk approver.
 
 ## Fail-closed startup
 
@@ -57,6 +66,14 @@ production order endpoint, declares an order-capable credential, or combines
 `contract_test` with a non-local/network broker. Missing or malformed execution
 policy, contract hash, release SHA, Worker RPC response, or lease evidence also
 fails closed.
+
+Webhook configuration also fails before the loop when URL/current key pairing is
+incomplete, the URL is not valid HTTPS or contains an ambiguous/insecure component,
+either decoded key is not exactly 32 bytes, previous ID/key is incomplete, or current
+and previous identities/material are equal. Valid HTTPS input is normalized to its
+canonical request target before signing. `ENV=production` or `ENV=prod` additionally
+fails when the whole receiver configuration is absent. Do not bypass this guard by
+disabling receiver verification.
 
 Read-only provider outages may keep the Worker observable, but never downgrade
 the execution gate or produce a guessed value. Do not print credentials,

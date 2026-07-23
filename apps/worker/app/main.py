@@ -41,6 +41,8 @@ async def async_main(settings: Settings | None = None) -> None:
         )
         logger.exception("unexpected_error_live_orders_blocked")
         raise
+    finally:
+        await container.close()
 
 
 def main() -> None:
@@ -49,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.adapters.alerts.webhook_alert_notifier import WebhookAlertNotifier
+from app.tests.receiver_ack_fixture import (
+    TEST_ACK_NOW,
+    receiver_key_ring_fixture,
+    signed_receiver_response,
+)
 
 
 async def test_webhook_alert_notifier_posts_redacted_engine_event_payload() -> None:
@@ -10,12 +17,24 @@ async def test_webhook_alert_notifier_posts_redacted_engine_event_payload() -> N
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(204, request=request)
+        payload = json.loads(request.content)
+        return signed_receiver_response(
+            request,
+            context="legacy_alert",
+            binding={
+                "level": payload["level"],
+                "component": payload["component"],
+                "message": payload["message"],
+            },
+            status_code=204,
+        )
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     notifier = WebhookAlertNotifier(
         "https://alerts.example.test/live",
+        key_ring=receiver_key_ring_fixture(),
         client=http_client,
+        clock=lambda: TEST_ACK_NOW,
     )
 
     result = await notifier.notify_engine_event(
@@ -24,8 +43,8 @@ async def test_webhook_alert_notifier_posts_redacted_engine_event_payload() -> N
         "live_system_order_count_sync_failed",
         {
             "reason": "RuntimeError",
-            "SUPABASE_SECRET_KEY": "abcdef123456",
-            "nested": {"authorization": "Bearer abcdef123456"},
+            "SUPABASE_SECRET_KEY": "not-a-" + "secret-fixture",
+            "nested": {"authorization": "Bearer not-a-secret-fixture"},
             "attempts": [{"refresh_token": "nested-refresh-token"}],
         },
     )
@@ -36,7 +55,7 @@ async def test_webhook_alert_notifier_posts_redacted_engine_event_payload() -> N
     payload = requests[0].content.decode()
     assert "live_system_order_count_sync_failed" in payload
     assert "RuntimeError" in payload
-    assert "abcdef123456" not in payload
+    assert "not-a-secret-fixture" not in payload
     assert "abcdef" not in payload
     assert "nested-refresh-token" not in payload
     assert "<redacted>" in payload
@@ -50,7 +69,9 @@ async def test_webhook_alert_notifier_reports_delivery_failure_without_secret_le
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     notifier = WebhookAlertNotifier(
         "https://alerts.example.test/live",
+        key_ring=receiver_key_ring_fixture(),
         client=http_client,
+        clock=lambda: TEST_ACK_NOW,
     )
 
     result = await notifier.notify_engine_event(
@@ -61,5 +82,29 @@ async def test_webhook_alert_notifier_reports_delivery_failure_without_secret_le
     )
 
     assert result.delivered is False
-    assert result.error == "HTTPStatusError"
+    assert result.error == "receiver_acknowledgement_failed"
+    await http_client.aclose()
+
+
+async def test_webhook_alert_notifier_rejects_unsigned_2xx() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, request=request)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    notifier = WebhookAlertNotifier(
+        "https://alerts.example.test/live",
+        key_ring=receiver_key_ring_fixture(),
+        client=http_client,
+        clock=lambda: TEST_ACK_NOW,
+    )
+
+    result = await notifier.notify_engine_event(
+        "critical",
+        "live_account",
+        "live_system_order_count_sync_failed",
+        {},
+    )
+
+    assert result.delivered is False
+    assert result.error == "receiver_acknowledgement_failed"
     await http_client.aclose()

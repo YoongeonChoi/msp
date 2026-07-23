@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -10,6 +11,11 @@ from uuid import UUID
 import httpx
 
 from app.domain.operations.models import OperationsInvariantError
+from app.infrastructure.authenticated_webhook import (
+    AuthenticatedWebhookError,
+    AuthenticatedWebhookTransport,
+    ReceiverAckKeyRing,
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z0-9_]{3,120}$")
@@ -22,14 +28,18 @@ class DeadManWebhookDestination:
         self,
         webhook_url: str,
         *,
+        key_ring: ReceiverAckKeyRing,
         client: httpx.AsyncClient | None = None,
         timeout_sec: float = 5.0,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not webhook_url.strip():
-            raise OperationsInvariantError("dead_man_webhook_url_is_required")
-        self.webhook_url = webhook_url
-        self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=timeout_sec)
+        self._transport = AuthenticatedWebhookTransport(
+            webhook_url,
+            key_ring=key_ring,
+            client=client,
+            timeout_sec=timeout_sec,
+            clock=clock,
+        )
 
     async def deliver_dead_man_alert(
         self,
@@ -47,29 +57,43 @@ class DeadManWebhookDestination:
             raise OperationsInvariantError("dead_man_alert_reasons_are_invalid")
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise OperationsInvariantError("dead_man_alert_time_must_be_timezone_aware")
-        dedupe_key = _dedupe_key(account_id, episode_id, event, reason_codes)
-        response = await self.client.post(
-            self.webhook_url,
-            headers={"Idempotency-Key": dedupe_key},
-            json={
-                "schema_version": 2,
-                "dedupe_key": dedupe_key,
-                "episode_id": episode_id,
-                "event_type": "dead_man_monitor_" + event,
-                "aggregate_type": "trading_account",
-                "aggregate_id": account_id,
-                "payload": {
-                    "observed_at": observed_at.isoformat(),
-                    "reason_codes": list(reason_codes),
-                    "severity": "critical" if event == "unhealthy" else "warning",
-                },
-            },
+        canonical_reason_codes = tuple(sorted(reason_codes))
+        dedupe_key = _dedupe_key(
+            account_id,
+            episode_id,
+            event,
+            canonical_reason_codes,
+            observed_at,
         )
-        response.raise_for_status()
+        try:
+            response = await self._transport.post_json(
+                context="dead_man",
+                headers={"Idempotency-Key": dedupe_key},
+                payload={
+                    "schema_version": 2,
+                    "dedupe_key": dedupe_key,
+                    "episode_id": episode_id,
+                    "event_type": "dead_man_monitor_" + event,
+                    "aggregate_type": "trading_account",
+                    "aggregate_id": account_id,
+                    "payload": {
+                        "observed_at": observed_at.isoformat(),
+                        "reason_codes": list(canonical_reason_codes),
+                        "severity": ("critical" if event == "unhealthy" else "warning"),
+                    },
+                },
+                binding={
+                    "episode_id": episode_id,
+                    "event": event,
+                    "dedupe_key": dedupe_key,
+                },
+            )
+        except AuthenticatedWebhookError:
+            raise OperationsInvariantError("dead_man_receiver_authentication_failed") from None
         try:
             receipt = response.json()
-        except ValueError as exc:
-            raise OperationsInvariantError("dead_man_alert_receipt_is_missing") from exc
+        except AuthenticatedWebhookError:
+            raise OperationsInvariantError("dead_man_alert_receipt_is_missing") from None
         if not isinstance(receipt, dict) or set(receipt) != {
             "immutable_receipt_id",
             "accepted_dedupe_key",
@@ -101,8 +125,7 @@ class DeadManWebhookDestination:
             raise OperationsInvariantError("dead_man_alert_receipt_hash_mismatch")
 
     async def close(self) -> None:
-        if self._owns_client:
-            await self.client.aclose()
+        await self._transport.close()
 
 
 def _dedupe_key(
@@ -110,12 +133,14 @@ def _dedupe_key(
     episode_id: str,
     event: Literal["unhealthy", "recovered"],
     reason_codes: tuple[str, ...],
+    observed_at: datetime,
 ) -> str:
     material = json.dumps(
         {
             "account_id": account_id,
             "episode_id": episode_id,
             "event": event,
+            "observed_at": observed_at.isoformat(),
             "reason_codes": sorted(reason_codes),
             "schema_version": 2,
         },

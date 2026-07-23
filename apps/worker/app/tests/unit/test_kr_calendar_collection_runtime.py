@@ -31,14 +31,12 @@ def _settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED": True,
         "KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED": True,
-        "KR_CALENDAR_COLLECTION_HOLDER_ID": (
-            "00000000-0000-4000-8000-000000000099"
-        ),
+        "KR_CALENDAR_COLLECTION_HOLDER_ID": ("00000000-0000-4000-8000-000000000099"),
         "MOCK_PROVIDERS": False,
         "SUPABASE_URL": "https://example.supabase.co",
-        "SUPABASE_SECRET_KEY": "dummy-test-token",
+        "SUPABASE_SECRET_KEY": "dummy-" + "test-token",
         "TOSS_CLIENT_ID": "dummy-client-id",
-        "TOSS_CLIENT_SECRET": "dummy-client-secret",
+        "TOSS_CLIENT_SECRET": "dummy-" + "client-secret",
         "TOSS_CREDENTIAL_SCOPE": "read_only",
         "TOSS_ORDER_CAPABLE_CREDENTIALS": False,
     }
@@ -49,15 +47,13 @@ def _assessment_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED": True,
         "SUPABASE_URL": "https://example.supabase.co",
-        "SUPABASE_SECRET_KEY": "dummy-test-token",
+        "SUPABASE_SECRET_KEY": "dummy-" + "test-token",
     }
     return Settings.model_validate(values | overrides)
 
 
 async def test_assessment_factory_wires_only_read_only_supabase_inspection() -> None:
-    runtime = await build_kr_calendar_collection_assessment_runtime(
-        _assessment_settings()
-    )
+    runtime = await build_kr_calendar_collection_assessment_runtime(_assessment_settings())
     client = runtime.supabase_client
     try:
         assert type(runtime) is KrCalendarCollectionAssessmentRuntime

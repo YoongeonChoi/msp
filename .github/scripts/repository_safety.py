@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 PROTECTED_SECRET_NAMES = (
     "SUPABASE_SECRET_KEY",
@@ -15,9 +16,47 @@ PROTECTED_SECRET_NAMES = (
     "KRX_API_KEY",
     "OPENDART_API_KEY",
     "ALERT_WEBHOOK_URL",
+    "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+    "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+    "DEAD_MAN_ALERT_WEBHOOK_URL",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
     "RENDER_DEPLOY_HOOK_URL",
     "SUPABASE_LIVE_REQUESTER_JWT",
     "SUPABASE_LIVE_REVIEWER_JWT",
+)
+
+RENDER_RECEIVER_SYNC_FALSE_NAMES = (
+    "ALERT_WEBHOOK_URL",
+    "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+    "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+    "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+    "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+)
+
+RENDER_FORBIDDEN_DEAD_MAN_NAMES = (
+    "DEAD_MAN_ALERT_WEBHOOK_URL",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+    "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+)
+
+_RENDER_CANONICAL_SERVICE_FIELDS = frozenset(
+    {
+        "autoDeployTrigger",
+        "branch",
+        "buildCommand",
+        "envVars",
+        "maxShutdownDelaySeconds",
+        "name",
+        "numInstances",
+        "plan",
+        "region",
+        "rootDir",
+        "runtime",
+        "startCommand",
+    }
 )
 
 _DESTRUCTIVE_APPROVAL_PATTERN = re.compile(
@@ -107,6 +146,7 @@ APPROVED_GITLEAKS_FINGERPRINTS = frozenset(
 )
 
 RENDER_NO_LIVE_ENV = {
+    "ENV": "production",
     "BOT_DEFAULT_MODE": "paper",
     "TOSS_CREDENTIAL_SCOPE": "read_only",
     "TOSS_ORDER_CAPABLE_CREDENTIALS": "false",
@@ -176,9 +216,7 @@ WORKER_API_ALLOWLIST = frozenset(
 )
 
 
-def _qualified_objects(
-    pattern: re.Pattern[str], sql: str
-) -> set[tuple[str, str]]:
+def _qualified_objects(pattern: re.Pattern[str], sql: str) -> set[tuple[str, str]]:
     return {
         (
             match.group("schema").strip('"').casefold(),
@@ -213,8 +251,7 @@ def _check_migration_checksums(repo_root: Path, paths: list[Path]) -> list[str]:
     actual_names = {path.name for path in paths}
     expected_names = set(expected)
     findings.extend(
-        f"migration checksum missing: {name}"
-        for name in sorted(actual_names - expected_names)
+        f"migration checksum missing: {name}" for name in sorted(actual_names - expected_names)
     )
     findings.extend(
         f"migration checksum references missing file: {name}"
@@ -269,9 +306,7 @@ def check_migration_safety(repo_root: Path) -> list[str]:
     )
     findings.extend(
         f"exposed table disables RLS: {schema}.{table}"
-        for schema, table in sorted(
-            _qualified_objects(_RLS_DISABLE_PATTERN, normalized)
-        )
+        for schema, table in sorted(_qualified_objects(_RLS_DISABLE_PATTERN, normalized))
     )
 
     for match in _API_VIEW_PATTERN.finditer(normalized):
@@ -283,16 +318,15 @@ def check_migration_safety(repo_root: Path) -> list[str]:
         schema = match.group("schema").strip('"').casefold()
         name = match.group("name").casefold()
         if re.search(r"\bsecurity\s+invoker\b", header, re.IGNORECASE) is None:
-            findings.append(
-                f"exposed function missing explicit SECURITY INVOKER: {schema}.{name}"
-            )
+            findings.append(f"exposed function missing explicit SECURITY INVOKER: {schema}.{name}")
         if re.search(r"\bsecurity\s+definer\b", header, re.IGNORECASE):
             findings.append(f"exposed function uses SECURITY DEFINER: {schema}.{name}")
 
     for match, header in _function_headers(_PRIVATE_FUNCTION_PATTERN, normalized):
-        if re.search(r"\bsecurity\s+definer\b", header, re.IGNORECASE) and re.search(
-            r"\bset\s+search_path\s*=\s*''", header, re.IGNORECASE
-        ) is None:
+        if (
+            re.search(r"\bsecurity\s+definer\b", header, re.IGNORECASE)
+            and re.search(r"\bset\s+search_path\s*=\s*''", header, re.IGNORECASE) is None
+        ):
             findings.append(
                 "private SECURITY DEFINER missing empty search_path: "
                 f"private.{match.group('name').casefold()}"
@@ -320,9 +354,7 @@ def _contains_destructive_migration_sql(sql: str) -> bool:
     return any(
         token == "truncate"
         or (
-            token == "drop"
-            and index + 1 < len(tokens)
-            and tokens[index + 1] in {"table", "column"}
+            token == "drop" and index + 1 < len(tokens) and tokens[index + 1] in {"table", "column"}
         )
         for index, token in enumerate(tokens)
     )
@@ -434,15 +466,11 @@ def _block_comment_end(sql: str, start: int) -> int:
     return index
 
 
-def _function_headers(
-    pattern: re.Pattern[str], sql: str
-) -> list[tuple[re.Match[str], str]]:
+def _function_headers(pattern: re.Pattern[str], sql: str) -> list[tuple[re.Match[str], str]]:
     """Return declarations up to the dollar-quoted function body."""
 
     headers: list[tuple[re.Match[str], str]] = []
-    next_function_pattern = re.compile(
-        r"\bcreate\s+(?:or\s+replace\s+)?function\b", re.IGNORECASE
-    )
+    next_function_pattern = re.compile(r"\bcreate\s+(?:or\s+replace\s+)?function\b", re.IGNORECASE)
     for match in pattern.finditer(sql):
         body_start = _FUNCTION_BODY_START_PATTERN.search(sql, match.end())
         next_function = next_function_pattern.search(sql, match.end())
@@ -539,7 +567,7 @@ def check_workflow_safety(repo_root: Path) -> list[str]:
     paths = sorted({*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")})
     findings: list[str] = []
     protected_env_pattern = re.compile(
-        r"^\s*(?:" + "|".join(map(re.escape, PROTECTED_SECRET_NAMES)) + r")\s*:",
+        r"^\s*['\"]?(?:" + "|".join(map(re.escape, PROTECTED_SECRET_NAMES)) + r")[\'\"]?\s*:",
         re.IGNORECASE,
     )
     protected_secret_reference_pattern = re.compile(
@@ -581,18 +609,50 @@ def check_workflow_safety(repo_root: Path) -> list[str]:
         findings.append("render.yaml: missing")
     else:
         render_text = render_path.read_text(encoding="utf-8")
-        if not re.search(
-            r"^\s*autoDeployTrigger\s*:\s*[\"']?off[\"']?\s*$",
-            render_text,
-            re.IGNORECASE | re.MULTILINE,
+        render_services, unsupported_service_syntax = _render_services(render_text)
+        worker_services = [
+            service for service in render_services if service.name == "kr-trading-worker"
+        ]
+        if (
+            unsupported_service_syntax
+            or len(worker_services) != 1
+            or worker_services[0].service_type != "worker"
         ):
-            findings.append("render.yaml: autoDeployTrigger must remain off")
-        render_env = _render_environment_values(render_text)
+            findings.append(
+                "render.yaml: exactly one canonical kr-trading-worker service is required"
+            )
+        worker_block = worker_services[0].block if len(worker_services) == 1 else ""
+        if not _render_auto_deploy_is_off(worker_block):
+            findings.append("render.yaml: worker autoDeployTrigger must remain off")
+        if not _render_worker_commands_are_quoted(worker_block):
+            findings.append("render.yaml: worker build and start commands must use quoted scalars")
+        render_items, unsupported_environment_syntax = _render_environment_items(worker_block)
+        if unsupported_environment_syntax:
+            findings.append(
+                "render.yaml: envVars must be one canonical section of key/value-or-sync items"
+            )
+        render_env_names = [item.name for item in render_items]
+        for key in sorted(
+            name for name in set(render_env_names) if render_env_names.count(name) > 1
+        ):
+            findings.append(f"render.yaml: duplicate env key {key}")
+        render_env = {item.name: item.value for item in render_items if item.field == "value"}
         for key, expected in RENDER_NO_LIVE_ENV.items():
-            if render_env.get(key, "").casefold() != expected:
-                findings.append(
-                    f"render.yaml: {key} must remain {expected} until hosted approval"
-                )
+            if render_env.get(key, "") != expected:
+                findings.append(f"render.yaml: {key} must remain {expected} until hosted approval")
+        receiver_items = {item.name: item for item in render_items}
+        for key in RENDER_RECEIVER_SYNC_FALSE_NAMES:
+            item = receiver_items.get(key)
+            if item is None:
+                findings.append(f"render.yaml: {key} must be declared on worker")
+                continue
+            if item.field == "value":
+                findings.append(f"render.yaml: {key} must not contain a literal value")
+            if item.field != "sync" or item.value != "false":
+                findings.append(f"render.yaml: {key} must use sync: false")
+        for key in RENDER_FORBIDDEN_DEAD_MAN_NAMES:
+            if key in receiver_items:
+                findings.append(f"render.yaml: {key} must not be available to main worker")
     findings.extend(_check_gitleaks_ignore(repo_root))
     return findings
 
@@ -620,28 +680,330 @@ def _check_gitleaks_ignore(repo_root: Path) -> list[str]:
     return findings
 
 
-def _render_environment_values(render_text: str) -> dict[str, str]:
-    """Read literal Render env values without treating YAML as executable input."""
+class _RenderEnvironmentItem(NamedTuple):
+    name: str
+    field: str
+    value: str
+    block: str
 
-    values: dict[str, str] = {}
-    matches = list(
-        re.finditer(
-            r"^\s*-\s+key:\s*([A-Z][A-Z0-9_]*)\s*$",
-            render_text,
-            re.MULTILINE,
-        )
+
+class _RenderService(NamedTuple):
+    service_type: str
+    name: str
+    block: str
+
+
+def _render_services(render_text: str) -> tuple[list[_RenderService], bool]:
+    """Parse the narrow Render services form whose safety meaning is unambiguous."""
+
+    lines = render_text.splitlines()
+    root_property_pattern = re.compile(
+        r"^(?P<quote>['\"]?)(?P<name>[A-Za-z][A-Za-z0-9]*)(?P=quote)[ \t]*:"
     )
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(render_text)
-        block = render_text[match.end() : end]
-        value_match = re.search(
-            r"^\s+value:\s*['\"]?([^'\"#\r\n]+?)['\"]?\s*$",
-            block,
-            re.MULTILINE,
+    root_lines = [
+        line
+        for line in lines
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and len(line) == len(line.lstrip(" \t"))
+    ]
+    root_matches = [root_property_pattern.match(line) for line in root_lines]
+    if (
+        len(root_lines) != 1
+        or any(match is None for match in root_matches)
+        or [match.group("name") for match in root_matches if match is not None] != ["services"]
+    ):
+        return [], True
+    heading_candidate_pattern = re.compile(
+        r"(?:^|[{,])[ \t]*(?:services|\"services\"|'services')[ \t]*:"
+    )
+    heading_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if not line.lstrip().startswith("#") and heading_candidate_pattern.search(line) is not None
+    ]
+    if len(heading_indexes) != 1:
+        return [], True
+    heading_index = heading_indexes[0]
+    if (
+        re.fullmatch(
+            r"(?:services|\"services\"|'services')[ \t]*:[ \t]*(?:#[^\r\n]*)?",
+            lines[heading_index],
         )
-        if value_match is not None:
-            values[match.group(1)] = value_match.group(1).strip()
-    return values
+        is None
+    ):
+        return [], True
+
+    section_end = len(lines)
+    for index in range(heading_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.lstrip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) == len(stripped):
+            section_end = index
+            break
+
+    service_starts: list[int] = []
+    for index in range(heading_index + 1, section_end):
+        line = lines[index]
+        stripped = line.lstrip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indentation = len(line) - len(stripped)
+        if indentation == 2:
+            if not stripped.startswith("-"):
+                return [], True
+            service_starts.append(index)
+        elif indentation < 2 or not service_starts:
+            return [], True
+    if not service_starts:
+        return [], True
+
+    type_pattern = re.compile(
+        r"^ {2}-[ \t]+(?:type|\"type\"|'type')[ \t]*:[ \t]*"
+        r"(?P<quote>['\"]?)(?P<value>[A-Za-z][A-Za-z0-9_-]{0,63})(?P=quote)"
+        r"[ \t]*(?:#[^\r\n]*)?$"
+    )
+    direct_property_pattern = re.compile(
+        r"^ {4}(?P<quote>['\"]?)(?P<name>[A-Za-z][A-Za-z0-9]*)(?P=quote)"
+        r"[ \t]*:"
+    )
+    name_pattern = re.compile(
+        r"^ {4}(?:name|\"name\"|'name')[ \t]*:[ \t]*"
+        r"(?P<quote>['\"]?)(?P<value>[A-Za-z0-9][A-Za-z0-9._-]{0,127})(?P=quote)"
+        r"[ \t]*(?:#[^\r\n]*)?$"
+    )
+    services: list[_RenderService] = []
+    for position, start in enumerate(service_starts):
+        end = service_starts[position + 1] if position + 1 < len(service_starts) else section_end
+        type_match = type_pattern.fullmatch(lines[start])
+        if type_match is None:
+            return services, True
+        block_lines = lines[start:end]
+        direct_lines = [
+            line
+            for line in block_lines[1:]
+            if line.strip()
+            and not line.lstrip().startswith("#")
+            and len(line) - len(line.lstrip(" \t")) == 4
+        ]
+        direct_matches = [direct_property_pattern.match(line) for line in direct_lines]
+        if any(match is None for match in direct_matches):
+            return services, True
+        direct_names = [match.group("name") for match in direct_matches if match is not None]
+        if (
+            len(direct_names) != len(set(direct_names))
+            or not set(direct_names) <= _RENDER_CANONICAL_SERVICE_FIELDS
+            or direct_names.count("name") != 1
+        ):
+            return services, True
+        if any(
+            not _render_service_property_is_canonical(name, line)
+            for name, line in zip(direct_names, direct_lines, strict=True)
+        ):
+            return services, True
+        name_line = direct_lines[direct_names.index("name")]
+        name_match = name_pattern.fullmatch(name_line)
+        if name_match is None:
+            return services, True
+        services.append(
+            _RenderService(
+                service_type=type_match.group("value"),
+                name=name_match.group("value"),
+                block="\n".join(block_lines),
+            )
+        )
+    return services, False
+
+
+def _render_service_property_is_canonical(name: str, line: str) -> bool:
+    field = rf"(?:{re.escape(name)}|\"{re.escape(name)}\"|'{re.escape(name)}')"
+    comment = r"[ \t]*(?:#[^\r\n]*)?$"
+    if name == "envVars":
+        return re.fullmatch(rf"^ {{4}}{field}[ \t]*:{comment}", line) is not None
+    if name in {"buildCommand", "startCommand"}:
+        scalar = r"(?P<quote>['\"])(?P<value>[^'\"\r\n]+)(?P=quote)"
+    elif name == "autoDeployTrigger":
+        scalar = r"(?P<quote>['\"]?)(?P<value>on|off)(?P=quote)"
+    elif name in {"maxShutdownDelaySeconds", "numInstances"}:
+        scalar = r"(?:0|[1-9][0-9]{0,9})"
+    else:
+        scalar = (
+            r"(?P<quote>['\"]?)"
+            r"(?P<value>[A-Za-z0-9][A-Za-z0-9._/-]{0,255})"
+            r"(?P=quote)"
+        )
+    return (
+        re.fullmatch(
+            rf"^ {{4}}{field}[ \t]*:[ \t]*{scalar}{comment}",
+            line,
+        )
+        is not None
+    )
+
+
+def _render_environment_items(
+    render_text: str,
+) -> tuple[list[_RenderEnvironmentItem], bool]:
+    """Parse the narrow Render envVars form whose safety meaning is unambiguous."""
+
+    lines = render_text.splitlines()
+    heading_candidate_pattern = re.compile(
+        r"(?:^|[{,])[ \t]*(?:envVars|\"envVars\"|'envVars')[ \t]*:"
+    )
+    heading_pattern = re.compile(
+        r"^ {4}(?:envVars|\"envVars\"|'envVars')[ \t]*:[ \t]*"
+        r"(?:#[^\r\n]*)?$"
+    )
+    heading_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if not line.lstrip().startswith("#") and heading_candidate_pattern.search(line) is not None
+    ]
+    if len(heading_indexes) != 1:
+        return [], True
+    heading_index = heading_indexes[0]
+    if heading_pattern.fullmatch(lines[heading_index]) is None:
+        return [], True
+    if any(
+        re.match(r"^ {4}(?:<<|\"<<\"|'<<')[ \t]*:", line) is not None
+        for line in lines
+        if not line.lstrip().startswith("#")
+    ):
+        return [], True
+
+    section_end = len(lines)
+    for index in range(heading_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.lstrip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(stripped) <= 4:
+            section_end = index
+            break
+
+    key_pattern = re.compile(
+        r"^ {6}-[ \t]+(?:key|\"key\"|'key')[ \t]*:[ \t]*"
+        r"(?P<quote>['\"]?)(?P<name>[A-Z][A-Z0-9_]*)(?P=quote)"
+        r"[ \t]*(?:#[^\r\n]*)?$"
+    )
+    property_pattern = re.compile(
+        r"^ {8}(?P<field>value|sync)[ \t]*:[ \t]*"
+        r"(?P<scalar>\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+        r"[A-Za-z0-9_./+=:@?%&$~!#-]+)"
+        r"[ \t]*(?:#[^\r\n]*)?$"
+    )
+    items: list[_RenderEnvironmentItem] = []
+    index = heading_index + 1
+    while index < section_end:
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            index += 1
+            continue
+        key_match = key_pattern.fullmatch(line)
+        if key_match is None:
+            return items, True
+        item_start = index
+        index += 1
+        properties: list[re.Match[str]] = []
+        while index < section_end:
+            candidate = lines[index]
+            if not candidate.strip() or candidate.lstrip().startswith("#"):
+                index += 1
+                continue
+            if key_pattern.fullmatch(candidate) is not None:
+                break
+            property_match = property_pattern.fullmatch(candidate)
+            if property_match is None:
+                return items, True
+            properties.append(property_match)
+            index += 1
+        if len(properties) != 1:
+            return items, True
+        field = properties[0].group("field")
+        scalar = properties[0].group("scalar")
+        if field == "sync" and scalar not in {"true", "false"}:
+            return items, True
+        value = scalar[1:-1] if scalar[:1] in {"'", '"'} else scalar
+        items.append(
+            _RenderEnvironmentItem(
+                name=key_match.group("name"),
+                field=field,
+                value=value,
+                block="\n".join(lines[item_start + 1 : index]),
+            )
+        )
+    if not items:
+        return [], True
+    return items, False
+
+
+def _render_environment_blocks(render_text: str) -> dict[str, str]:
+    items, _unsupported = _render_environment_items(render_text)
+    return {item.name: item.block for item in items}
+
+
+def _render_auto_deploy_is_off(worker_block: str) -> bool:
+    candidates = [
+        line
+        for line in worker_block.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.search(
+            r"(?:^|[{,])[ \t]*(?:autoDeployTrigger|\"autoDeployTrigger\"|"
+            r"'autoDeployTrigger')[ \t]*:",
+            line,
+        )
+        is not None
+    ]
+    if len(candidates) != 1:
+        return False
+    match = re.fullmatch(
+        r"^ {4}(?:autoDeployTrigger|\"autoDeployTrigger\"|'autoDeployTrigger')"
+        r"[ \t]*:[ \t]*(?P<quote>['\"]?)(?P<value>on|off)(?P=quote)"
+        r"[ \t]*(?:#[^\r\n]*)?$",
+        candidates[0],
+    )
+    return match is not None and match.group("value") == "off"
+
+
+def _render_worker_commands_are_quoted(worker_block: str) -> bool:
+    for field in ("buildCommand", "startCommand"):
+        candidates = [
+            line
+            for line in worker_block.splitlines()
+            if not line.lstrip().startswith("#")
+            and re.match(
+                rf"^ {{4}}(?:{field}|\"{field}\"|'{field}')[ \t]*:",
+                line,
+            )
+            is not None
+        ]
+        if len(candidates) != 1:
+            return False
+        if (
+            re.fullmatch(
+                rf"^ {{4}}(?:{field}|\"{field}\"|'{field}')[ \t]*:[ \t]*"
+                r"(?P<quote>['\"])(?P<value>[^'\"\r\n]+)(?P=quote)"
+                r"[ \t]*(?:#[^\r\n]*)?$",
+                candidates[0],
+            )
+            is None
+        ):
+            return False
+    return True
+
+
+def _render_service_blocks(render_text: str, service_name: str) -> list[str]:
+    services, unsupported = _render_services(render_text)
+    if unsupported:
+        return []
+    return [service.block for service in services if service.name == service_name]
+
+
+def _render_service_block(render_text: str, service_name: str) -> str | None:
+    blocks = _render_service_blocks(render_text, service_name)
+    return blocks[0] if len(blocks) == 1 else None
 
 
 def _parser() -> argparse.ArgumentParser:

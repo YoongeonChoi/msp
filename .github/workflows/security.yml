@@ -115,24 +115,7 @@ jobs:
           fi
       - name: Scan tracked files for common secret patterns
         shell: bash
-        run: |
-          set -euo pipefail
-          common_secret_files="$(
-            git grep -I -l -E \
-              '(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH |PRIVATE )?PRIVATE KEY-----)' \
-              -- ':!package-lock.json' ':!**/package-lock.json' ':!docs/API_CONNECTIONS.md' || true
-          )"
-          secret_assignment_files="$(
-            git grep -I -l -E \
-              "(SUPABASE_SECRET_KEY|TOSS_CLIENT_SECRET|OPENAI_API_KEY|NAVER_CLIENT_SECRET|KRX_API_KEY|OPENDART_API_KEY|ALERT_WEBHOOK_URL|RENDER_DEPLOY_HOOK_URL|SUPABASE_LIVE_REQUESTER_JWT|SUPABASE_LIVE_REVIEWER_JWT)[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9_./+=:-]{16,}" \
-              -- ':!**/.env.example' ':!docs/**' || true
-          )"
-          findings="$(printf '%s\n%s\n' "$common_secret_files" "$secret_assignment_files" | awk 'NF' | sort -u)"
-          if [[ -n "$findings" ]]; then
-            echo "::error::Potential secret material found in tracked files. Only file paths are printed."
-            printf '%s\n' "$findings"
-            exit 1
-          fi
+        run: bash .github/scripts/secret_assignment_scan.sh
 
   dependency-evidence:
     name: Lock-derived dependency evidence

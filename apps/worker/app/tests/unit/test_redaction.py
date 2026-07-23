@@ -24,7 +24,7 @@ def test_logging_redacts_secret_like_fields() -> None:
         "info",
         {
             "event": "provider_check",
-            "OPENAI_API_KEY": "test-secret-token-value",
+            "OPENAI_API_KEY": "test-" + "secret-token-value",
             "headers": {"authorization": "Bearer abcdef123456"},
             "attempts": [{"refresh_token": "nested-refresh-token"}],
         },

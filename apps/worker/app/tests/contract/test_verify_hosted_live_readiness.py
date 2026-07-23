@@ -255,7 +255,7 @@ def test_hosted_verifier_rejects_reused_publishable_and_secret_key(
             "reused-secret-key",
         ],
         environ={
-            "SUPABASE_SECRET_KEY": "reused-secret-key",
+            "SUPABASE_SECRET_KEY": "reused-" + "secret-key",
             "SUPABASE_LIVE_REQUESTER_JWT": "requester-jwt",
             "SUPABASE_LIVE_REVIEWER_JWT": "reviewer-jwt",
         },

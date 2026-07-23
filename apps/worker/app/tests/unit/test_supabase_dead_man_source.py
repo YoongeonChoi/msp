@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -64,6 +65,10 @@ def _settings() -> DeadManSettings:
         SUPABASE_SECRET_KEY=SecretStr("test-secret"),
         DEAD_MAN_ACCOUNT_ID="paper-primary",
         DEAD_MAN_ALERT_WEBHOOK_URL=SecretStr("https://alerts.example.invalid"),
+        DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID="test-current",
+        DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=SecretStr(
+            base64.b64encode(b"d" * 32).decode("ascii")
+        ),
     )
 
 

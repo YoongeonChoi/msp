@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from datetime import datetime
 from uuid import uuid4
 
@@ -23,6 +22,10 @@ from app.config import load_settings
 from app.domain.common.errors import ProviderTimeoutError
 from app.domain.common.time import now_utc
 from app.domain.trading.entities import AccountState, BotSettings, Order
+from app.tools.receiver_ack_drill_fixture import (
+    drill_receiver_key_ring,
+    signed_legacy_alert_handler,
+)
 
 
 class DrillTimeoutBroker:
@@ -62,17 +65,22 @@ async def main() -> None:
     requests: list[httpx.Request] = []
     if settings.alert_webhook_url is None:
         http_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_mock_alert_handler(requests))
+            transport=httpx.MockTransport(signed_legacy_alert_handler(requests))
         )
         webhook_notifier = WebhookAlertNotifier(
             "https://alerts.example.test/live-drill",
+            key_ring=drill_receiver_key_ring(),
             client=http_client,
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
     else:
+        key_ring = settings.alert_webhook_receiver_key_ring()
+        if key_ring is None:
+            raise RuntimeError("live_alert_drill_receiver_key_is_required")
         http_client = None
         webhook_notifier = WebhookAlertNotifier(
             settings.alert_webhook_url.get_secret_value(),
+            key_ring=key_ring,
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
     notifier = DrillAlertNotifier(webhook_notifier)
@@ -129,7 +137,11 @@ async def main() -> None:
             },
         )
     finally:
-        await notifier.aclose()
+        try:
+            await notifier.aclose()
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
     delivered = sum(1 for item in notifier.deliveries if item.delivered)
     max_latency_ms = max((item.latency_ms for item in notifier.deliveries), default=0)
     if max_latency_ms > settings.alert_drill_max_latency_ms:
@@ -163,16 +175,6 @@ class DrillAlertNotifier:
 
     async def aclose(self) -> None:
         await self.notifier.aclose()
-
-
-def _mock_alert_handler(
-    requests: list[httpx.Request],
-) -> Callable[[httpx.Request], httpx.Response]:
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(204, request=request)
-
-    return handler
 
 
 if __name__ == "__main__":

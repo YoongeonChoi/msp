@@ -72,9 +72,31 @@ py -m app.tools.run_execution_v2_operations
 py -m app.tools.run_execution_v2_operations --loop --interval-sec 30
 ```
 
-`ALERT_WEBHOOK_URL`이 없으면 outbox 항목은 전달 완료로 가장하지 않고 retryable
-failure로 기록됩니다. 현재 재구성에 필요한 bar/provider evidence source가 없으면
-reconciliation 항목은 `manual`로 격리합니다.
+로컬 환경에서 `ALERT_WEBHOOK_URL`이 없으면 outbox 항목은 전달 완료로 가장하지
+않고 retryable failure로 기록됩니다. `ENV=production|prod`에서는 URL과 current
+receiver ACK key가 모두 없더라도 startup이 중단됩니다. URL을 설정할 때는 HTTPS
+절대 URL과 다음 receiver ACK 설정을 함께 제공해야 하며, 하나라도 빠지거나 형식이
+틀리면 startup이 중단됩니다.
+
+```dotenv
+ALERT_WEBHOOK_URL=<https-receiver-url>
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID=receiver-2026-07
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=<canonical-base64-32-byte-key>
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID=
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64=
+```
+
+수신자는 정확한 POST URL, request/response SHA-256, status, context, identity,
+timestamp를 canonical HMAC-SHA256으로 서명해야 합니다. current/previous 키 회전을
+지원하지만 알 수 없는 키, unsigned ACK, 변조, redirect, stale first-attempt ACK는
+실패합니다. Outbox 재시도만 같은 요청의 오래된 cached ACK를 still-configured current
+key 또는 rotation overlap의 previous key에 한해 허용합니다. dead-man은
+별도 `DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_*` 키를 사용하고 매 요청에 새 transport ACK를
+서명해야 합니다. HMAC ACK는 사람의 incident ACK나 외부 immutable archive 증거가
+아닙니다.
+
+현재 재구성에 필요한 bar/provider evidence source가 없으면 reconciliation 항목은
+`manual`로 격리합니다.
 
 ## 명시적 Paper source 게시
 

@@ -50,9 +50,7 @@ def _safe_repository(tmp_path: Path) -> Path:
                 "algorithm": "sha256",
                 "canonicalization": "utf-8-lf",
                 "migrations": {
-                    "0001.sql": hashlib.sha256(
-                        migration_text.encode("utf-8")
-                    ).hexdigest(),
+                    "0001.sql": hashlib.sha256(migration_text.encode("utf-8")).hexdigest(),
                 },
             },
             indent=2,
@@ -77,6 +75,593 @@ def test_current_repository_passes_central_safety_policy() -> None:
 
     assert module.check_migration_safety(ROOT) == []
     assert module.check_workflow_safety(ROOT) == []
+
+
+def test_receiver_secret_names_are_consistent_across_policy_and_examples() -> None:
+    module = _module()
+    expected_secret_names = {
+        "ALERT_WEBHOOK_URL",
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+        "DEAD_MAN_ALERT_WEBHOOK_URL",
+        "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+        "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+    }
+    example_names = expected_secret_names | {
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+        "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        "DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+    }
+
+    assert expected_secret_names <= set(module.PROTECTED_SECRET_NAMES)
+    for example in (ROOT / ".env.example", ROOT / "apps" / "worker" / ".env.example"):
+        assignments = {
+            line.partition("=")[0]: line.partition("=")[2]
+            for line in example.read_text(encoding="utf-8").splitlines()
+            if "=" in line
+        }
+        assert example_names <= assignments.keys()
+        assert all(assignments[name] == "" for name in expected_secret_names)
+
+    scanner_path = ROOT / ".github" / "scripts" / "secret_assignment_scan.sh"
+    assert scanner_path.is_file()
+    assert not scanner_path.is_symlink()
+    assert "*.sh text eol=lf" in (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assignment_scan = scanner_path.read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
+    assert "run: bash .github/scripts/secret_assignment_scan.sh" in workflow
+    assert expected_secret_names <= {
+        name for name in expected_secret_names if name in assignment_scan
+    }
+    assert "':!**/tests/**'" not in assignment_scan
+    assert "quoted_secret_assignment_pattern=" in assignment_scan
+    assert "quoted_shell_secret_assignment_pattern=" in assignment_scan
+    assert "env_secret_assignment_pattern=" in assignment_scan
+    assert "yaml_secret_assignment_pattern=" in assignment_scan
+    assert "yaml_block_secret_assignment_pattern=" in assignment_scan
+    assert "yaml_indirect_secret_assignment_pattern=" in assignment_scan
+    assert "yaml_multiline_secret_assignment_pattern=" in assignment_scan
+    assert "yaml_escaped_key_pattern=" in assignment_scan
+    assert "yaml_noncanonical_key_prefix_pattern=" in assignment_scan
+    assert "Secret assignment scanner contract self-check failed." in assignment_scan
+    assert "negative_probes=" in assignment_scan
+    assert "non_yaml_negative_probes=" in assignment_scan
+    assert "url_secret_probe_value=" in assignment_scan
+    assert "dollar_url_secret_probe_value=" in assignment_scan
+    assert "indented_export_secret_probe=" in assignment_scan
+    assert "local_secret_probe=" in assignment_scan
+    assert "readonly_secret_probe=" in assignment_scan
+    assert "semicolon_secret_probe=" in assignment_scan
+    assert "command_secret_probe=" in assignment_scan
+    assert "prior_assignment_secret_probe=" in assignment_scan
+    assert "multi_export_secret_probe=" in assignment_scan
+    assert "command_env_secret_probe=" in assignment_scan
+    assert "subshell_secret_probe=" in assignment_scan
+    assert "quoted_export_secret_probe=" in assignment_scan
+    assert "quoted_env_secret_probe=" in assignment_scan
+    assert "quoted_declare_secret_probe=" in assignment_scan
+    assert "append_secret_probe=" in assignment_scan
+    assert "unquoted_yaml_url_secret_probe=" in assignment_scan
+    assert "flow_yaml_url_secret_probe=" in assignment_scan
+    assert "block_yaml_secret_probe=" in assignment_scan
+    assert "tagged_yaml_secret_probe=" in assignment_scan
+    assert "multiline_yaml_secret_probe=" in assignment_scan
+    assert "unicode_yaml_secret_probe=" in assignment_scan
+    assert "hex_yaml_secret_probe=" in assignment_scan
+    assert "long_unicode_yaml_secret_probe=" in assignment_scan
+    assert "explicit_yaml_secret_probe=" in assignment_scan
+    assert "tagged_yaml_key_secret_probe=" in assignment_scan
+    assert "anchored_yaml_key_secret_probe=" in assignment_scan
+    assert "alias_yaml_key_probe=" in assignment_scan
+    assert "unicode_yaml_value_probe=" in assignment_scan
+    assert '"ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64": previous_key_b64,' in assignment_scan
+    assert "<https-receiver-url>" in assignment_scan
+    assert '[^<>\\"[:space:]]{15,}' in assignment_scan
+    assert "[^<>'[:space:]]{15,}" in assignment_scan
+    assert "}[[:space:]]*[:=][[:space:]]*[\\\"']?" not in assignment_scan
+    assert "shell_assignment_lead_pattern=" in assignment_scan
+    assert "${shell_assignment_lead_pattern}${protected_secret_name_pattern}" in assignment_scan
+    assert "${literal_first_pattern}${literal_rest_pattern}" in assignment_scan
+    assert "literal_rest_pattern='[A-Za-z0-9_./+=:@?%&$~#!-]{15,}'" in assignment_scan
+    assert "-- ." in assignment_scan
+    assert "':!docs/**'" not in assignment_scan
+
+
+def test_render_receiver_secrets_are_sync_only_and_failure_domain_scoped() -> None:
+    module = _module()
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    worker_block = module._render_service_block(render_text, "kr-trading-worker")
+
+    assert worker_block is not None
+    blocks = module._render_environment_blocks(worker_block)
+    for name in module.RENDER_RECEIVER_SYNC_FALSE_NAMES:
+        assert name in blocks
+        assert re.search(r"^\s+sync:\s*false\s*$", blocks[name], re.MULTILINE)
+        assert re.search(r"^\s+value\s*:", blocks[name], re.MULTILINE) is None
+    assert set(module.RENDER_FORBIDDEN_DEAD_MAN_NAMES).isdisjoint(blocks)
+
+
+def test_render_receiver_secret_literal_or_dead_man_leak_is_rejected(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    unsafe_literal = render_text.replace(
+        "      - key: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64\n        sync: false",
+        "      - key: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64\n"
+        "        value: not-a-production-secret",
+    ).replace(
+        "      - key: ALERT_WEBHOOK_TIMEOUT_SEC",
+        "      - key: DEAD_MAN_ALERT_WEBHOOK_URL\n"
+        "        sync: false\n"
+        "      - key: ALERT_WEBHOOK_TIMEOUT_SEC",
+    )
+    (root / "render.yaml").write_text(unsafe_literal, encoding="utf-8")
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64 must not contain a literal value"
+    ) in findings
+    assert (
+        "render.yaml: DEAD_MAN_ALERT_WEBHOOK_URL must not be available to main worker"
+    ) in findings
+
+
+@pytest.mark.parametrize(
+    "duplicate_key_line",
+    (
+        "      - key : LIVE_ORDER_EXECUTION_ENABLED",
+        '      - "key" : "LIVE_ORDER_EXECUTION_ENABLED"',
+        "      - 'key' : 'LIVE_ORDER_EXECUTION_ENABLED'",
+        "      - key: LIVE_ORDER_EXECUTION_ENABLED # hidden duplicate",
+    ),
+)
+def test_render_duplicate_environment_key_yaml_variants_are_rejected(
+    tmp_path: Path,
+    duplicate_key_line: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_block = '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "false"'
+    assert render_text.count(safe_block) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(
+            safe_block,
+            f'{safe_block}\n{duplicate_key_line}\n        value: "true"',
+        ),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: duplicate env key LIVE_ORDER_EXECUTION_ENABLED" in findings
+    assert (
+        "render.yaml: LIVE_ORDER_EXECUTION_ENABLED must remain false until hosted approval"
+        in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "unsupported_entry",
+    (
+        '      - { key: LIVE_ORDER_EXECUTION_ENABLED, value: "true" }',
+        '      - key: !!str LIVE_ORDER_EXECUTION_ENABLED\n        value: "true"',
+        '      - &unsafe\n        key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "true"',
+    ),
+)
+def test_render_unsupported_environment_key_syntax_fails_closed(
+    tmp_path: Path,
+    unsupported_entry: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_block = '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "false"'
+    assert render_text.count(safe_block) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_block, f"{safe_block}\n{unsupported_entry}"),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: envVars must be one canonical section of key/value-or-sync items" in findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("auto_deploy_replacement", "suffix"),
+    (
+        (
+            '    autoDeployTrigger: "on"',
+            '\n  - type: worker\n    name: harmless-decoy\n    autoDeployTrigger: "off"\n',
+        ),
+        (
+            '    <<: { autoDeployTrigger: "off" }\n    autoDeployTrigger: "on"',
+            "",
+        ),
+        (
+            '    autoDeployTrigger: "off"\n    autoDeployTrigger: "on"',
+            "",
+        ),
+    ),
+)
+def test_render_worker_auto_deploy_decoys_fail_closed(
+    tmp_path: Path,
+    auto_deploy_replacement: str,
+    suffix: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_line = '    autoDeployTrigger: "off"'
+    assert render_text.count(safe_line) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_line, auto_deploy_replacement) + suffix,
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: worker autoDeployTrigger must remain off" in findings
+
+
+@pytest.mark.parametrize("unsafe_value", ('"OFF"', "OFF"))
+def test_render_worker_auto_deploy_value_is_case_sensitive(
+    tmp_path: Path,
+    unsafe_value: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_line = '    autoDeployTrigger: "off"'
+    assert render_text.count(safe_line) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_line, f"    autoDeployTrigger: {unsafe_value}"),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: worker autoDeployTrigger must remain off" in findings
+
+
+@pytest.mark.parametrize(
+    "env_vars_replacement",
+    (
+        "    envVars: &worker-env",
+        "    envVars: !!seq",
+        "    envVars:\n"
+        '      - { key: LIVE_ORDER_EXECUTION_ENABLED, value: "true" }\n'
+        '    "envVars":',
+    ),
+)
+def test_render_env_vars_heading_must_be_single_and_canonical(
+    tmp_path: Path,
+    env_vars_replacement: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_heading = "    envVars:"
+    assert render_text.count(safe_heading) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_heading, env_vars_replacement),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: envVars must be one canonical section of key/value-or-sync items" in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_block",
+    (
+        '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "false"\n        value: "true"',
+        "      - key: LIVE_ORDER_EXECUTION_ENABLED\n"
+        '        <<: { value: "false" }\n'
+        '        value: "true"',
+        "      - key: LIVE_ORDER_EXECUTION_ENABLED\n"
+        "        key: LIVE_ORDER_EXECUTION_ENABLED\n"
+        '        value: "true"',
+        '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        "value": "true"',
+    ),
+)
+def test_render_environment_item_schema_decoys_fail_closed(
+    tmp_path: Path,
+    unsafe_block: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_block = '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "false"'
+    assert render_text.count(safe_block) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_block, unsafe_block),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: envVars must be one canonical section of key/value-or-sync items" in findings
+    )
+
+
+@pytest.mark.parametrize("unsafe_sync", ('"false"', "FALSE", '"FALSE"'))
+def test_render_environment_sync_boolean_must_be_canonical(
+    tmp_path: Path,
+    unsafe_sync: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_block = "      - key: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64\n        sync: false"
+    assert render_text.count(safe_block) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_block, safe_block.replace("false", unsafe_sync)),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: envVars must be one canonical section of key/value-or-sync items" in findings
+    )
+
+
+def test_render_live_safety_values_are_case_sensitive(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    safe_block = '      - key: LIVE_ORDER_EXECUTION_ENABLED\n        value: "false"'
+    assert render_text.count(safe_block) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(safe_block, safe_block.replace('"false"', '"FALSE"')),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert (
+        "render.yaml: LIVE_ORDER_EXECUTION_ENABLED must remain false until hosted approval"
+        in findings
+    )
+
+
+def test_render_duplicate_worker_service_is_rejected(tmp_path: Path) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    duplicate = (
+        "\n  - type: worker\n"
+        "    name: kr-trading-worker\n"
+        '    autoDeployTrigger: "off"\n'
+        "    envVars:\n"
+        "      - key: ENV\n"
+        "        value: production\n"
+    )
+    (root / "render.yaml").write_text(
+        render_text + duplicate,
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: exactly one canonical kr-trading-worker service is required" in findings
+
+
+@pytest.mark.parametrize(
+    ("prefix", "needle", "replacement", "suffix"),
+    (
+        (
+            "",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker",
+            "\n  - type: worker\n"
+            "    name: &duplicate kr-trading-worker\n"
+            '    autoDeployTrigger: "off"\n',
+        ),
+        (
+            "",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker",
+            '\n  - type: worker\n    name: !!str kr-trading-worker\n    autoDeployTrigger: "off"\n',
+        ),
+        (
+            "",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker",
+            '\n  - { type: worker, name: kr-trading-worker, autoDeployTrigger: "off" }\n',
+        ),
+        (
+            "workerName: &canonical-worker kr-trading-worker\n",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker",
+            '\n  - type: worker\n    name: *canonical-worker\n    autoDeployTrigger: "off"\n',
+        ),
+        (
+            "",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker\n    name: harmless-decoy",
+            "",
+        ),
+        (
+            "",
+            "  - type: worker",
+            "  - type: worker\n    type: web",
+            "",
+        ),
+        (
+            "",
+            "    name: kr-trading-worker",
+            "    name: kr-trading-worker\n" r'    "na\u006de": harmless-decoy',
+            "",
+        ),
+        (
+            "",
+            '    autoDeployTrigger: "off"',
+            '    autoDeployTrigger: "off"\n'
+            r'    "autoDeploy\u0054rigger": "on"',
+            "",
+        ),
+        (
+            "",
+            "    envVars:",
+            "    envVars:\n" r'    "env\u0056ars": []',
+            "",
+        ),
+    ),
+)
+def test_render_noncanonical_service_schema_decoys_fail_closed(
+    tmp_path: Path,
+    prefix: str,
+    needle: str,
+    replacement: str,
+    suffix: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert render_text.count(needle) == 1
+    (root / "render.yaml").write_text(
+        prefix + render_text.replace(needle, replacement) + suffix,
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: exactly one canonical kr-trading-worker service is required" in findings
+
+
+@pytest.mark.parametrize(
+    "top_level_override",
+    (
+        r'"serv\u0069ces": []',
+        "!!str services: []",
+        "&services-key services: []",
+        "services: []",
+    ),
+)
+def test_render_top_level_service_overrides_fail_closed(
+    tmp_path: Path,
+    top_level_override: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    (root / "render.yaml").write_text(
+        render_text + "\n" + top_level_override + "\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: exactly one canonical kr-trading-worker service is required" in findings
+
+
+@pytest.mark.parametrize(
+    ("canonical_line", "unsafe_line"),
+    (
+        ("    region: singapore", "    region: singapore: invalid"),
+        ("    plan: starter", "    plan: !!str starter"),
+        ("    branch: main", "    branch: &branch main"),
+        ("    rootDir: apps/worker", "    rootDir: *root"),
+        ("    numInstances: 1", '    numInstances: "1"'),
+        (
+            "    maxShutdownDelaySeconds: 120",
+            "    maxShutdownDelaySeconds: 12_0",
+        ),
+    ),
+)
+def test_render_worker_direct_scalars_must_be_canonical(
+    tmp_path: Path,
+    canonical_line: str,
+    unsafe_line: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert render_text.count(canonical_line) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(canonical_line, unsafe_line),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: exactly one canonical kr-trading-worker service is required" in findings
+
+
+@pytest.mark.parametrize(
+    ("quoted_command", "unsafe_command"),
+    (
+        (
+            "    buildCommand: 'python -m app.tools.write_release_metadata && "
+            "python -m pip install --require-hashes --only-binary=:all: "
+            "-r requirements.lock'",
+            "    buildCommand: python -m app.tools.write_release_metadata && "
+            "python -m pip install --require-hashes --only-binary=:all: "
+            "-r requirements.lock",
+        ),
+        (
+            "    startCommand: 'python -m app.main'",
+            "    startCommand: python -m app.main",
+        ),
+        (
+            "    startCommand: 'python -m app.main'",
+            "    startCommand: !!str 'python -m app.main'",
+        ),
+        (
+            "    startCommand: 'python -m app.main'",
+            "    startCommand: >-\n      python -m app.main",
+        ),
+    ),
+)
+def test_render_worker_commands_require_quoted_yaml_scalars(
+    tmp_path: Path,
+    quoted_command: str,
+    unsafe_command: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    assert render_text.count(quoted_command) == 1
+    (root / "render.yaml").write_text(
+        render_text.replace(quoted_command, unsafe_command),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: worker build and start commands must use quoted scalars" in findings
+
+
+def test_render_environment_must_remain_production_for_receiver_startup_gate(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    render_text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    (root / "render.yaml").write_text(
+        render_text.replace(
+            "      - key: ENV\n        value: production",
+            "      - key: ENV\n        value: local",
+        ),
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert "render.yaml: ENV must remain production until hosted approval" in findings
 
 
 def test_if_not_exists_public_table_without_rls_is_rejected(tmp_path: Path) -> None:
@@ -134,8 +719,7 @@ def test_destructive_approval_cannot_cross_migration_files(tmp_path: Path) -> No
     findings = module.check_migration_safety(root)
 
     assert (
-        "supabase/migrations/0003.sql: destructive migration missing "
-        "rollback note or approval"
+        "supabase/migrations/0003.sql: destructive migration missing rollback note or approval"
     ) in findings
 
 
@@ -159,8 +743,7 @@ def test_destructive_words_in_sql_comments_do_not_trigger_guard(
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "-- Example only: drop table private.execution_history.\n"
-        "select 1;\n",
+        "-- Example only: drop table private.execution_history.\nselect 1;\n",
         encoding="utf-8",
     )
 
@@ -173,17 +756,14 @@ def test_multiline_drop_column_requires_same_file_approval(tmp_path: Path) -> No
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "alter table private.execution_history\n"
-        "  drop\n"
-        "  column provider_payload;\n",
+        "alter table private.execution_history\n  drop\n  column provider_payload;\n",
         encoding="utf-8",
     )
 
     findings = module.check_migration_safety(root)
 
     assert (
-        "supabase/migrations/0002.sql: destructive migration missing "
-        "rollback note or approval"
+        "supabase/migrations/0002.sql: destructive migration missing rollback note or approval"
     ) in findings
 
 
@@ -191,16 +771,14 @@ def test_approval_phrase_inside_sql_string_is_not_evidence(tmp_path: Path) -> No
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "select '-- Rollback note: fake approval';\n"
-        "truncate table private.execution_history;\n",
+        "select '-- Rollback note: fake approval';\ntruncate table private.execution_history;\n",
         encoding="utf-8",
     )
 
     findings = module.check_migration_safety(root)
 
     assert (
-        "supabase/migrations/0002.sql: destructive migration missing "
-        "rollback note or approval"
+        "supabase/migrations/0002.sql: destructive migration missing rollback note or approval"
     ) in findings
 
 
@@ -226,8 +804,7 @@ def test_destructive_approval_requires_explicit_comment_detail(
     findings = module.check_migration_safety(root)
 
     assert (
-        "supabase/migrations/0002.sql: destructive migration missing "
-        "rollback note or approval"
+        "supabase/migrations/0002.sql: destructive migration missing rollback note or approval"
     ) in findings
 
 
@@ -261,8 +838,7 @@ def test_api_security_invoker_view_is_allowed(tmp_path: Path) -> None:
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "create view api.runtime_status with (security_invoker = true) "
-        "as select 1 as id;\n",
+        "create view api.runtime_status with (security_invoker = true) as select 1 as id;\n",
         encoding="utf-8",
     )
 
@@ -284,10 +860,7 @@ def test_exposed_security_definer_function_is_rejected(tmp_path: Path) -> None:
     findings = module.check_migration_safety(root)
 
     assert "exposed function uses SECURITY DEFINER: api.unsafe_rpc" in findings
-    assert (
-        "exposed function missing explicit SECURITY INVOKER: api.unsafe_rpc"
-        in findings
-    )
+    assert "exposed function missing explicit SECURITY INVOKER: api.unsafe_rpc" in findings
 
 
 def test_exposed_function_requires_explicit_security_invoker(
@@ -304,8 +877,7 @@ def test_exposed_function_requires_explicit_security_invoker(
     findings = module.check_migration_safety(root)
 
     assert (
-        "exposed function missing explicit SECURITY INVOKER: "
-        "worker_api.acquire_worker_lease"
+        "exposed function missing explicit SECURITY INVOKER: worker_api.acquire_worker_lease"
     ) in findings
 
 
@@ -335,18 +907,14 @@ def test_private_definer_requires_empty_search_path(tmp_path: Path) -> None:
 
     findings = module.check_migration_safety(root)
 
-    assert (
-        "private SECURITY DEFINER missing empty search_path: private.unsafe_impl"
-        in findings
-    )
+    assert "private SECURITY DEFINER missing empty search_path: private.unsafe_impl" in findings
 
 
 def test_worker_api_function_must_be_allowlisted(tmp_path: Path) -> None:
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "create function worker_api.place_live_order() returns void "
-        "language sql as 'select';\n",
+        "create function worker_api.place_live_order() returns void language sql as 'select';\n",
         encoding="utf-8",
     )
 
@@ -368,8 +936,7 @@ def test_contract_qualification_v2_worker_rpc_is_allowlisted(tmp_path: Path) -> 
     findings = module.check_migration_safety(root)
 
     assert not any(
-        "worker_api function outside allowlist: register_qualification_run_v2"
-        in finding
+        "worker_api function outside allowlist: register_qualification_run_v2" in finding
         for finding in findings
     )
 
@@ -398,8 +965,7 @@ def test_worker_api_execute_cannot_be_granted_to_authenticated(
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "grant execute on function worker_api.acquire_worker_lease(uuid) "
-        "to authenticated;\n",
+        "grant execute on function worker_api.acquire_worker_lease(uuid) to authenticated;\n",
         encoding="utf-8",
     )
 
@@ -412,11 +978,7 @@ def test_multiline_anon_write_policy_is_rejected(tmp_path: Path) -> None:
     module = _module()
     root = _safe_repository(tmp_path)
     (root / "supabase" / "migrations" / "0002.sql").write_text(
-        "create policy unsafe_write\n"
-        "on public.events\n"
-        "for update\n"
-        "to anon\n"
-        "using (true);\n",
+        "create policy unsafe_write\non public.events\nfor update\nto anon\nusing (true);\n",
         encoding="utf-8",
     )
 
@@ -541,6 +1103,30 @@ def test_every_protected_secret_env_key_is_rejected_in_workflows(tmp_path: Path)
         assert any("production secret env key" in finding for finding in findings)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "'alert_webhook_receiver_ack_current_key_b64'",
+        '"DEAD_MAN_ALERT_WEBHOOK_URL"',
+    ],
+)
+def test_quoted_protected_secret_env_keys_are_rejected(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    module = _module()
+    root = _safe_repository(tmp_path)
+    workflow = root / ".github" / "workflows" / "unsafe.yml"
+    workflow.write_text(
+        f"env:\n  {key}: placeholder\n",
+        encoding="utf-8",
+    )
+
+    findings = module.check_workflow_safety(root)
+
+    assert any("production secret env key" in finding for finding in findings)
+
+
 def test_automatic_render_deploy_is_rejected(tmp_path: Path) -> None:
     module = _module()
     root = _safe_repository(tmp_path)
@@ -573,9 +1159,7 @@ def test_workflow_action_accepts_full_commit_sha(tmp_path: Path) -> None:
     root = _safe_repository(tmp_path)
     workflow = root / ".github" / "workflows" / "safe-action.yaml"
     workflow.write_text(
-        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@"
-        + "a" * 40
-        + " # v4\n",
+        "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@" + "a" * 40 + " # v4\n",
         encoding="utf-8",
     )
 
@@ -646,9 +1230,7 @@ def test_all_policy_workflows_use_the_central_repository_safety_command() -> Non
 
 
 def test_security_audits_are_blocking_gates() -> None:
-    text = (ROOT / ".github" / "workflows" / "security.yml").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
 
     for name in ("npm audit gate", "pip-audit gate", "bandit gate"):
         start = text.index(f"- name: {name}")
@@ -658,9 +1240,7 @@ def test_security_audits_are_blocking_gates() -> None:
 
 
 def test_security_workflow_runs_on_develop_and_main_pushes() -> None:
-    text = (ROOT / ".github" / "workflows" / "security.yml").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
 
     lines = text.splitlines()
     push_index = lines.index("  push:")
@@ -688,9 +1268,7 @@ def test_security_workflow_runs_on_develop_and_main_pushes() -> None:
 
 
 def test_security_audit_tools_use_complete_hashed_lock() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "security.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
     audit_job = _workflow_job_block(workflow, "security-audits")
     install_command = (
         "python -m pip install --force-reinstall --require-hashes "

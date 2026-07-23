@@ -61,6 +61,8 @@ Jobs:
   - non-example `.env` files are not tracked
   - workflows do not reference production trading/API secrets
   - Render `autoDeployTrigger` stays `off`
+  - main receiver URL/current/previous ID and key entries use `sync: false` with
+    no literal values; dead-man secrets are absent from the main Worker
   - workflow files do not contain Render auto-deploy commands
 
 ### `.github/workflows/security.yml`
@@ -84,6 +86,10 @@ Jobs:
   to Ubuntu 24.04 x86_64 and CPython 3.12.13
 - Gitleaks secret scan
 - common secret pattern scan that prints only file paths, not matched secret text
+- receiver URL and main/dead-man base64 ACK key assignments are included in both
+  the common-pattern scan and the central protected-secret policy
+- `.github/scripts/secret_assignment_scan.sh` self-tests supported shell/YAML
+  assignment forms and rejects YAML mapping-key indirection fail closed
 - committed `.env` file block, allowing only `.env.example`
 - deterministic lock-derived dependency inventory and exact checked-out revision receipt
 - Workflow policy guard

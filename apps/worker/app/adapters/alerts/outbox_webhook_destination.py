@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
+from datetime import datetime
 from typing import cast
 
 import httpx
@@ -12,9 +14,16 @@ from app.domain.operations.models import (
     OperationsInvariantError,
     OutboxDeliveryReceipt,
 )
+from app.infrastructure.authenticated_webhook import (
+    AuthenticatedWebhookError,
+    AuthenticatedWebhookResponse,
+    AuthenticatedWebhookTransport,
+    ReceiverAckKeyRing,
+)
 from app.infrastructure.secrets_redaction import redact_mapping
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_DESTINATION_TYPES = frozenset({"audit_archive", "incident_alert", "operations_metric"})
 
 
 class OutboxWebhookDestination:
@@ -24,14 +33,18 @@ class OutboxWebhookDestination:
         self,
         webhook_url: str,
         *,
+        key_ring: ReceiverAckKeyRing,
         client: httpx.AsyncClient | None = None,
         timeout_sec: float = 5.0,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not webhook_url.strip():
-            raise OperationsInvariantError("outbox_webhook_url_is_required")
-        self.webhook_url = webhook_url
-        self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=timeout_sec)
+        self._transport = AuthenticatedWebhookTransport(
+            webhook_url,
+            key_ring=key_ring,
+            client=client,
+            timeout_sec=timeout_sec,
+            clock=clock,
+        )
 
     async def deliver_outbox_item(
         self,
@@ -41,39 +54,50 @@ class OutboxWebhookDestination:
     ) -> OutboxDeliveryReceipt:
         if dedupe_key != item.dedupe_key:
             raise OperationsInvariantError("outbox_receiver_dedupe_key_mismatch")
-        response = await self.client.post(
-            self.webhook_url,
-            headers={"Idempotency-Key": dedupe_key},
-            json={
-                "schema_version": item.payload_version,
-                "dedupe_key": dedupe_key,
-                "event_type": item.event_type,
-                "aggregate_type": item.aggregate_type,
-                "aggregate_id": item.aggregate_id,
-                "payload": redact_mapping(cast(dict[str, object], item.payload)),
-            },
-        )
-        response.raise_for_status()
+        if item.destination_type not in _DESTINATION_TYPES:
+            raise OperationsInvariantError("outbox_destination_type_is_invalid")
+        try:
+            response = await self._transport.post_json(
+                context="outbox",
+                headers={"Idempotency-Key": dedupe_key},
+                payload={
+                    "schema_version": item.payload_version,
+                    "outbox_id": item.outbox_id,
+                    "dedupe_key": dedupe_key,
+                    "event_type": item.event_type,
+                    "aggregate_type": item.aggregate_type,
+                    "aggregate_id": item.aggregate_id,
+                    "destination_type": item.destination_type,
+                    "payload": redact_mapping(cast(dict[str, object], item.payload)),
+                },
+                binding={
+                    "outbox_id": item.outbox_id,
+                    "destination_type": item.destination_type,
+                    "dedupe_key": dedupe_key,
+                },
+                allow_stale_ack=item.attempt_count > 1,
+            )
+        except AuthenticatedWebhookError:
+            raise OperationsInvariantError("outbox_receiver_authentication_failed") from None
         if item.destination_type == "audit_archive":
             return _audit_archive_receipt(item, response)
         return _dedupe_receipt(dedupe_key, response)
 
     async def close(self) -> None:
-        if self._owns_client:
-            await self.client.aclose()
+        await self._transport.close()
 
 
 def _audit_archive_receipt(
     item: ClaimedDeliveryOutboxItem,
-    response: httpx.Response,
+    response: AuthenticatedWebhookResponse,
 ) -> OutboxDeliveryReceipt:
     expected_hash = item.payload.get("event_hash")
     if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
         raise OperationsInvariantError("audit_archive_payload_event_hash_is_invalid")
     try:
         body = response.json()
-    except ValueError as exc:
-        raise OperationsInvariantError("audit_archive_receipt_is_missing") from exc
+    except AuthenticatedWebhookError:
+        raise OperationsInvariantError("audit_archive_receipt_is_missing") from None
     if not isinstance(body, dict) or set(body) != {
         "immutable_receipt_id",
         "archived_event_hash",
@@ -97,12 +121,12 @@ def _audit_archive_receipt(
 
 def _dedupe_receipt(
     dedupe_key: str,
-    response: httpx.Response,
+    response: AuthenticatedWebhookResponse,
 ) -> OutboxDeliveryReceipt:
     try:
         body = response.json()
-    except ValueError as exc:
-        raise OperationsInvariantError("outbox_receiver_receipt_is_missing") from exc
+    except AuthenticatedWebhookError:
+        raise OperationsInvariantError("outbox_receiver_receipt_is_missing") from None
     if not isinstance(body, dict) or set(body) != {
         "immutable_receipt_id",
         "accepted_dedupe_key",
@@ -116,9 +140,7 @@ def _dedupe_receipt(
         raise OperationsInvariantError("outbox_receiver_receipt_id_is_invalid")
     if accepted_dedupe_key != dedupe_key:
         raise OperationsInvariantError("outbox_receiver_dedupe_evidence_mismatch")
-    expected_sha256 = hashlib.sha256(
-        _receipt_material(dedupe_key, receipt_id)
-    ).hexdigest()
+    expected_sha256 = hashlib.sha256(_receipt_material(dedupe_key, receipt_id)).hexdigest()
     if (
         not isinstance(receipt_sha256, str)
         or _SHA256_RE.fullmatch(receipt_sha256) is None

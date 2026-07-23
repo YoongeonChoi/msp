@@ -62,6 +62,7 @@ from app.application.use_cases.run_operations_v2 import RunOperationsV2
 from app.application.use_cases.run_trading_cycle import RunTradingCycle
 from app.config import Settings
 from app.domain.trading.entities import BotSettings
+from app.infrastructure.authenticated_webhook import ReceiverAckKeyRing
 from app.infrastructure.graceful_shutdown import ShutdownFlag
 
 
@@ -69,10 +70,15 @@ from app.infrastructure.graceful_shutdown import ShutdownFlag
 class Container:
     trading_loop: TradingLoop
     repository: InMemoryRepository | SupabaseRepository
+    alert_notifier: WebhookAlertNotifier | None = None
     execution_kernel_v2: InMemoryExecutionKernelV2 | None = None
     contract_execution_service_v2: ExecutionService | None = None
     worker_api_v2: SupabaseWorkerApi | None = None
     run_execution_v2: RunExecutionV2 | None = None
+
+    async def close(self) -> None:
+        if self.alert_notifier is not None:
+            await self.alert_notifier.aclose()
 
 
 @dataclass(slots=True)
@@ -81,9 +87,7 @@ class OperationsV2Runtime:
     worker_api: SupabaseWorkerApi
     destination: OutboxWebhookDestination | UnavailableOutboxDestination
     run_execution_v2: RunExecutionV2
-    execution_source: (
-        SupabasePaperExecutionCommandSource | UnavailablePaperExecutionCommandSource
-    )
+    execution_source: SupabasePaperExecutionCommandSource | UnavailablePaperExecutionCommandSource
 
     async def close(self) -> None:
         try:
@@ -160,12 +164,14 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
             model=settings.openai_model,
         )
     risk_service = RiskService()
+    alert_webhook = _configured_alert_webhook(settings)
     alert_notifier = (
         WebhookAlertNotifier(
-            webhook_url=settings.alert_webhook_url.get_secret_value(),
+            webhook_url=alert_webhook[0],
+            key_ring=alert_webhook[1],
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
-        if settings.alert_webhook_url is not None
+        if alert_webhook is not None
         else None
     )
     health_service = HealthService(
@@ -195,8 +201,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
             risk_service,
             shutdown_requested=lambda: shutdown.requested,
         )
-        if settings.execution_v2_enabled
-        and settings.execution_v2_environment == "contract_test"
+        if settings.execution_v2_enabled and settings.execution_v2_environment == "contract_test"
         else None
     )
     worker_api_v2: SupabaseWorkerApi | None = None
@@ -215,9 +220,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
     feature_service = FeatureService(
         fundamentals=fundamentals,
         news=news,
-        fundamentals_provider_name=(
-            "opendart_mock" if settings.mock_providers else "opendart"
-        ),
+        fundamentals_provider_name=("opendart_mock" if settings.mock_providers else "opendart"),
         news_provider_name="naver_mock" if settings.mock_providers else "naver",
     )
     portfolio_service = PortfolioService(repository, portfolio_reader)
@@ -239,6 +242,7 @@ def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
     return Container(
         trading_loop=TradingLoop(settings, shutdown, run_cycle),
         repository=repository,
+        alert_notifier=alert_notifier,
         execution_kernel_v2=execution_kernel_v2,
         contract_execution_service_v2=contract_execution_service_v2,
         worker_api_v2=worker_api_v2,
@@ -258,20 +262,15 @@ def build_operations_v2_runtime(
     account_id = settings.execution_v2_account_id
     if account_id is None:
         raise ValueError("operations_v2_runtime_requires_account_id")
-    webhook_url = (
-        settings.alert_webhook_url.get_secret_value()
-        if settings.alert_webhook_url is not None
-        else None
-    )
-    if webhook_url is not None and not webhook_url.strip():
-        raise ValueError("operations_v2_alert_webhook_url_is_invalid")
+    alert_webhook = _configured_alert_webhook(settings)
     worker_api = SupabaseWorkerApi(settings)
     destination: OutboxWebhookDestination | UnavailableOutboxDestination = (
         OutboxWebhookDestination(
-            webhook_url,
+            alert_webhook[0],
+            key_ring=alert_webhook[1],
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
-        if webhook_url is not None
+        if alert_webhook is not None
         else UnavailableOutboxDestination()
     )
     execution_source: (
@@ -357,3 +356,16 @@ def build_operations_v2_runtime(
         run_execution_v2=run_execution_v2,
         execution_source=execution_source,
     )
+
+
+def _configured_alert_webhook(
+    settings: Settings,
+) -> tuple[str, ReceiverAckKeyRing] | None:
+    key_ring = settings.alert_webhook_receiver_key_ring()
+    if settings.alert_webhook_url is None:
+        if key_ring is not None:
+            raise ValueError("alert_webhook_configuration_is_invalid")
+        return None
+    if key_ring is None:
+        raise ValueError("alert_webhook_configuration_is_invalid")
+    return settings.alert_webhook_url.get_secret_value(), key_ring

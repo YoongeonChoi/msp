@@ -5,12 +5,21 @@ from typing import Literal, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.infrastructure.authenticated_webhook import (
+    ReceiverAckKeyRing,
+    validate_webhook_target,
+)
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     env: str = Field(default="local", alias="ENV")
     run_once: bool = Field(default=False, alias="RUN_ONCE")
@@ -29,9 +38,7 @@ class Settings(BaseSettings):
         le=100,
         alias="MAX_CONCURRENT_API_CALLS",
     )
-    use_supabase_repository_for_mock: bool = Field(
-        default=False, alias="USE_SUPABASE_REPOSITORY"
-    )
+    use_supabase_repository_for_mock: bool = Field(default=False, alias="USE_SUPABASE_REPOSITORY")
     supabase_url: str | None = Field(default=None, alias="SUPABASE_URL")
     supabase_secret_key: SecretStr | None = Field(default=None, alias="SUPABASE_SECRET_KEY")
     toss_client_id: SecretStr | None = Field(default=None, alias="TOSS_CLIENT_ID")
@@ -72,6 +79,56 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
     alert_webhook_url: SecretStr | None = Field(default=None, alias="ALERT_WEBHOOK_URL")
+    alert_webhook_receiver_ack_current_key_id: str | None = Field(
+        default=None,
+        alias="ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        exclude=True,
+        repr=False,
+    )
+    alert_webhook_receiver_ack_current_key_b64: SecretStr | None = Field(
+        default=None,
+        alias="ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+    )
+    alert_webhook_receiver_ack_previous_key_id: str | None = Field(
+        default=None,
+        alias="ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+        exclude=True,
+        repr=False,
+    )
+    alert_webhook_receiver_ack_previous_key_b64: SecretStr | None = Field(
+        default=None,
+        alias="ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+    )
+    forbidden_dead_man_alert_webhook_url: SecretStr | None = Field(
+        default=None,
+        alias="DEAD_MAN_ALERT_WEBHOOK_URL",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_dead_man_receiver_ack_current_key_id: SecretStr | None = Field(
+        default=None,
+        alias="DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_dead_man_receiver_ack_current_key_b64: SecretStr | None = Field(
+        default=None,
+        alias="DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_dead_man_receiver_ack_previous_key_id: SecretStr | None = Field(
+        default=None,
+        alias="DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+        exclude=True,
+        repr=False,
+    )
+    forbidden_dead_man_receiver_ack_previous_key_b64: SecretStr | None = Field(
+        default=None,
+        alias="DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+        exclude=True,
+        repr=False,
+    )
     alert_webhook_timeout_sec: float = Field(
         default=5.0,
         gt=0,
@@ -178,8 +235,30 @@ class Settings(BaseSettings):
         alias="OPERATIONS_HEARTBEAT_INTERVAL_SEC",
     )
 
+    @field_validator(
+        "alert_webhook_url",
+        "alert_webhook_receiver_ack_current_key_id",
+        "alert_webhook_receiver_ack_current_key_b64",
+        "alert_webhook_receiver_ack_previous_key_id",
+        "alert_webhook_receiver_ack_previous_key_b64",
+        "forbidden_dead_man_alert_webhook_url",
+        "forbidden_dead_man_receiver_ack_current_key_id",
+        "forbidden_dead_man_receiver_ack_current_key_b64",
+        "forbidden_dead_man_receiver_ack_previous_key_id",
+        "forbidden_dead_man_receiver_ack_previous_key_b64",
+        mode="before",
+    )
+    @classmethod
+    def normalize_exact_empty_optional_webhook_values(cls, value: object) -> object:
+        if value == "":
+            return None
+        if isinstance(value, SecretStr) and value.get_secret_value() == "":
+            return None
+        return value
+
     @model_validator(mode="after")
     def validate_execution_v2_boundary(self) -> Self:
+        self.alert_webhook_receiver_key_ring()
         if self.live_order_execution_enabled or self.toss_order_endpoint_enabled:
             raise ValueError("production_live_order_write_is_quarantined")
         if self.toss_order_capable_credentials is True:
@@ -200,28 +279,25 @@ class Settings(BaseSettings):
         if self.execution_v2_worker_api_enabled and not self.execution_v2_enabled:
             raise ValueError("execution_v2_worker_api_requires_execution_v2_enabled")
         if self.execution_v2_paper_resume_input_enabled and (
-            not self.execution_v2_worker_api_enabled
-            or self.execution_v2_environment != "paper"
+            not self.execution_v2_worker_api_enabled or self.execution_v2_environment != "paper"
         ):
-            raise ValueError(
-                "paper_resume_input_requires_paper_worker_api_enablement"
-            )
+            raise ValueError("paper_resume_input_requires_paper_worker_api_enablement")
         if self.execution_v2_paper_source_input_enabled and (
-            not self.execution_v2_worker_api_enabled
-            or self.execution_v2_environment != "paper"
+            not self.execution_v2_worker_api_enabled or self.execution_v2_environment != "paper"
         ):
-            raise ValueError(
-                "paper_source_input_requires_paper_worker_api_enablement"
-            )
+            raise ValueError("paper_source_input_requires_paper_worker_api_enablement")
         if self.execution_v2_worker_api_enabled:
             try:
                 worker_id = UUID(self.execution_v2_worker_id or "")
             except ValueError as exc:
                 raise ValueError("execution_v2_worker_id_is_required") from exc
-            if (
-                str(worker_id) != self.execution_v2_worker_id
-                or worker_id.version not in {1, 2, 3, 4, 5}
-            ):
+            if str(worker_id) != self.execution_v2_worker_id or worker_id.version not in {
+                1,
+                2,
+                3,
+                4,
+                5,
+            }:
                 raise ValueError("execution_v2_worker_id_is_invalid")
             expected_account_id = {
                 "paper": "paper-primary",
@@ -242,15 +318,50 @@ class Settings(BaseSettings):
             self.require_kr_calendar_collection_manual_execution()
         return self
 
+    def alert_webhook_receiver_key_ring(self) -> ReceiverAckKeyRing | None:
+        forbidden_dead_man_values = (
+            self.forbidden_dead_man_alert_webhook_url,
+            self.forbidden_dead_man_receiver_ack_current_key_id,
+            self.forbidden_dead_man_receiver_ack_current_key_b64,
+            self.forbidden_dead_man_receiver_ack_previous_key_id,
+            self.forbidden_dead_man_receiver_ack_previous_key_b64,
+        )
+        if any(value is not None for value in forbidden_dead_man_values):
+            raise ValueError("dead_man_receiver_namespace_is_forbidden_on_main_worker")
+        key_values = (
+            self.alert_webhook_receiver_ack_current_key_id,
+            self.alert_webhook_receiver_ack_current_key_b64,
+            self.alert_webhook_receiver_ack_previous_key_id,
+            self.alert_webhook_receiver_ack_previous_key_b64,
+        )
+        if self.alert_webhook_url is None:
+            if any(value is not None for value in key_values):
+                raise ValueError("alert_webhook_receiver_ack_requires_url")
+            if self.env.strip().casefold() in {"production", "prod"}:
+                raise ValueError("production_alert_webhook_is_required")
+            return None
+        validate_webhook_target(self.alert_webhook_url.get_secret_value())
+        if (
+            self.alert_webhook_receiver_ack_current_key_id is None
+            or self.alert_webhook_receiver_ack_current_key_b64 is None
+        ):
+            raise ValueError("alert_webhook_url_requires_receiver_ack_current_key")
+        return ReceiverAckKeyRing.from_base64(
+            current_key_id=self.alert_webhook_receiver_ack_current_key_id,
+            current_key_b64=(self.alert_webhook_receiver_ack_current_key_b64.get_secret_value()),
+            previous_key_id=self.alert_webhook_receiver_ack_previous_key_id,
+            previous_key_b64=(
+                self.alert_webhook_receiver_ack_previous_key_b64.get_secret_value()
+                if self.alert_webhook_receiver_ack_previous_key_b64 is not None
+                else None
+            ),
+        )
+
     def require_kr_calendar_collection_assessment(self) -> None:
         if self.kr_calendar_collection_assessment_enabled is not True:
             raise ValueError("kr_calendar_collection_assessment_disabled")
-        if not _nonempty_text(self.supabase_url) or not _nonempty_secret(
-            self.supabase_secret_key
-        ):
-            raise ValueError(
-                "kr_calendar_collection_assessment_requires_supabase_credentials"
-            )
+        if not _nonempty_text(self.supabase_url) or not _nonempty_secret(self.supabase_secret_key):
+            raise ValueError("kr_calendar_collection_assessment_requires_supabase_credentials")
         if not _hosted_supabase_https_origin(self.supabase_url):
             raise ValueError(
                 "kr_calendar_collection_assessment_requires_hosted_supabase_https_origin"
@@ -261,15 +372,11 @@ class Settings(BaseSettings):
             raise ValueError("kr_calendar_collection_manual_execution_disabled")
         self.require_kr_calendar_collection_assessment()
         if self.mock_providers is not False:
-            raise ValueError(
-                "kr_calendar_collection_manual_execution_requires_real_providers"
-            )
+            raise ValueError("kr_calendar_collection_manual_execution_requires_real_providers")
         if not _nonempty_secret(self.toss_client_id) or not _nonempty_secret(
             self.toss_client_secret
         ):
-            raise ValueError(
-                "kr_calendar_collection_manual_execution_requires_toss_credentials"
-            )
+            raise ValueError("kr_calendar_collection_manual_execution_requires_toss_credentials")
         if (
             self.toss_credential_scope != "read_only"
             or self.toss_order_capable_credentials is not False
@@ -278,9 +385,7 @@ class Settings(BaseSettings):
                 "kr_calendar_collection_manual_execution_requires_read_only_credentials"
             )
         if not _canonical_uuid4(self.kr_calendar_collection_holder_id):
-            raise ValueError(
-                "kr_calendar_collection_manual_execution_requires_uuid4_holder_id"
-            )
+            raise ValueError("kr_calendar_collection_manual_execution_requires_uuid4_holder_id")
 
     def use_supabase_repository(self) -> bool:
         return bool(
@@ -310,9 +415,7 @@ def _canonical_uuid4(value: object) -> bool:
     return parsed is not None and parsed.version == 4 and str(parsed) == value
 
 
-_SUPABASE_HOST_RE = re.compile(
-    r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?\.supabase\.co"
-)
+_SUPABASE_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?\.supabase\.co")
 
 
 def _hosted_supabase_https_origin(value: object) -> bool:

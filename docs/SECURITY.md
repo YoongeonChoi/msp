@@ -112,6 +112,9 @@ candidates.
   credentials are never fingerprint inputs.
 - Webhook secrets, account numbers, authorization headers, session tokens, and
   provider raw payloads are excluded from audit and outbox payloads.
+- Receiver ACK HMAC keys are server-only canonical base64 values decoding to exactly
+  32 bytes. Main Worker and dead-man current/previous key rings use separate secret
+  namespaces and are never available to the Desktop.
 - Logs, verifier errors, and CI scan output redact values and identify only the
   affected file or field class.
 
@@ -125,6 +128,18 @@ immutable archive receipt is verified against the DB hash.
 dedupe, and dead-letter handling. Consumers must deduplicate. Critical events
 create incidents and require human ACK within five minutes; the audit trail must
 distinguish delivery, human ACK, mitigation, and two-person closure.
+
+Webhook delivery succeeds only after an HTTPS receiver returns one unambiguous
+HMAC-SHA256 ACK bound to the exact serialized URL, request and response hashes,
+HTTP status, context, event identity, key ID, and timestamp. Redirects, unsigned or
+duplicate headers, unknown keys, stale first-attempt ACKs, and body/identity replay
+fail closed. A completion-write retry may reuse the exact cached ACK under a
+still-configured key: the current key, or the previous key during rotation
+overlap. Retired and unknown keys fail closed, and changing the item,
+destination, URL, or payload invalidates the ACK.
+This shared-key transport proof authenticates the configured receiver only. It is
+not a human ACK, non-repudiation proof, or evidence that an external immutable
+archive actually retained the event. Those hosted gates remain separate.
 
 ## CI and supply-chain controls
 

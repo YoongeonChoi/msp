@@ -294,6 +294,21 @@
   backoff, dedupe, dead-letter를 검증한다.
 - alert transport 장애에서도 domain transaction은 보존되고 at-least-once delivery와
   수신측 dedupe가 성립한다.
+- main/outbox/dead-man URL은 유효한 HTTPS 입력을 canonical request target으로
+  정규화하고 userinfo, fragment, redirect, 공백·control, 잘못된 port를 거부한다.
+- receiver ACK는 독립 golden HMAC vector, current/previous key, exact request/response
+  hash, status, serialized target, timestamp, context와 event identity를 검증한다.
+  unsigned/duplicate/unknown/stale/future/tampered ACK와 cross-item·destination·URL·payload
+  replay는 실패해야 한다.
+- dispatcher 실제 adapter 통합에서 인증 실패는 complete 0/fail 1, 정상 서명은
+  complete 1, mixed batch는 각각 한 번만 settle해야 한다. Completion DB write crash 후
+  attempt 2는 같은 request의 cached ACK를 still-configured current key 또는 rotation
+  overlap의 previous key에 한해서만 허용한다. Retired/unknown key는 거부한다.
+- dead-man 인증 실패는 exact pending alert와 episode를 유지하고, unhealthy가 인증되기
+  전에 recovery를 보내지 않는다. observation이 바뀌면 request와 idempotency key도
+  함께 바뀌며 exact retry만 동일해야 한다.
+- request/response size와 전체 wall-clock timeout을 검증하고, `httpx`/`httpcore` INFO
+  로그에 webhook path/query, body, key 또는 signature가 남지 않아야 한다.
 - emergency stop은 같은 transaction에서 `enabled=false`, `control_epoch+1`을 만든다.
 - command는 `requested → approved → claimed → applied` 순서를 벗어나지 않는다.
 - qualification은 request뿐 아니라 Worker apply 시점에도 유효기간과 모든 policy,

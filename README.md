@@ -182,6 +182,11 @@ EXECUTION_V2_WORKER_API_ENABLED=true
 EXECUTION_V2_ENVIRONMENT=paper
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SECRET_KEY=<server-secret-key>
+ALERT_WEBHOOK_URL=https://<approved-receiver>/events
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID=<rotation-id>
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=<canonical-base64-32-byte-key>
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID=
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64=
 ```
 
 `seed_strategy_v1`, `seed_watchlist_demo`, `run_paper_cycle_once`는 legacy 연구
@@ -205,6 +210,9 @@ opening command, execution/cost evidence, worker lease를 갖춘 뒤에만 실�
 | `EXECUTION_V2_ENABLED` | Worker | V2 runtime을 명시적으로 구성했을 때만 `true` |
 | `EXECUTION_V2_ENVIRONMENT` | Worker | `paper` 또는 로컬 `contract_test` |
 | `EXECUTION_V2_WORKER_API_ENABLED` | Worker | migration/RPC 검증 후에만 `true` |
+| `ALERT_WEBHOOK_URL` | Worker | HTTPS-only approved receiver; ACK key와 함께 설정 |
+| `ALERT_WEBHOOK_RECEIVER_ACK_*` | Worker | current/previous 32-byte HMAC ACK keys; Desktop 금지 |
+| `DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_*` | 별도 dead-man | main Worker와 공유하지 않는 별도 HMAC ACK keys |
 | `VITE_SUPABASE_URL` | Desktop | Supabase project URL |
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | Desktop | client publishable key |
 | `VITE_SUPABASE_REALTIME_DISABLED` | Desktop | `true`이면 polling 조회 전용; 모든 mutation 차단 |

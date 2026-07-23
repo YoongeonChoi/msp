@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 from typing import cast
 
 import pytest
 
 from app import container as container_module
+from app.adapters.alerts.outbox_webhook_destination import OutboxWebhookDestination
+from app.adapters.alerts.webhook_alert_notifier import WebhookAlertNotifier
 from app.adapters.broker.contract_test_broker import ContractTestBroker
 from app.adapters.broker.toss_client import TossClient
 from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernelV2
@@ -155,6 +158,66 @@ def test_contract_test_operations_runtime_keeps_paper_source_fail_closed(
     runtime = build_operations_v2_runtime(settings, ShutdownFlag())
 
     assert isinstance(runtime.execution_source, UnavailablePaperExecutionCommandSource)
+
+
+async def test_main_receiver_key_ring_is_wired_to_legacy_and_outbox_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_key_b64 = base64.b64encode(b"c" * 32).decode("ascii")
+    previous_key_b64 = base64.b64encode(b"p" * 32).decode("ascii")
+    webhook_values: dict[str, object] = {
+        "ALERT_WEBHOOK_URL": "https:" + "//alerts.example.test/events",
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID": "main-current",
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64": current_key_b64,
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID": "main-previous",
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64": previous_key_b64,
+    }
+    legacy = build_container(
+        Settings.model_validate(webhook_values),
+        ShutdownFlag(),
+    )
+    notifier = cast(
+        WebhookAlertNotifier,
+        legacy.trading_loop.run_trading_cycle.alert_notifier,
+    )
+
+    monkeypatch.setattr(container_module, "SupabaseWorkerApi", FakeWorkerApi)
+    operations = build_operations_v2_runtime(
+        Settings.model_validate(
+            webhook_values
+            | {
+                "EXECUTION_V2_ENABLED": True,
+                "EXECUTION_V2_ENVIRONMENT": "contract_test",
+                "EXECUTION_V2_WORKER_API_ENABLED": True,
+                "EXECUTION_V2_WORKER_ID": ("00000000-0000-4000-8000-000000000001"),
+                "EXECUTION_V2_ACCOUNT_ID": "contract-test-primary",
+            }
+        ),
+        ShutdownFlag(),
+    )
+    destination = cast(OutboxWebhookDestination, operations.destination)
+
+    assert notifier._transport._key_ring.accepted_key_ids == (
+        "main-current",
+        "main-previous",
+    )
+    assert destination._transport._key_ring.accepted_key_ids == (
+        "main-current",
+        "main-previous",
+    )
+
+    await legacy.close()
+    await operations.close()
+
+    assert notifier._transport._client.is_closed
+
+
+def test_mutated_production_settings_are_rechecked_at_container_composition() -> None:
+    settings = Settings()
+    settings.env = "production"
+
+    with pytest.raises(ValueError, match="production_alert_webhook_is_required"):
+        build_container(settings, ShutdownFlag())
 
 
 class FakeWorkerApi:

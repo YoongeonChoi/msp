@@ -322,6 +322,26 @@ row locking, leases, and recipient-side dedupe.
 - Webhook secrets, account numbers, authorization data, and provider raw payloads
   never enter audit or outbox records.
 
+### Receiver ACK key rotation
+
+1. Generate a new random 32-byte key outside the repository and encode it as
+   canonical padded base64. Assign a new bounded key ID.
+2. Configure the receiver to accept both old and new IDs. Keep the old key active
+   while completion-write retries may still return an exact cached ACK.
+3. Move the old current ID/key to the matching `PREVIOUS` variables, place the new
+   pair in `CURRENT`, and restart only after the full pair passes startup validation.
+4. Confirm new deliveries are signed by the current ID and exact cached retries
+   signed by the previous ID still authenticate. An item, URL, destination, or
+   payload change must fail the cached ACK.
+5. After the maximum retry/dead-letter and incident investigation window has
+   elapsed with no old-key traffic, remove both previous variables together and
+   then remove the old key from the receiver.
+
+Never log or paste key values or raw key IDs. Bounded operational metrics may use
+only the configured slot label (`current` or `previous`), never the configured or
+receiver-provided ID itself.
+Do not treat a signed receiver ACK as human incident ACK or immutable archive proof.
+
 ## Paper execution investigation
 
 The v1 policy supports KRW whole-share `LIMIT` `DAY` buy/sell only. A fill can

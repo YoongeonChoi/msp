@@ -21,6 +21,10 @@ from app.application.services.order_reconciliation_service import (
 from app.config import load_settings
 from app.domain.common.time import now_utc
 from app.domain.trading.entities import BotSettings, Order
+from app.tools.receiver_ack_drill_fixture import (
+    drill_receiver_key_ring,
+    signed_legacy_alert_handler,
+)
 from app.tools.run_live_alert_drill_once import DrillAlertNotifier, DrillTimeoutBroker
 
 AckReader = Callable[[str, float], Awaitable[bool]]
@@ -54,22 +58,30 @@ async def run_incident_response_drill(
         raise ValueError("ack_timeout_sec_must_be_positive")
     settings = load_settings()
     active_drill_id = _normalize_drill_id(drill_id)
+    http_client: httpx.AsyncClient | None = None
     if settings.alert_webhook_url is None:
         if require_ack:
             raise IncidentResponseDrillConfigurationError(
                 "real_alert_webhook_required_for_ack_drill"
             )
         transport: IncidentTransport = "mock"
-        http_client = httpx.AsyncClient(transport=httpx.MockTransport(_mock_alert_handler))
+        http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(signed_legacy_alert_handler())
+        )
         webhook_notifier = WebhookAlertNotifier(
             "https://alerts.example.test/live-incident-drill",
+            key_ring=drill_receiver_key_ring(),
             client=http_client,
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
     else:
         transport = "real"
+        key_ring = settings.alert_webhook_receiver_key_ring()
+        if key_ring is None:
+            raise IncidentResponseDrillConfigurationError("real_alert_receiver_key_is_required")
         webhook_notifier = WebhookAlertNotifier(
             settings.alert_webhook_url.get_secret_value(),
+            key_ring=key_ring,
             timeout_sec=settings.alert_webhook_timeout_sec,
         )
     notifier = DrillAlertNotifier(webhook_notifier)
@@ -107,7 +119,11 @@ async def run_incident_response_drill(
             transport=transport,
         )
     finally:
-        await notifier.aclose()
+        try:
+            await notifier.aclose()
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
 
 
 async def main(argv: Sequence[str] | None = None) -> int:
@@ -141,10 +157,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
             drill_id=args.drill_id,
         )
     except IncidentResponseDrillConfigurationError as exc:
-        print(
-            "FINAL=FAIL live_incident_response_drill "
-            f"transport=mock reason={exc}"
-        )
+        print(f"FINAL=FAIL live_incident_response_drill transport=mock reason={exc}")
         return 1
     if not result.ack_required:
         print(
@@ -198,10 +211,7 @@ async def _send_incident_events(
     )
     await service.reconcile_live_orders()
     event = repository.engine_events[-1]
-    if (
-        event["level"] != "critical"
-        or event["message"] != "live_order_manual_check_still_unknown"
-    ):
+    if event["level"] != "critical" or event["message"] != "live_order_manual_check_still_unknown":
         raise RuntimeError(f"live_incident_response_drill_failed: {event}")
     common_details = {
         "drill": True,
@@ -245,10 +255,6 @@ async def _read_stdin_ack(drill_id: str, timeout_sec: float) -> bool:
     except TimeoutError:
         return False
     return line.strip() == expected
-
-
-def _mock_alert_handler(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(204, request=request)
 
 
 def _elapsed_ms(started: float) -> int:
