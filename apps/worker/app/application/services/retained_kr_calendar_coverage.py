@@ -233,6 +233,43 @@ def build_retained_kr_calendar_date_range_coverage(
     return result
 
 
+def validate_retained_kr_calendar_date_range_coverage(
+    value: object,
+) -> RetainedKrCalendarDateRangeCoverageV1:
+    """Rebuild gated coverage and reject forged result fields."""
+
+    if type(value) is not RetainedKrCalendarDateRangeCoverageV1:
+        raise RetainedKrCalendarCoverageError("retained_kr_calendar_coverage_result_invalid")
+    try:
+        request = CalendarAsOfReadRequest(
+            provider=value.provider,
+            market=value.market,
+            start_session_date=value.start_session_date,
+            end_session_date=value.end_session_date,
+            as_of=value.selected_as_of,
+            page_size=value.source_page_size,
+        )
+        snapshot = DurableCalendarAsOfSnapshotV1(
+            query_sha256=value.source_query_sha256,
+            snapshot_token="0:0:0",
+            snapshot_issued_at=value.source_snapshot_issued_at,
+            snapshot_manifest_sha256=value.source_snapshot_manifest_sha256,
+            candidate_count=value.source_candidate_count,
+            items=value.items,
+        )
+        canonical = build_retained_kr_calendar_date_range_coverage(
+            request,
+            snapshot,
+        )
+        matches = canonical == value
+    except Exception:
+        pass
+    else:
+        if matches:
+            return canonical
+    raise RetainedKrCalendarCoverageError("retained_kr_calendar_coverage_result_invalid") from None
+
+
 def _validate_next_business_chain(
     items: tuple[DurableSelectedCalendarSessionV1, ...],
     *,

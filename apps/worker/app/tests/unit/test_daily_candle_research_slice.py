@@ -25,6 +25,7 @@ from app.application.services.daily_candle_research_slice import (
     DailyCandleResearchSliceError,
     DailyCandleResearchSliceService,
     build_contiguous_daily_candle_research_slice,
+    validate_contiguous_daily_candle_research_slice,
 )
 from app.domain.common.time import KST
 from app.domain.market_data.daily_candle_as_of import (
@@ -76,9 +77,7 @@ async def test_service_builds_three_session_slice_after_one_complete_read() -> N
     snapshot = _snapshot(request, items)
     reader = FakeReader(snapshot)
 
-    result = await DailyCandleResearchSliceService(
-        reader
-    ).build_contiguous_slice(request)
+    result = await DailyCandleResearchSliceService(reader).build_contiguous_slice(request)
 
     assert reader.calls == [request]
     assert result.provider == "toss"
@@ -102,6 +101,81 @@ async def test_service_builds_three_session_slice_after_one_complete_read() -> N
         result.data_manifest_sha256
         == "c99f0913e526a6990eeea5e09804f4b215908a9dbc744fedb2f0e09f7f97cc6c"
     )
+
+
+async def test_service_keeps_caller_scope_when_reader_mutates_its_request() -> None:
+    class MutatingReader:
+        received_request: DailyCandleAsOfReadRequest | None = None
+
+        async def read_daily_candles_as_of(
+            self,
+            request: DailyCandleAsOfReadRequest,
+        ) -> DurableDailyCandleAsOfSnapshotV1:
+            self.received_request = request
+            object.__setattr__(request, "symbol", "000660")
+            return _snapshot(request, _items())
+
+    request = _request()
+    reader = MutatingReader()
+
+    with pytest.raises(
+        DailyCandleResearchSliceError,
+        match="daily_candle_research_slice_source_query_mismatch",
+    ):
+        await DailyCandleResearchSliceService(reader).build_contiguous_slice(request)
+
+    assert request.symbol == "005930"
+    assert reader.received_request is not request
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    [
+        ("schema_version", "pit_daily_candle_research_slice.v2"),
+        ("source_query_sha256", "d" * 64),
+        ("source_snapshot_manifest_sha256", "d" * 64),
+        ("slice_spec_sha256", "d" * 64),
+        ("data_manifest_sha256", "d" * 64),
+        ("full_research_certified", True),
+    ],
+)
+def test_public_validator_rebuilds_and_rejects_forged_slice_fields(
+    field_name: str,
+    forged_value: object,
+) -> None:
+    request = _request()
+    result = build_contiguous_daily_candle_research_slice(
+        request,
+        _snapshot(request, _items()),
+    )
+
+    validated = validate_contiguous_daily_candle_research_slice(result)
+
+    assert validated == result
+    assert validated is not result
+    assert validated.items[0] is not result.items[0]
+
+    object.__setattr__(result, field_name, forged_value)
+    with pytest.raises(
+        DailyCandleResearchSliceError,
+        match="daily_candle_research_slice_result_invalid",
+    ):
+        validate_contiguous_daily_candle_research_slice(result)
+
+
+def test_public_validator_rejects_nested_slice_lineage_tamper() -> None:
+    request = _request()
+    result = build_contiguous_daily_candle_research_slice(
+        request,
+        _snapshot(request, _items()),
+    )
+    object.__setattr__(result.items[0].lineage, "calendar_revision", 2)
+
+    with pytest.raises(
+        DailyCandleResearchSliceError,
+        match="daily_candle_research_slice_result_invalid",
+    ):
+        validate_contiguous_daily_candle_research_slice(result)
 
 
 def test_one_session_slice_is_allowed_when_both_boundaries_match() -> None:
@@ -175,9 +249,10 @@ def test_public_query_fingerprint_matches_worker_sql_contract() -> None:
         separators=(",", ":"),
     )
 
-    assert daily_candle_as_of_query_sha256(request) == hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()
+    assert (
+        daily_candle_as_of_query_sha256(request)
+        == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    )
 
 
 async def test_service_maps_reader_failure_without_leaking_source_message() -> None:
@@ -192,9 +267,7 @@ async def test_service_maps_reader_failure_without_leaking_source_message() -> N
         DailyCandleResearchSliceError,
         match="daily_candle_research_slice_source_read_failed",
     ) as exc_info:
-        await DailyCandleResearchSliceService(reader).build_contiguous_slice(
-            request
-        )
+        await DailyCandleResearchSliceService(reader).build_contiguous_slice(request)
 
     assert reader.calls == [request]
     assert secret_message not in str(exc_info.value)
@@ -272,11 +345,7 @@ def test_gate_requires_exact_first_and_last_session_boundaries(
 ) -> None:
     request = _request()
     all_items = _items()
-    items = (
-        all_items[:-1]
-        if boundary_case == "last-boundary-missing"
-        else all_items[1:]
-    )
+    items = all_items[:-1] if boundary_case == "last-boundary-missing" else all_items[1:]
     with pytest.raises(
         DailyCandleResearchSliceError,
         match="daily_candle_research_slice_range_boundary_mismatch",
@@ -505,10 +574,7 @@ def test_received_clock_after_as_of_is_lineage_not_an_alternate_cutoff() -> None
     )
 
     assert result.selected_session_count == 3
-    assert all(
-        item.lineage.timing_received_at > result.selected_as_of
-        for item in result.items
-    )
+    assert all(item.lineage.timing_received_at > result.selected_as_of for item in result.items)
 
 
 def test_gate_rejects_lineage_received_after_snapshot_issue() -> None:
@@ -590,11 +656,15 @@ def _item_for_session(
         tzinfo=KST,
     ) + timedelta(hours=9)
     regular_end_at = regular_start_at + timedelta(hours=6, minutes=30)
-    next_regular_start_at = datetime.combine(
-        next_business_date,
-        datetime.min.time(),
-        tzinfo=KST,
-    ) + timedelta(hours=9) + next_start_offset
+    next_regular_start_at = (
+        datetime.combine(
+            next_business_date,
+            datetime.min.time(),
+            tzinfo=KST,
+        )
+        + timedelta(hours=9)
+        + next_start_offset
+    )
     next_regular_end_at = next_regular_start_at + timedelta(
         hours=6,
         minutes=30,
@@ -638,24 +708,18 @@ def _item_for_session(
         timing_revision_id=_uuid(serial * 10 + 1),
         timing_idempotency_key=timing.idempotency_key,
         timing_revision=1,
-        timing_canonical_evidence_sha256=(
-            timing.canonical_timing_evidence_sha256
-        ),
+        timing_canonical_evidence_sha256=(timing.canonical_timing_evidence_sha256),
         timing_received_at=received_at,
         candle_revision_id=_uuid(serial * 10 + 2),
         candle_revision=1,
-        candle_canonical_observation_sha256=(
-            candle.canonical_observation_sha256
-        ),
+        candle_canonical_observation_sha256=(candle.canonical_observation_sha256),
         candle_revision_received_at=received_at,
         candle_occurrence_id=_uuid(serial * 10 + 3),
         candle_occurrence_received_at=received_at,
         candle_occurrence_origin="rpc",
         calendar_revision_id=_uuid(serial * 10 + 4),
         calendar_revision=1,
-        calendar_canonical_evidence_sha256=(
-            calendar.canonical_evidence_sha256
-        ),
+        calendar_canonical_evidence_sha256=(calendar.canonical_evidence_sha256),
         calendar_revision_received_at=received_at,
         calendar_occurrence_id=_uuid(serial * 10 + 5),
         calendar_occurrence_received_at=received_at,

@@ -192,6 +192,28 @@
   provider authenticity/finality, corporate-action·DQ, dataset/research/feature/backtest,
   order 또는 Production Live 승인을 의미하지 않는다.
 
+### 1.5 Local research completeness/finality assessment
+
+- research slice와 retained calendar coverage를 각각 원래 gate로 다시 구성해 schema,
+  scope, limitations, false certification flags, counts, source query/manifest, nested
+  content·lineage, spec/data SHA 변조를 거부한다.
+- provider, market, inclusive range, `selected_as_of`, calendar contract, open-session set,
+  calendar payload와 양 결과에 공통으로 있는 revision·occurrence ID, revision number,
+  received clock, origin, idempotency key가 exact match해야 한다. candle reader 결과에
+  없는 calendar revision 원본 `observed_at`은 limitation으로 고정한다.
+- local retained chain/date-range 검증은 true로 기록할 수 있지만 official exchange
+  completeness, provider history completeness, authenticity, finality, full research와
+  promotion은 외부 증거 SHA가 없으면 모두 false여야 한다.
+- assessment manifest는 두 source spec/data SHA와 cross-source shared-calendar-lineage SHA를
+  canonical JSON으로 결합한다. timezone 표현, reader page size, snapshot token·issue time은
+  동일 논리 입력의 digest를 바꾸지 않고, source data manifest 변화는 digest를 바꿔야 한다.
+- `require_full_research_certification()`은 canonical blocked assessment도 고정 오류로
+  거부하고, forged true flag·evidence SHA·manifest SHA는 invalid assessment로 거부한다.
+- 이 순수 동기 V1은 external verifier나 raw JSON loader를 제공하지 않는다. 따라서
+  cancellation·duplicate-key 검증은 해당 경계가 추가될 때 별도 테스트한다.
+- runtime, dataset registry, feature, backtest, strategy, order 호출 경로는 0이어야 하며
+  corporate-action·DQ와 certified replay는 각각 DI-7·FC-5 범위로 남긴다.
+
 ## 2. G1 실행·회계 불변식
 
 - 동일 semantic intent 100개 경쟁 요청에서 정확히 하나만 예약된다.

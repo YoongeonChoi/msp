@@ -25,15 +25,9 @@ from app.domain.market_data.point_in_time_calendar import (
     PointInTimeKrDailySessionV1,
 )
 
-PIT_DAILY_CANDLE_RESEARCH_SLICE_SCHEMA_VERSION = (
-    "pit_daily_candle_research_slice.v1"
-)
-PIT_DAILY_CANDLE_RESEARCH_SLICE_SCOPE_SCHEMA_VERSION = (
-    "pit_daily_candle_research_slice_scope.v1"
-)
-PIT_DAILY_CANDLE_RESEARCH_SLICE_COVERAGE_SCOPE = (
-    "retained_open_session_chain_only"
-)
+PIT_DAILY_CANDLE_RESEARCH_SLICE_SCHEMA_VERSION = "pit_daily_candle_research_slice.v1"
+PIT_DAILY_CANDLE_RESEARCH_SLICE_SCOPE_SCHEMA_VERSION = "pit_daily_candle_research_slice_scope.v1"
+PIT_DAILY_CANDLE_RESEARCH_SLICE_COVERAGE_SCOPE = "retained_open_session_chain_only"
 PIT_DAILY_CANDLE_RESEARCH_SLICE_LIMITATIONS = (
     "retained_evidence_at_read_time_only",
     "historical_database_visibility_not_reconstructed",
@@ -76,9 +70,7 @@ class ContiguousDailyCandleResearchSliceV1:
     items: tuple[DurableSelectedDailyCandleV1, ...]
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_requires_gate"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_requires_gate")
 
 
 class DailyCandleResearchSliceService:
@@ -90,8 +82,9 @@ class DailyCandleResearchSliceService:
         request: DailyCandleAsOfReadRequest,
     ) -> ContiguousDailyCandleResearchSliceV1:
         valid_request = _request(request)
+        reader_request = _request(valid_request)
         try:
-            snapshot = await self.reader.read_daily_candles_as_of(valid_request)
+            snapshot = await self.reader.read_daily_candles_as_of(reader_request)
         except Exception:
             pass
         else:
@@ -99,9 +92,7 @@ class DailyCandleResearchSliceService:
                 valid_request,
                 snapshot,
             )
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_source_read_failed"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_source_read_failed")
 
 
 def build_contiguous_daily_candle_research_slice(
@@ -112,9 +103,7 @@ def build_contiguous_daily_candle_research_slice(
     expected_query_sha256 = _query_sha256(valid_request)
     valid_snapshot = _snapshot(snapshot)
     if valid_snapshot.query_sha256 != expected_query_sha256:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_source_query_mismatch"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_source_query_mismatch")
 
     items = valid_snapshot.items
     if not items:
@@ -124,9 +113,7 @@ def build_contiguous_daily_candle_research_slice(
         or valid_snapshot.candidate_count < len(items)
         or valid_snapshot.candidate_count > 1_000
     ):
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_candidate_count_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_candidate_count_invalid")
 
     selected_as_of = _utc(valid_request.as_of)
     previous: DurableSelectedDailyCandleV1 | None = None
@@ -156,9 +143,7 @@ def build_contiguous_daily_candle_research_slice(
             or calendar.provider != valid_request.provider
             or calendar.market != valid_request.market
         ):
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_scope_mismatch"
-            )
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_scope_mismatch")
         if _utc(selection.selected_as_of) != selected_as_of:
             raise DailyCandleResearchSliceError(
                 "daily_candle_research_slice_selected_as_of_mismatch"
@@ -166,9 +151,7 @@ def build_contiguous_daily_candle_research_slice(
         try:
             candle_session_date = candle.provider_event_at.astimezone(KST).date()
         except (OverflowError, RuntimeError, TypeError, ValueError) as exc:
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_item_invalid"
-            ) from exc
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid") from exc
         if (
             not calendar.is_open
             or timing.session_date != calendar.session_date
@@ -177,9 +160,7 @@ def build_contiguous_daily_candle_research_slice(
             <= timing.session_date
             <= valid_request.end_session_date
         ):
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_scope_mismatch"
-            )
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_scope_mismatch")
         if lineage.timing_received_at > valid_snapshot.snapshot_issued_at:
             raise DailyCandleResearchSliceError(
                 "daily_candle_research_slice_snapshot_clock_invalid"
@@ -188,18 +169,14 @@ def build_contiguous_daily_candle_research_slice(
             previous_timing = previous.selection.timing_evidence
             previous_calendar = previous.calendar
             if previous_timing.session_date >= timing.session_date:
-                raise DailyCandleResearchSliceError(
-                    "daily_candle_research_slice_order_invalid"
-                )
+                raise DailyCandleResearchSliceError("daily_candle_research_slice_order_invalid")
             if previous_calendar.next_business_date != timing.session_date:
                 raise DailyCandleResearchSliceError(
                     "daily_candle_research_slice_session_chain_broken"
                 )
             if (
-                previous_calendar.next_regular_start_at
-                != calendar.regular_start_at
-                or previous_calendar.next_regular_end_at
-                != calendar.regular_end_at
+                previous_calendar.next_regular_start_at != calendar.regular_start_at
+                or previous_calendar.next_regular_end_at != calendar.regular_end_at
             ):
                 raise DailyCandleResearchSliceError(
                     "daily_candle_research_slice_next_session_hours_mismatch"
@@ -215,9 +192,7 @@ def build_contiguous_daily_candle_research_slice(
             ("calendar_idempotency_key", calendar.idempotency_key),
         )
         if any(key in seen_lineage_keys for key in lineage_keys):
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_item_invalid"
-            )
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
         seen_lineage_keys.update(lineage_keys)
         candle_contracts.add(candle.provider_contract_sha256)
         calendar_contracts.add(calendar.provider_contract_sha256)
@@ -230,30 +205,19 @@ def build_contiguous_daily_candle_research_slice(
         first_date != valid_request.start_session_date
         or last_date != valid_request.end_session_date
     ):
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_range_boundary_mismatch"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_range_boundary_mismatch")
     if len(candle_contracts) != 1 or len(calendar_contracts) != 1:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_source_contract_mixed"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_source_contract_mixed")
 
     try:
         reselected = select_daily_candles_as_of(
-            [
-                (item.selection.candle, item.selection.timing_evidence)
-                for item in canonical_items
-            ],
+            [(item.selection.candle, item.selection.timing_evidence) for item in canonical_items],
             as_of=selected_as_of,
         )
     except DailyCandleAsOfError as exc:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        ) from exc
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid") from exc
     if reselected != tuple(item.selection for item in canonical_items):
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
 
     candle_contract = next(iter(candle_contracts))
     calendar_contract = next(iter(calendar_contracts))
@@ -287,9 +251,7 @@ def build_contiguous_daily_candle_research_slice(
         "calendar_provider_contract_sha256": calendar_contract,
         "source_page_size": valid_request.page_size,
         "source_query_sha256": valid_snapshot.query_sha256,
-        "source_snapshot_manifest_sha256": (
-            valid_snapshot.snapshot_manifest_sha256
-        ),
+        "source_snapshot_manifest_sha256": (valid_snapshot.snapshot_manifest_sha256),
         "source_candidate_count": valid_snapshot.candidate_count,
         "source_snapshot_issued_at": _utc(valid_snapshot.snapshot_issued_at),
         "slice_spec_sha256": slice_spec_sha256,
@@ -301,29 +263,81 @@ def build_contiguous_daily_candle_research_slice(
     return result
 
 
+def validate_contiguous_daily_candle_research_slice(
+    value: object,
+) -> ContiguousDailyCandleResearchSliceV1:
+    """Rebuild a gated slice and reject forged result fields."""
+
+    if type(value) is not ContiguousDailyCandleResearchSliceV1:
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_result_invalid")
+    try:
+        request = DailyCandleAsOfReadRequest(
+            provider=value.provider,
+            market=value.market,
+            symbol=value.symbol,
+            interval=value.interval,
+            adjusted=value.adjusted,
+            start_session_date=value.start_session_date,
+            end_session_date=value.end_session_date,
+            as_of=value.selected_as_of,
+            page_size=value.source_page_size,
+        )
+        snapshot = DurableDailyCandleAsOfSnapshotV1(
+            query_sha256=value.source_query_sha256,
+            snapshot_token="0:0:0",
+            snapshot_issued_at=value.source_snapshot_issued_at,
+            snapshot_manifest_sha256=value.source_snapshot_manifest_sha256,
+            candidate_count=value.source_candidate_count,
+            items=value.items,
+        )
+        canonical = build_contiguous_daily_candle_research_slice(
+            request,
+            snapshot,
+        )
+        matches = canonical == value
+    except Exception:
+        pass
+    else:
+        if matches:
+            return canonical
+    raise DailyCandleResearchSliceError("daily_candle_research_slice_result_invalid") from None
+
+
 def _request(value: object) -> DailyCandleAsOfReadRequest:
     if type(value) is not DailyCandleAsOfReadRequest:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_request_invalid"
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_request_invalid")
+    try:
+        canonical = DailyCandleAsOfReadRequest(
+            provider=value.provider,
+            market=value.market,
+            symbol=value.symbol,
+            interval=value.interval,
+            adjusted=value.adjusted,
+            start_session_date=value.start_session_date,
+            end_session_date=value.end_session_date,
+            as_of=_utc(value.as_of),
+            page_size=value.page_size,
         )
-    _query_sha256(value)
-    return value
+        _query_sha256(canonical)
+        matches = canonical == value
+    except Exception:
+        pass
+    else:
+        if matches:
+            return canonical
+    raise DailyCandleResearchSliceError("daily_candle_research_slice_request_invalid") from None
 
 
 def _query_sha256(request: DailyCandleAsOfReadRequest) -> str:
     try:
         return daily_candle_as_of_query_sha256(request)
     except DailyCandleAsOfReaderError as exc:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_request_invalid"
-        ) from exc
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_request_invalid") from exc
 
 
 def _snapshot(value: object) -> DurableDailyCandleAsOfSnapshotV1:
     if type(value) is not DurableDailyCandleAsOfSnapshotV1:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_snapshot_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_snapshot_invalid")
     try:
         canonical = DurableDailyCandleAsOfSnapshotV1(
             query_sha256=value.query_sha256,
@@ -341,21 +355,15 @@ def _snapshot(value: object) -> DurableDailyCandleAsOfSnapshotV1:
         TypeError,
         ValueError,
     ) as exc:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_snapshot_invalid"
-        ) from exc
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_snapshot_invalid") from exc
     if canonical != value:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_snapshot_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_snapshot_invalid")
     return canonical
 
 
 def _item(value: object) -> DurableSelectedDailyCandleV1:
     if type(value) is not DurableSelectedDailyCandleV1:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-    )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
     try:
         selected = select_daily_candles_as_of(
             [
@@ -367,49 +375,31 @@ def _item(value: object) -> DurableSelectedDailyCandleV1:
             as_of=value.selection.selected_as_of,
         )
         if len(selected) != 1:
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_item_invalid"
-            )
-        calendar = PointInTimeKrDailySessionV1.from_payload(
-            value.calendar.to_payload()
-        )
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
+        calendar = PointInTimeKrDailySessionV1.from_payload(value.calendar.to_payload())
         source_lineage = value.lineage
         lineage = DailyCandleAsOfLineageV1(
             timing_revision_id=source_lineage.timing_revision_id,
             timing_idempotency_key=source_lineage.timing_idempotency_key,
             timing_revision=source_lineage.timing_revision,
-            timing_canonical_evidence_sha256=(
-                source_lineage.timing_canonical_evidence_sha256
-            ),
-            timing_received_at=source_lineage.timing_received_at,
+            timing_canonical_evidence_sha256=(source_lineage.timing_canonical_evidence_sha256),
+            timing_received_at=_utc(source_lineage.timing_received_at),
             candle_revision_id=source_lineage.candle_revision_id,
             candle_revision=source_lineage.candle_revision,
             candle_canonical_observation_sha256=(
                 source_lineage.candle_canonical_observation_sha256
             ),
-            candle_revision_received_at=(
-                source_lineage.candle_revision_received_at
-            ),
+            candle_revision_received_at=(_utc(source_lineage.candle_revision_received_at)),
             candle_occurrence_id=source_lineage.candle_occurrence_id,
-            candle_occurrence_received_at=(
-                source_lineage.candle_occurrence_received_at
-            ),
+            candle_occurrence_received_at=(_utc(source_lineage.candle_occurrence_received_at)),
             candle_occurrence_origin=source_lineage.candle_occurrence_origin,
             calendar_revision_id=source_lineage.calendar_revision_id,
             calendar_revision=source_lineage.calendar_revision,
-            calendar_canonical_evidence_sha256=(
-                source_lineage.calendar_canonical_evidence_sha256
-            ),
-            calendar_revision_received_at=(
-                source_lineage.calendar_revision_received_at
-            ),
+            calendar_canonical_evidence_sha256=(source_lineage.calendar_canonical_evidence_sha256),
+            calendar_revision_received_at=(_utc(source_lineage.calendar_revision_received_at)),
             calendar_occurrence_id=source_lineage.calendar_occurrence_id,
-            calendar_occurrence_received_at=(
-                source_lineage.calendar_occurrence_received_at
-            ),
-            calendar_occurrence_origin=(
-                source_lineage.calendar_occurrence_origin
-            ),
+            calendar_occurrence_received_at=(_utc(source_lineage.calendar_occurrence_received_at)),
+            calendar_occurrence_origin=(source_lineage.calendar_occurrence_origin),
         )
         canonical = DurableSelectedDailyCandleV1(
             selection=selected[0],
@@ -417,13 +407,9 @@ def _item(value: object) -> DurableSelectedDailyCandleV1:
             lineage=lineage,
         )
     except Exception:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        ) from None
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid") from None
     if canonical != value:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
     return canonical
 
 
@@ -479,17 +465,11 @@ def _item_manifest_payload(item: DurableSelectedDailyCandleV1) -> JsonObject:
             "timing_revision_id": lineage.timing_revision_id,
             "timing_idempotency_key": lineage.timing_idempotency_key,
             "timing_revision": lineage.timing_revision,
-            "timing_canonical_evidence_sha256": (
-                lineage.timing_canonical_evidence_sha256
-            ),
-            "timing_received_at": _canonical_timestamp(
-                lineage.timing_received_at
-            ),
+            "timing_canonical_evidence_sha256": (lineage.timing_canonical_evidence_sha256),
+            "timing_received_at": _canonical_timestamp(lineage.timing_received_at),
             "candle_revision_id": lineage.candle_revision_id,
             "candle_revision": lineage.candle_revision,
-            "candle_canonical_observation_sha256": (
-                lineage.candle_canonical_observation_sha256
-            ),
+            "candle_canonical_observation_sha256": (lineage.candle_canonical_observation_sha256),
             "candle_revision_received_at": _canonical_timestamp(
                 lineage.candle_revision_received_at
             ),
@@ -500,9 +480,7 @@ def _item_manifest_payload(item: DurableSelectedDailyCandleV1) -> JsonObject:
             "candle_occurrence_origin": lineage.candle_occurrence_origin,
             "calendar_revision_id": lineage.calendar_revision_id,
             "calendar_revision": lineage.calendar_revision,
-            "calendar_canonical_evidence_sha256": (
-                lineage.calendar_canonical_evidence_sha256
-            ),
+            "calendar_canonical_evidence_sha256": (lineage.calendar_canonical_evidence_sha256),
             "calendar_revision_received_at": _canonical_timestamp(
                 lineage.calendar_revision_received_at
             ),
@@ -532,9 +510,7 @@ def _payload_sha256(value: JsonObject) -> str:
             separators=(",", ":"),
         )
     except (TypeError, ValueError) as exc:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_manifest_invalid"
-        ) from exc
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_manifest_invalid") from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -544,16 +520,10 @@ def _canonical_timestamp(value: datetime) -> str:
 
 def _utc(value: object) -> datetime:
     if type(value) is not datetime or value.tzinfo is None:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        )
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
     try:
         if value.utcoffset() is None:
-            raise DailyCandleResearchSliceError(
-                "daily_candle_research_slice_item_invalid"
-            )
+            raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid")
         return value.astimezone(UTC)
     except (OverflowError, RuntimeError, TypeError, ValueError) as exc:
-        raise DailyCandleResearchSliceError(
-            "daily_candle_research_slice_item_invalid"
-        ) from exc
+        raise DailyCandleResearchSliceError("daily_candle_research_slice_item_invalid") from exc

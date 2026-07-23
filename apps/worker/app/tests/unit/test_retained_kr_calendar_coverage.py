@@ -24,6 +24,7 @@ from app.application.services.retained_kr_calendar_coverage import (
     RetainedKrCalendarCoverageService,
     RetainedKrCalendarDateRangeCoverageV1,
     build_retained_kr_calendar_date_range_coverage,
+    validate_retained_kr_calendar_date_range_coverage,
 )
 from app.domain.common.time import KST
 from app.domain.market_data.calendar_as_of import (
@@ -185,6 +186,56 @@ def test_gate_builds_mixed_open_closed_retained_date_coverage() -> None:
     assert [item.selection.session.session_date for item in result.items] == [
         START_DATE + timedelta(days=offset) for offset in range(5)
     ]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    [
+        ("schema_version", "pit_retained_kr_calendar_date_range_coverage.v2"),
+        ("source_query_sha256", "c" * 64),
+        ("source_snapshot_manifest_sha256", "c" * 64),
+        ("coverage_spec_sha256", "c" * 64),
+        ("data_manifest_sha256", "c" * 64),
+        ("full_calendar_certified", True),
+    ],
+)
+def test_public_validator_rebuilds_and_rejects_forged_coverage_fields(
+    field_name: str,
+    forged_value: object,
+) -> None:
+    request = _request()
+    result = build_retained_kr_calendar_date_range_coverage(
+        request,
+        _snapshot(request, _items()),
+    )
+
+    validated = validate_retained_kr_calendar_date_range_coverage(result)
+
+    assert validated == result
+    assert validated is not result
+    assert validated.items[0] is not result.items[0]
+
+    object.__setattr__(result, field_name, forged_value)
+    with pytest.raises(
+        RetainedKrCalendarCoverageError,
+        match="retained_kr_calendar_coverage_result_invalid",
+    ):
+        validate_retained_kr_calendar_date_range_coverage(result)
+
+
+def test_public_validator_rejects_nested_coverage_lineage_tamper() -> None:
+    request = _request()
+    result = build_retained_kr_calendar_date_range_coverage(
+        request,
+        _snapshot(request, _items()),
+    )
+    object.__setattr__(result.items[0].lineage, "calendar_revision", 2)
+
+    with pytest.raises(
+        RetainedKrCalendarCoverageError,
+        match="retained_kr_calendar_coverage_result_invalid",
+    ):
+        validate_retained_kr_calendar_date_range_coverage(result)
 
 
 @pytest.mark.parametrize("is_open", [True, False])

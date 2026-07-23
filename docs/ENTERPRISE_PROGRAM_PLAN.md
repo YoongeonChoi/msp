@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, single-candle request의 durable attempt/candidate fence와 exact occurrence confirm, 그리고 begin→read→fence→append→confirm을 강제하는 default-disabled 단일 candle application runner가 있다. retained slice는 `full_research_certified=false`이며 candle runtime/scheduler 선택·unknown-write reconciliation·자동 수집/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, single-candle request의 durable attempt/candidate fence와 exact occurrence confirm, begin→read→fence→append→confirm을 강제하는 default-disabled 단일 candle application runner, 그리고 retained research/calendar 산출물의 공통 calendar lineage 필드를 교차 결합하면서 외부 completeness·authenticity·finality 증거 부재를 고정하는 negative-only 로컬 assessment가 있다. positive certification, candle runtime/scheduler 선택·unknown-write reconciliation·자동 수집/feature/backtest 연결, corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -199,6 +199,15 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   이는 실제 KRX 전체 이력 completeness, provider authenticity/finality,
   corporate action, 전체 DQ, persisted dataset registry, feature/backtest replay,
   전략 승격 또는 주문 사용 승인을 증명하지 않는다.
+- `apps/worker/app/application/services/daily_candle_research_certification.py`는
+  위 research slice와 retained calendar date-range coverage를 각각 원래 gate로
+  재구성한 뒤 scope, `selected_as_of`, calendar contract, open-session set와 양쪽에
+  공통으로 보존된 calendar revision·occurrence lineage 필드를 교차 결합한다. candle
+  reader에 없는 calendar revision 원본 `observed_at`은 limitation으로 남긴다. manifest는 로컬
+  retained 검증과 네 외부 증거 부재 사유를 함께 고정한다. 이 V1은 외부 evidence
+  URL/SHA/boolean을 입력받지 않고 모든 completeness·authenticity·finality·full research·
+  promotion claim을 false로 유지하며 downstream require gate는 항상 거부한다.
+  trusted external verifier가 없으므로 positive certification은 여전히 미구현이다.
 - 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
   명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
   복원, lease·fencing 연속성, runtime 시작 경로 연결은 제공하지 않는다.
@@ -600,6 +609,7 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E3` 단일 inspector read 기반의 read-only range-job recovery assessment 로컬 구현
 - [x] `E3` exact assessment·operator confirmation 기반의 default-disabled one-shot range-job runtime 로컬 구현
 - [x] `E3` retained calendar date-range coverage gate와 canonical scope/data-lineage fingerprint 로컬 구현
+- [x] `E3` research/calendar 공통 calendar-lineage 결합과 외부 completeness·authenticity·finality 증거 부재를 강제하는 negative-only 로컬 assessment
 - [ ] `E3` main runtime/scheduler·자동 range collection과 feature 연결, unknown-write recovery, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거

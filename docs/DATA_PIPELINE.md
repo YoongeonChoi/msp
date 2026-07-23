@@ -340,6 +340,36 @@ authorization. The slice service is read-only and is not wired into the
 runtime container, scheduler, features, backtests, strategy, or any order
 path.
 
+`DailyCandleResearchCertificationManifestV1` is the local completeness and
+finality assessment boundary over one canonical research slice and one
+canonical retained calendar date-range coverage result. Both source objects
+are rebuilt through their original gates before use. The assessment requires
+the same provider, market, inclusive range, `selected_as_of`, and calendar
+contract. Its open-session set must match exactly, and every shared calendar
+payload, revision/occurrence ID, revision number, received clock, origin, and
+idempotency key that exists in both results is bound into a separate
+cross-source shared-lineage SHA-256 fingerprint. The calendar revision's
+original `observed_at` is not retained by the candle reader result, so V1 lists
+that missing clock as a limitation instead of claiming a full-lineage match.
+
+The V1 result is intentionally negative-only. It records the valid local
+retained chain and retained date coverage, but fixes
+`certification_status=blocked_missing_external_evidence`. Official exchange
+calendar completeness, provider history completeness, provider authenticity,
+and provider finality evidence SHA-256 values are all absent. Every matching
+certification claim, `full_research_certified`, and `promotion_allowed` remains
+false. The canonical certification manifest binds both source spec/data
+fingerprints, both provider-contract pins, the shared-lineage fingerprint,
+the exact missing-evidence reasons, and the remaining limitations.
+
+V1 accepts no caller-provided evidence URL, digest, approval boolean, or
+collection-job completion as a way to turn those claims on.
+`require_full_research_certification()` validates the assessment and always
+rejects it as not certified. A future positive path requires a separately
+reviewed trusted external-evidence verifier and a new certified type or schema
+version. This assessment is not wired into runtime, scheduler, dataset registry,
+features, backtests, strategy, orders, Desktop, or Live authorization.
+
 The read RPCs are granted only to the server-side `service_role`; they are not
 exposed to Desktop, `public`, authenticated clients, or Realtime. The port and
 adapter are not wired into collection, the runtime container, features, strategy,
