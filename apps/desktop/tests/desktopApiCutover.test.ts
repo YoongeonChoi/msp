@@ -41,7 +41,11 @@ assert.match(appSource, /OperationsSnapshotProvider/);
 assert.match(appSource, /shouldDiscardPendingDeviceConnection/);
 assert.match(appSource, /blockDeviceConnectionCleanup/);
 assert.match(appSource, /authRole\.data\?\.signedIn === true && sessionGuarded/);
-assert.match(appSource, /invalidateQueries\(\{ queryKey: authRoleQueryKey, exact: true \}\)/);
+assert.match(appSource, /principalId=\{authPrincipalId\}/);
+assert.match(
+  appSource,
+  /invalidateQueries\(\{\s*queryKey:\s*authRoleQueryKey,\s*exact:\s*true\s*\}\)/
+);
 assert.doesNotMatch(appSource, /invalidateQueries\(\)/);
 assert.doesNotMatch(settingsSource, /invalidateQueries\(\)/);
 assert.doesNotMatch(appSource, /ControlPlaneRealtimeProvider/);
@@ -49,9 +53,9 @@ assert.match(snapshotProviderSource, /refetchInterval:\s*pollIntervalMs/);
 assert.match(snapshotProviderSource, /useSyncExternalStore/);
 assert.match(
   snapshotProviderSource,
-  /effectiveEnabled = enabled && !deviceConnectionGuard\.shouldDiscardAuthenticatedSession/
+  /effectiveEnabled =\s*enabled &&\s*principalId !== null &&\s*!deviceConnectionGuard\.shouldDiscardAuthenticatedSession/
 );
-assert.match(snapshotProviderSource, /queryKey:\s*operationsSnapshotQueryKey,\s*exact:\s*true/);
+assert.match(snapshotProviderSource, /queryKey:\s*snapshotQueryKey,\s*exact:\s*true/);
 assert.doesNotMatch(sharedSource, /\.default\s*\(/, "strict shared contracts must not repair missing fields");
 assert.match(operationsSource, /\.schema\("api"\)\.rpc\(/);
 assert.doesNotMatch(operationsSource, /\.schema\("public"\)|\.from\s*\(/);

@@ -67,6 +67,11 @@ export interface OperationsSnapshotProviderProps {
   readonly dataApi?: OperationsDataApi;
   readonly guardStore?: DeviceConnectionGuardStore;
   /**
+   * Scopes the production snapshot cache to the authenticated Supabase user.
+   * Omit only in focused fixtures that do not own an auth session.
+   */
+  readonly principalId?: string | null;
+  /**
    * Starts authenticated snapshot polling and Realtime only after the current
    * device session has been confirmed. Disabled providers expose no cached
    * snapshot or transport error from a previous session.
@@ -93,6 +98,7 @@ export function OperationsSnapshotProvider({
   children,
   dataApi = operationsDataApi,
   guardStore = deviceConnectionGuardStore,
+  principalId,
   enabled = true,
   onlineOverride,
   realtimeOverride,
@@ -109,10 +115,20 @@ export function OperationsSnapshotProvider({
     guardStore.getSnapshot,
     guardStore.getSnapshot
   );
-  const effectiveEnabled = enabled && !deviceConnectionGuard.shouldDiscardAuthenticatedSession;
+  const snapshotQueryKey = useMemo(
+    () =>
+      principalId === undefined
+        ? operationsSnapshotQueryKey
+        : ([...operationsSnapshotQueryKey, "principal", principalId] as const),
+    [principalId]
+  );
+  const effectiveEnabled =
+    enabled &&
+    principalId !== null &&
+    !deviceConnectionGuard.shouldDiscardAuthenticatedSession;
 
   const query = useQuery({
-    queryKey: operationsSnapshotQueryKey,
+    queryKey: snapshotQueryKey,
     queryFn: dataApi.fetchSnapshot,
     enabled: effectiveEnabled,
     retry: false,
@@ -161,7 +177,7 @@ export function OperationsSnapshotProvider({
             lastSignalAt: parsed.data.signaled_at
           }));
           void queryClient.invalidateQueries({
-            queryKey: operationsSnapshotQueryKey,
+            queryKey: snapshotQueryKey,
             exact: true
           });
         }
@@ -184,15 +200,15 @@ export function OperationsSnapshotProvider({
       lastSignalVersion.current = null;
       void client.removeChannel(channel);
     };
-  }, [effectiveEnabled, queryClient, realtimeOverride]);
+  }, [effectiveEnabled, queryClient, realtimeOverride, snapshotQueryKey]);
 
   const invalidateSnapshot = useCallback(
     () =>
       queryClient.invalidateQueries({
-        queryKey: operationsSnapshotQueryKey,
+        queryKey: snapshotQueryKey,
         exact: true
       }),
-    [queryClient]
+    [queryClient, snapshotQueryKey]
   );
 
   const effectiveError = enabled

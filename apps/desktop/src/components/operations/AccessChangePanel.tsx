@@ -224,7 +224,7 @@ function AccessChangePanelContent({
       setSubjectUserId("");
       setEvidenceId("");
       setNotice("권한 변경 요청이 접수되었습니다. 다른 플랫폼 관리자의 독립 검토 전에는 적용되지 않습니다.");
-      await queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey, exact: true });
+      await queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
     }
   });
 
@@ -284,7 +284,7 @@ function AccessChangePanelContent({
           : "권한 변경 거절 영수증이 확인되었습니다."
       );
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey, exact: true }),
+        queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey }),
         queryClient.invalidateQueries({ queryKey: ["auth_role"] })
       ]);
     }

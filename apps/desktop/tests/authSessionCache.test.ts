@@ -3,8 +3,10 @@ import { QueryClient } from "@tanstack/react-query";
 
 import {
   captureAuthSessionEpoch,
+  evaluateAuthSessionBoundary,
   isAuthSessionEpochCurrent,
   resetQueryCacheAfterSignOut,
+  resetQueryCacheAfterPrincipalChange,
   shouldPurgeAuthSession,
   shouldRefreshAuthenticatedQueries
 } from "../src/lib/authSessionCache";
@@ -48,7 +50,7 @@ assert.deepEqual(queryClient.getQueryData(["auth_role"]), {
   warning: "이 기기를 운영 계정에 연결해야 합니다."
 });
 
-const activeSession = {} as Session;
+const activeSession = sessionFor("auditor-user-id");
 assert.equal(shouldPurgeAuthSession("SIGNED_OUT", activeSession), true);
 assert.equal(shouldPurgeAuthSession("INITIAL_SESSION", null), true);
 assert.equal(shouldPurgeAuthSession("TOKEN_REFRESHED", null), true);
@@ -59,4 +61,67 @@ assert.equal(shouldRefreshAuthenticatedQueries("TOKEN_REFRESHED", activeSession)
 assert.equal(shouldRefreshAuthenticatedQueries("SIGNED_OUT", null), false);
 assert.equal(shouldRefreshAuthenticatedQueries("INITIAL_SESSION", null), false);
 
+const initialBoundary = evaluateAuthSessionBoundary(null, "INITIAL_SESSION", activeSession);
+assert.deepEqual(initialBoundary, {
+  nextPrincipalId: "auditor-user-id",
+  principalChanged: false,
+  shouldPurgeSession: false,
+  shouldRefreshQueries: true
+});
+assert.equal(
+  evaluateAuthSessionBoundary(initialBoundary.nextPrincipalId, "TOKEN_REFRESHED", sessionFor("auditor-user-id"))
+    .principalChanged,
+  false,
+  "a token refresh for the same principal must preserve the authenticated cache boundary"
+);
+
+const switchedBoundary = evaluateAuthSessionBoundary(
+  initialBoundary.nextPrincipalId,
+  "SIGNED_IN",
+  sessionFor("viewer-user-id")
+);
+assert.deepEqual(switchedBoundary, {
+  nextPrincipalId: "viewer-user-id",
+  principalChanged: true,
+  shouldPurgeSession: false,
+  shouldRefreshQueries: true
+});
+
+queryClient.getMutationCache().build(queryClient, {
+  mutationKey: ["operations", "request", "previous-principal"],
+  mutationFn: async () => ({ requestId: "previous-principal-request" })
+});
+queryClient.setQueryData(["audit_logs", "previous-principal"], [{ id: "previous-principal-audit" }]);
+queryClient.setQueryData(["operations", "snapshot", 1], {
+  actor: "previous-principal-operations-context"
+});
+const previousPrincipalEpoch = captureAuthSessionEpoch();
+resetQueryCacheAfterPrincipalChange(queryClient);
+assert.equal(
+  isAuthSessionEpochCurrent(previousPrincipalEpoch),
+  false,
+  "a principal switch must invalidate in-flight authenticated work"
+);
+assert.equal(queryClient.getMutationCache().getAll().length, 0);
+assert.equal(queryClient.getQueryData(["audit_logs", "previous-principal"]), undefined);
+assert.equal(queryClient.getQueryData(["operations", "snapshot", 1]), undefined);
+assert.deepEqual(queryClient.getQueryData(["auth_role"]), {
+  signedIn: false,
+  email: null,
+  role: null,
+  roles: [],
+  warning: "이 기기를 운영 계정에 연결해야 합니다."
+});
+
+const malformedSession = { user: { id: " " } } as Session;
+assert.equal(
+  evaluateAuthSessionBoundary("auditor-user-id", "SIGNED_IN", malformedSession).shouldPurgeSession,
+  true,
+  "a session without a usable principal id must fail closed"
+);
+
 console.log("authenticated query cache reset fixtures passed");
+
+function sessionFor(userId: string): Session {
+  return { user: { id: userId } } as Session;
+}

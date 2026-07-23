@@ -242,6 +242,76 @@ await act(async () => disabledProviderShell.unmount());
 disabledProviderClient.clear();
 disabledProviderContainer.remove();
 
+const principalScopedClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const principalScopedContainer = dom.window.document.createElement("div");
+dom.window.document.body.append(principalScopedContainer);
+const viewerSnapshot = deferred<OperationsSnapshot>();
+let principalScopedFetchCalls = 0;
+let observedPrincipalScopedSource: OperationsSnapshotContextValue | null = null;
+const principalScopedApi: OperationsDataApi = {
+  ...dataApi,
+  fetchSnapshot: async () => {
+    principalScopedFetchCalls += 1;
+    return principalScopedFetchCalls === 1 ? snapshot : viewerSnapshot.promise;
+  }
+};
+const principalScopedShell = render(
+  <QueryClientProvider client={principalScopedClient}>
+    <OperationsSnapshotProvider
+      dataApi={principalScopedApi}
+      principalId={null}
+      realtimeOverride={null}
+      pollIntervalMs={false}
+    >
+      <SnapshotSourceProbe onValue={(value) => { observedPrincipalScopedSource = value; }} />
+    </OperationsSnapshotProvider>
+  </QueryClientProvider>,
+  { container: principalScopedContainer }
+);
+await act(async () => Promise.resolve());
+assert.equal(principalScopedFetchCalls, 0, "a missing principal must keep snapshot reads disabled");
+assert.equal(observedPrincipalScopedSource?.snapshot, undefined);
+await act(async () => {
+  principalScopedShell.rerender(
+    <QueryClientProvider client={principalScopedClient}>
+      <OperationsSnapshotProvider
+        dataApi={principalScopedApi}
+        principalId="auditor-user-id"
+        realtimeOverride={null}
+        pollIntervalMs={false}
+      >
+        <SnapshotSourceProbe onValue={(value) => { observedPrincipalScopedSource = value; }} />
+      </OperationsSnapshotProvider>
+    </QueryClientProvider>
+  );
+});
+await waitFor(() => principalScopedFetchCalls === 1 && observedPrincipalScopedSource?.snapshot === snapshot);
+await act(async () => {
+  principalScopedShell.rerender(
+    <QueryClientProvider client={principalScopedClient}>
+      <OperationsSnapshotProvider
+        dataApi={principalScopedApi}
+        principalId="viewer-user-id"
+        realtimeOverride={null}
+        pollIntervalMs={false}
+      >
+        <SnapshotSourceProbe onValue={(value) => { observedPrincipalScopedSource = value; }} />
+      </OperationsSnapshotProvider>
+    </QueryClientProvider>
+  );
+});
+await waitFor(() => principalScopedFetchCalls === 2);
+assert.equal(
+  observedPrincipalScopedSource?.snapshot,
+  undefined,
+  "a direct principal switch must not expose the previous principal's cached snapshot"
+);
+await act(async () => viewerSnapshot.resolve(snapshot));
+await waitFor(() => observedPrincipalScopedSource?.snapshot === snapshot);
+await act(async () => principalScopedShell.unmount());
+principalScopedClient.clear();
+principalScopedContainer.remove();
+
 const guardedProviderClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 const guardedProviderContainer = dom.window.document.createElement("div");
 dom.window.document.body.append(guardedProviderContainer);
@@ -396,6 +466,23 @@ function SnapshotSourceProbe({
 }) {
   onValue(useOperationsSnapshot());
   return null;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolvePromise: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: (value) => {
+      assert.ok(resolvePromise);
+      resolvePromise(value);
+    }
+  };
 }
 
 function installDom(value: JSDOM): void {

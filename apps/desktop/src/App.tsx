@@ -14,9 +14,9 @@ import { parsePageKey } from "./lib/navigation";
 import type { PageKey } from "./lib/navigation";
 import { OperationsSnapshotProvider, useOperationsSnapshot } from "./lib/operationsSnapshotContext";
 import {
+  evaluateAuthSessionBoundary,
   resetQueryCacheAfterSignOut,
-  shouldPurgeAuthSession,
-  shouldRefreshAuthenticatedQueries
+  resetQueryCacheAfterPrincipalChange
 } from "./lib/authSessionCache";
 import { clearPersistedSupabaseSession, supabase } from "./lib/supabaseClient";
 import {
@@ -40,6 +40,8 @@ function App() {
   const [page, setPageState] = useState<PageKey>(() => initialPage());
   const [sessionBoundaryKey, setSessionBoundaryKey] = useState(0);
   const [sessionGuarded, setSessionGuarded] = useState(false);
+  const [authPrincipalId, setAuthPrincipalId] = useState<string | null>(null);
+  const authPrincipalIdRef = useRef<string | null>(null);
   const sessionLostRef = useRef(false);
   const supabaseReady = isSupabaseReady();
   const deviceConnectionGuard = useSyncExternalStore(
@@ -72,6 +74,8 @@ function App() {
 
   const purgeSession = useCallback(() => {
     setSessionGuarded(true);
+    setAuthPrincipalId(null);
+    authPrincipalIdRef.current = null;
     if (sessionLostRef.current) {
       return;
     }
@@ -100,17 +104,27 @@ function App() {
       return;
     }
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      const boundary = evaluateAuthSessionBoundary(authPrincipalIdRef.current, event, session);
+      authPrincipalIdRef.current = boundary.nextPrincipalId;
+      setAuthPrincipalId(boundary.nextPrincipalId);
       if (session !== null && shouldDiscardPendingDeviceConnection()) {
         purgeSession();
         return;
       }
-      if (shouldPurgeAuthSession(event, session)) {
+      if (boundary.shouldPurgeSession) {
         purgeSession();
         return;
       }
+      if (boundary.principalChanged) {
+        resetQueryCacheAfterPrincipalChange(queryClient);
+        setSessionBoundaryKey((current) => current + 1);
+      }
       markSessionActive();
-      if (shouldRefreshAuthenticatedQueries(event, session)) {
-        void queryClient.invalidateQueries({ queryKey: authRoleQueryKey, exact: true });
+      if (boundary.shouldRefreshQueries) {
+        void queryClient.invalidateQueries({
+          queryKey: authRoleQueryKey,
+          exact: true
+        });
       }
     });
     return () => subscription.unsubscribe();
@@ -156,7 +170,11 @@ function App() {
   }, []);
 
   return (
-    <OperationsSnapshotProvider key={sessionBoundaryKey} enabled={operationsEnabled}>
+    <OperationsSnapshotProvider
+      key={sessionBoundaryKey}
+      enabled={operationsEnabled}
+      principalId={authPrincipalId}
+    >
       <SessionExpiryGuard onSessionActive={markSessionActive} onSessionLost={purgeSession} />
       <AppLayout
         page={page}
