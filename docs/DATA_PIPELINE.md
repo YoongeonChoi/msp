@@ -57,6 +57,37 @@ observation-time regression returns a committed quarantine receipt before the
 Worker adapter raises a fail-closed domain error. Quarantine rows and accepted
 revisions are append-only, while direct table access is denied to runtime roles.
 
+The daily-candle collection job store adds a separate, default-unused fence
+around one explicit candle request. Its immutable spec binds one UUIDv4 job,
+provider, KR symbol, `1d` interval, adjusted flag, inclusive `before` clock,
+pinned provider-contract SHA-256, `count=1`, no pagination, the `manual`
+trigger, and no automatic retry. The intended future collector protocol calls
+CAS begin before a provider read and fences the canonical candidate before an
+append. The store durably records those transitions, atomically assigns the
+fencing revision, and rejects stale job-state progress. It cannot yet enforce
+the I/O order or stop an out-of-band provider/append call because the existing
+ports carry no job or fence and no collector is wired. Every mutation after
+begin rebinds the spec SHA-256, expected revision, attempt, holder, and fencing
+revision.
+
+Only the exact proven pre-append reason may release a job-store attempt into
+`paused_retryable`. A candidate-fenced or `blocked_unknown` job has no
+job-store TTL takeover or automatic retry transition. Completion does not trust the append
+response's `inserted` flag as durable authority: the database joins the exact
+candidate occurrence by identity, content hash, observation time, and payload,
+then joins its immutable content revision to the returned revision and stored
+observation clock. This permits a valid later unchanged occurrence to bind an
+older content revision without confusing the two clocks. The completion owns
+the database-confirmed occurrence and content-revision UUIDs.
+
+The in-memory implementation proves only lock/CAS state semantics and loses all
+state on restart. The Supabase implementation stores private RLS-protected job
+state and an append-only attempt-event ledger behind service-role-only Worker
+RPCs. Neither adapter is selected by the normal runtime, scheduler, Desktop,
+features, backtests, strategies, or order paths. This store is a prerequisite
+for a later single-candle collector; it does not itself call the provider or
+append a candle.
+
 The daily-candle timing store adds an append-only calendar content ledger and
 separate append-only candle/calendar observation-occurrence ledgers. Content is
 deduplicated without discarding the fact that unchanged content was observed at

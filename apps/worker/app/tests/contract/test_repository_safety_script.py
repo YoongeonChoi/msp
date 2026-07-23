@@ -374,6 +374,24 @@ def test_contract_qualification_v2_worker_rpc_is_allowlisted(tmp_path: Path) -> 
     )
 
 
+def test_pit_daily_candle_collection_worker_rpcs_are_exactly_allowlisted() -> None:
+    module = _module()
+    expected = {
+        "load_or_create_pit_daily_candle_collection_job_v1",
+        "inspect_pit_daily_candle_collection_job_v1",
+        "begin_pit_daily_candle_collection_attempt_v1",
+        "fence_pit_daily_candle_collection_candidate_v1",
+        "pause_pit_daily_candle_collection_attempt_v1",
+        "block_pit_daily_candle_collection_attempt_v1",
+        "confirm_pit_daily_candle_collection_attempt_v1",
+    }
+
+    assert expected <= module.WORKER_API_ALLOWLIST
+    assert "start_append_pit_daily_candle_collection_attempt_v1" not in (
+        module.WORKER_API_ALLOWLIST
+    )
+
+
 def test_worker_api_execute_cannot_be_granted_to_authenticated(
     tmp_path: Path,
 ) -> None:

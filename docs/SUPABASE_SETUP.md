@@ -121,7 +121,8 @@ guarantee. Any ambiguous state stops the release.
 43. `20260719060000_kr_calendar_collection_job_store.sql`
 44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
-46. `seed.sql`
+46. `20260719090000_pit_daily_candle_collection_job_store.sql`
+47. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -221,6 +222,14 @@ The timestamp migrations extend that boundary in this order:
   service-role-only Worker RPC for exact job UUID inspection. A missing job
   returns `job_found=false` with a null snapshot; a present job returns the
   canonical snapshot. The RPC does not create, mutate, retry, or recover a job.
+- `20260719090000_pit_daily_candle_collection_job_store.sql` adds a private,
+  service-role-only job state machine for one manual PIT daily-candle request.
+  It records the begin fence and canonical candidate required by the future
+  collector protocol, and completion rechecks the exact immutable occurrence
+  and content revision. The migration does not itself enforce provider/append
+  call order because those ports are not fence-aware and no collector is wired.
+  The job state has no TTL takeover or automatic retry transition, scheduler
+  wiring, Desktop exposure, or order authority.
 
 ## Required project configuration
 

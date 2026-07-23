@@ -30,7 +30,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719050000_pit_calendar_as_of_reader.sql`, followed by
 `20260719060000_kr_calendar_collection_job_store.sql`, followed by
 `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`, followed by
-`20260719080000_kr_calendar_collection_job_inspection.sql`.
+`20260719080000_kr_calendar_collection_job_inspection.sql`, followed by
+`20260719090000_pit_daily_candle_collection_job_store.sql`.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content

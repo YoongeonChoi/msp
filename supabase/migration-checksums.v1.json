@@ -46,6 +46,7 @@
     "20260719050000_pit_calendar_as_of_reader.sql": "593dbb5758b701eb228a9d33fde02160b773e0827e799dede8c141fbac56b819",
     "20260719060000_kr_calendar_collection_job_store.sql": "ae5a9a3999294f8fb9484247b53e005be6ad1b26836dfe81ad1fd91ecfe525a7",
     "20260719070000_kr_calendar_collection_job_conflict_boundary.sql": "67a9b616563f8bec02ac3bfa38685aad634a322271c8fd972396c6ca1f2a0521",
-    "20260719080000_kr_calendar_collection_job_inspection.sql": "0b107f26f1d9a79cbf1e6322363a43e4cc2d64412184997681f9fd8727ea16ef"
+    "20260719080000_kr_calendar_collection_job_inspection.sql": "0b107f26f1d9a79cbf1e6322363a43e4cc2d64412184997681f9fd8727ea16ef",
+    "20260719090000_pit_daily_candle_collection_job_store.sql": "8b38903249641b1c584e2f9199e397a64811c3ca1db80b48dba2250906670dd5"
   }
 }

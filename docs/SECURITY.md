@@ -78,6 +78,19 @@ requires identity encoding and a response no larger than 64 KiB. Transport,
 schema, and canonicalization failures expose only fixed safe error codes, not
 provider bodies, tokens, credentials, or exception chains.
 
+The daily-candle collection job RPCs are service-role-only and expose no table
+CRUD. Private job rows use RLS, while attempt transitions are append-only. Begin
+binds the exact spec, revision, attempt, and holder while atomically assigning a
+fence; every later mutation also rebinds that fence. A future collector must
+call begin before provider I/O and fence the candidate before append. This
+store cannot enforce that call order or stop out-of-band I/O because the current
+provider and append ports do not carry the job fence and no collector is wired.
+After a caller records those transitions, the job state has no TTL takeover or
+automatic restart for an in-flight, candidate-fenced, or unknown attempt.
+Completion is allowed only after PostgreSQL rechecks the exact observation
+occurrence and immutable content revision. A client-reported `inserted` flag is
+telemetry, not proof of durable identity.
+
 Provider contract artifacts record source URL, retrieval time, and SHA-256.
 Unknown or mismatched contracts block execution. OpenAI output has no direct or
 indirect trade execution authority and may create only reviewable research

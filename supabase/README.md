@@ -77,7 +77,8 @@ SQL migration 순서:
 43. `20260719060000_kr_calendar_collection_job_store.sql`
 44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
-46. `seed.sql` (로컬 non-live 기본값만)
+46. `20260719090000_pit_daily_candle_collection_job_store.sql`
+47. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -97,6 +98,7 @@ python supabase/verify_pit_daily_candle_as_of_reader.py
 python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
 python supabase/verify_kr_calendar_collection_job_store.py
+python supabase/verify_pit_daily_candle_collection_job_store.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
@@ -108,7 +110,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 반환합니다.
 Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
 `extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
-`20260719080000_kr_calendar_collection_job_inspection.sql`까지 적용하는
+`20260719090000_pit_daily_candle_collection_job_store.sql`까지 적용하는
 clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
 `public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
 전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail

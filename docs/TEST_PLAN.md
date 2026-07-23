@@ -28,7 +28,35 @@
 - `audit_events` UPDATE/DELETE와 hash-chain mutation을 일반 사용자·Worker 모두
   거부한다.
 
-### 1.1 Point-in-time calendar collection
+### 1.1 Daily-candle collection attempt fence
+
+- job spec은 UUIDv4 job, provider, KR 6자리 symbol, `1d`, adjusted flag,
+  canonical UTC `before`, pinned provider-contract SHA-256, `count=1`,
+  `pagination_allowed=false`, `automatic_retry_allowed=false`, exact
+  `trigger=manual`을 canonical SHA-256 하나에 결합한다.
+- begin은 spec SHA, expected revision, UUIDv4 attempt·holder를 CAS로 먼저
+  기록한다. stale revision, concurrent second winner, reused attempt, 잘못된
+  holder/fence는 상태를 바꾸지 않고 거부한다.
+- candle은 provider/symbol/market/interval/adjusted/contract hash가 spec과
+  같고 `provider_event_at <= before`이며 read observation clock이 attempt
+  이후일 때만 append 전에 `candidate_fenced`로 저장된다.
+- `paused_retryable`은 candidate 전 exact
+  `provider_read_failed_before_candidate` reason만 허용한다. fenced candidate,
+  pre/post-candidate `blocked_unknown`, completed state에는 TTL takeover나 자동
+  begin/append retry가 없다.
+- confirm은 append receipt의 key/hash/revision/stored clock을 DB에서 exact
+  occurrence의 key/hash/observed_at/payload와 content revision에 다시 join한다.
+  unchanged replay에서 content revision의 stored clock이 candidate occurrence
+  clock보다 과거인 정상 경로를 허용하되 occurrence/content UUID는 DB가
+  선택해야 한다. client `inserted` 값만으로 완료하지 않는다.
+- begin/fence/block/confirm commit 전후 응답 유실과 cancellation, process
+  restart, stale CAS를 fault-injection한다. candidate fence나 unknown state를
+  읽은 후 provider/append 호출이 0회임을 확인한다.
+- in-memory adapter는 process-local reference임을 확인하고, Supabase verifier는
+  private RLS job table, append-only event ledger, service-role-only RPC, 직접
+  CRUD 차단, bounded strict response, zero-order-write를 검사한다.
+
+### 1.2 Point-in-time calendar collection
 
 - 단일 날짜 collection request는 정확한 `date`만 허용하며 잘못된 값은 clock이나
   source/store I/O 전에 거부한다.
@@ -47,7 +75,7 @@
 - 단일 날짜 저장 성공은 calendar completeness, provider authenticity/finality,
   corporate-action·DQ 승인, dataset/research/feature/order readiness를 의미하지 않는다.
 
-### 1.2 Manual fenced calendar range collection job
+### 1.3 Manual fenced calendar range collection job
 
 - 기본 `manual_execution_enabled=false`와 exact `trigger=manual`을 함께 요구하고,
   비활성·잘못된 요청은 clock, job store, UUID factory, collector보다 먼저 거부한다.
@@ -120,7 +148,7 @@
   corporate-action·DQ, dataset/research/feature/backtest/order 또는 Production Live
   승인을 의미하지 않는다.
 
-### 1.3 Retained calendar date-range coverage
+### 1.4 Retained calendar date-range coverage
 
 - 요청 inclusive 범위의 모든 calendar date가 정확히 한 번씩 하루 단위 오름차순으로
   존재해야 한다. 첫·중간·끝 누락, 중복, 역순, 범위 밖 날짜는 fail closed한다.
