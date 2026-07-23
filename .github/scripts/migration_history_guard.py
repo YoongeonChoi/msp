@@ -546,18 +546,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 commit_and_parents = commit_line.split()
                 if len(commit_and_parents) < 2:
                     raise GuardError("candidate history contains a parentless commit")
-                commit, first_parent = commit_and_parents[:2]
+                commit, *parents = commit_and_parents
+                first_parent = parents[0]
                 commit_boundary = f"commit {commit[:12]}"
-                first_parent_entries = _tree_entries(repo_root, first_parent)
+                parent_entries = {
+                    parent: _tree_entries(repo_root, parent)
+                    for parent in parents
+                }
+                first_parent_entries = parent_entries[first_parent]
                 first_parent_paths = set(first_parent_entries)
-                committed_paths = protected | first_parent_paths
-                violations.extend(
-                    _protected_violations(
-                        _changes(repo_root, (first_parent, commit)),
-                        committed_paths,
-                        boundary=commit_boundary,
+                for parent, entries in parent_entries.items():
+                    parent_boundary = (
+                        commit_boundary
+                        if len(parents) == 1
+                        else f"{commit_boundary} parent {parent[:12]}"
                     )
-                )
+                    violations.extend(
+                        _protected_violations(
+                            _changes(repo_root, (parent, commit)),
+                            protected | set(entries),
+                            boundary=parent_boundary,
+                        )
+                    )
                 commit_entries = _tree_entries(repo_root, commit)
                 commit_new_paths = set(commit_entries) - protected
                 violations.extend(

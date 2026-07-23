@@ -226,6 +226,50 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertIn(source, output)
         self.assertIn(target, output)
 
+    def test_remote_rejects_merge_time_modify_of_second_parent_migration(self) -> None:
+        base, path = self._begin_second_parent_candidate_merge()
+        self.fixture.write(path, "select 2;\n")
+        head = self.fixture.commit("merge modified candidate migration", path)
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(output, r"commit [0-9a-f]{12} parent [0-9a-f]{12} M: .*candidate\.sql")
+
+    def test_remote_rejects_merge_time_delete_of_second_parent_migration(self) -> None:
+        base, path = self._begin_second_parent_candidate_merge()
+        self.fixture.git("rm", "-q", "-f", "--", path)
+        head = self.fixture.commit("merge deleted candidate migration")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(output, r"commit [0-9a-f]{12} parent [0-9a-f]{12} D: .*candidate\.sql")
+
+    def test_remote_rejects_merge_time_rename_of_second_parent_migration(self) -> None:
+        base, source = self._begin_second_parent_candidate_merge()
+        target = "supabase/migrations/20260719100000_renamed.sql"
+        self.fixture.git("mv", "--", source, target)
+        head = self.fixture.commit("merge renamed candidate migration")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(source, output)
+        self.assertIn(target, output)
+
+    def _begin_second_parent_candidate_merge(self) -> tuple[str, str]:
+        _root, base = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719090000_candidate.sql"
+        self.fixture.git("switch", "-q", "-c", "topic", base)
+        self.fixture.write(path)
+        self.fixture.commit("add topic candidate migration", path)
+        self.fixture.git("switch", "-q", "-c", "integration", base)
+        self.fixture.write("integration.txt", "integration\n")
+        self.fixture.commit("advance integration branch", "integration.txt")
+        self.fixture.git("merge", "--no-ff", "--no-commit", "topic")
+        return base, path
+
     def test_remote_rejects_modify_then_restore_of_protected_migration(self) -> None:
         _root, base = self.fixture.timestamp_base()
         path = "supabase/migrations/20260719080000_base.sql"
@@ -347,7 +391,10 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         result, output = self.fixture.remote_guard(base, head)
 
         self.assertEqual(result, 1, output)
-        self.assertRegex(output, r"commit [0-9a-f]{12} A: .*20260719080000_base\.sql")
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} parent [0-9a-f]{12} A: .*20260719080000_base\.sql",
+        )
 
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
