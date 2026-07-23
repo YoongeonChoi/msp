@@ -370,4 +370,4 @@ def _uuid4_text(value: object) -> str:
         raise KrCalendarCollectionJobStoreError(
             "kr_calendar_collection_job_store_job_id_invalid"
         )
-    return value
+    return str(parsed)

@@ -33,6 +33,12 @@ JOB_ID = "00000000-0000-4000-8000-000000000101"
 HOLDER_ID = "00000000-0000-4000-8000-000000000102"
 ATTEMPT_1 = "00000000-0000-4000-8000-000000000103"
 ATTEMPT_2 = "00000000-0000-4000-8000-000000000104"
+
+
+class _TextSubclass(str):
+    pass
+
+
 START_DATE = date(2026, 3, 25)
 CREATED_AT = datetime(2026, 3, 24, 22, 0, tzinfo=UTC)
 CONTRACT_SHA256 = "c" * 64
@@ -388,6 +394,11 @@ async def test_inspect_implements_separate_port_and_requires_canonical_uuid4() -
         match="job_id_invalid",
     ):
         await inspector.inspect_job("00000000-0000-1000-8000-000000000101")
+    with pytest.raises(
+        KrCalendarCollectionJobStoreError,
+        match="job_id_invalid",
+    ):
+        await inspector.inspect_job(_TextSubclass(JOB_ID))
 
     assert await inspector.inspect_job(JOB_ID) is None
 

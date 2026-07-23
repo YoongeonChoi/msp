@@ -831,7 +831,7 @@ def _uuid4_text(value: object, field_name: str) -> str:
         raise KrCalendarCollectionJobStoreError(
             f"kr_calendar_collection_job_store_{field_name}_invalid"
         )
-    return value
+    return str(parsed)
 
 
 def _sha256_value(value: object, field_name: str) -> str:
