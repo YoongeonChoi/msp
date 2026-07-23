@@ -2,7 +2,7 @@
 
 상태: `CURRENT / TREND-ONLY`
 
-평가 기준 SHA: `f189932fdbb419b0be66cc5446821af5f59340ee`
+평가 기준 SHA: `f3bd37afb93ca449e96ac55adfef61cd4ec9cccf`
 
 평가일: 2026-07-23 KST
 
@@ -38,17 +38,17 @@
 | 데이터·연구 무결성 | 10% | 90 | 9.00 |
 | 운영 가시성 | 15% | 74 | 11.10 |
 | Desktop 효율·정확성 | 10% | 93 | 9.30 |
-| 테스트·CI | 10% | 73 | 7.30 |
+| 테스트·CI | 10% | 93 | 9.30 |
 | 문서·온보딩 | 10% | 97 | 9.70 |
 | 유지보수성 | 10% | 78 | 7.80 |
-| **가중 종합** | **100%** |  | **84.50** |
+| **가중 종합** | **100%** |  | **86.50** |
 
 산식:
 
 ```text
 96×0.20 + 74×0.15 + 90×0.10 + 74×0.15
-+ 93×0.10 + 73×0.10 + 97×0.10 + 78×0.10
-= 84.50
++ 93×0.10 + 93×0.10 + 97×0.10 + 78×0.10
+= 86.50
 ```
 
 ## 엄격 QA 체크리스트
@@ -116,12 +116,12 @@
 | DT-7 | Cargo check·test·build CI | 5 | 5 | PASS | `.github/workflows/ci.yml`이 세 명령을 `--locked`로 실행한다. |
 | DT-8 | signed packaged artifact와 provenance | 5 | 0 | MISSING | package·sign·attestation을 exact SHA와 결합해야 한다. |
 
-### 테스트·CI — 73/100
+### 테스트·CI — 93/100
 
 | ID | 요구사항 | 배점 | 획득 | 상태 | 근거 또는 완료 조건 |
 | --- | --- | ---: | ---: | --- | --- |
-| TC-1 | Worker 전체 회귀 테스트 | 25 | 25 | PASS | exact candidate: `2014 passed, 2 skipped`. |
-| TC-2 | Ruff와 strict mypy | 20 | 0 | MISSING | Ruff는 통과하지만 캐시 없는 전체 mypy가 3개 오류로 실패한다. 같은 오류는 이전 기준 SHA에도 있어 DI-6 회귀는 아니지만 현 SHA의 PASS 증거가 될 수 없다. |
+| TC-1 | Worker 전체 회귀 테스트 | 25 | 25 | PASS | exact candidate: `2018 passed, 2 skipped`. |
+| TC-2 | Ruff와 strict mypy | 20 | 20 | PASS | 전체 Ruff와 fresh CI의 mypy 2.3.0이 412개 source file을 통과한다. Literal 상태 분기와 세 UUID validator는 strict built-in `str` 경계를 회귀 테스트로 고정한다. |
 | TC-3 | migration·history·security contract tests | 15 | 15 | PASS | exact SHA의 Worker suite가 repository contract tests를 통과했다. |
 | TC-4 | disposable PostgreSQL 전체 migration apply | 5 | 5 | PASS | PostgreSQL 17 disposable DB에서 fresh·populated upgrade, 전체 migration, RLS/ACL, CAS/ABA, 동시성, revision headroom을 실행했다. |
 | TC-5 | Desktop typecheck·lint·test·build | 15 | 15 | PASS | exact SHA의 clean worktree에서 네 명령이 모두 통과했다. |
@@ -173,13 +173,12 @@ binary gate 증거로 평가하며, 현재 `G0/G1/G2 FAIL`을 바꾸지 않는�
 
 | 검증 | 결과 | 수준 |
 | --- | --- | --- |
-| `python -m pytest --basetemp .pytest-tmp` | PASS — 2014 passed, 2 skipped | detached candidate worktree; OS temp path normalized |
+| `python -m pytest --basetemp .pytest-tmp` | PASS — 2018 passed, 2 skipped | detached exact candidate worktree; OS temp path normalized |
 | `python -m ruff check app` | PASS | candidate-isolated |
-| `python -m mypy --no-incremental app` | FAIL — 3 errors in 3 files, 412 source files | detached exact-SHA worktree; 이전 `fc06b3f`도 동일 3 errors/406 files |
-| DI-6 새 port·adapter 대상 `python -m mypy --strict` | PASS | candidate-isolated; 전체 mypy PASS를 뜻하지 않음 |
-| DI-6 focused Worker tests | PASS — 116 passed | candidate-isolated |
+| `python -m mypy --no-incremental app` | PASS — mypy 2.3.0, 412 source files | candidate-isolated; CI와 같은 현재 버전의 pure-Python build |
+| TC-2 focused Worker tests | PASS — first fix 148, follow-up store 32 | main working tree; 변경 대상 외 사용자 파일과 무관한 모듈 |
 | `python .github/scripts/repository_safety.py all` | PASS | candidate-isolated |
-| `python supabase/verify_pit_daily_candle_collection_job_store.py` | PASS — `FINAL=PASS` | PostgreSQL 17 candidate-isolated; fresh·upgrade·concurrency 포함 |
+| `python supabase/verify_pit_daily_candle_collection_job_store.py` | PASS — `FINAL=PASS` | PostgreSQL 17 exact candidate; fresh·upgrade·concurrency 포함 |
 | `npm ci` | PASS — 334 packages installed, 337 audited | detached exact-SHA worktree |
 | `npm run desktop:typecheck` | PASS | detached exact-SHA worktree |
 | `npm run desktop:lint` | PASS | detached exact-SHA worktree |
@@ -188,10 +187,12 @@ binary gate 증거로 평가하며, 현재 `G0/G1/G2 FAIL`을 바꾸지 않는�
 | `npm run desktop:build` | PASS — Vite production build | detached exact-SHA worktree |
 | `npm audit --package-lock-only --json` | FAIL — indirect dev-only high 1, production high/critical 0 | detached exact-SHA worktree |
 | `npm audit --package-lock-only --omit=dev --json` | PASS — production high/critical 0 | detached exact-SHA worktree |
-| `git diff f189932f^ f189932f --check` | PASS | committed patch |
-| `git diff-tree --root --no-commit-id --name-status -r f189932f` | PASS — planned 20 paths | post-commit audit |
+| `git diff 6c3d70c..f3bd37a --check` | PASS | two committed TC-2 patches |
+| `git diff-tree --root --no-commit-id --name-status -r b91144e` | PASS — planned 6 paths | post-commit audit; patch hash `47854b79…` 일치 |
+| `git diff-tree --root --no-commit-id --name-status -r f3bd37a` | PASS — planned 2 paths | post-commit audit; patch hash `625f088b…` 일치 |
 | `git status --branch` | PASS — `develop...origin/develop` ahead/behind 0 | pushed exact commit |
-| GitHub Actions push run `29978891404` | FAIL — Worker typecheck 3 errors, Browser E2E exit 1 | exact `f189932f`; 로컬 exact E2E 21/21 PASS라 CI 전용 또는 flaky 원인은 미해결 |
+| GitHub Actions Worker run `29980300558` | PASS — Ruff, mypy, pytest | exact `f3bd37a`; 전체 workflow의 다른 job은 확인 시점에 진행 중 |
+| GitHub Actions security dependency gate | FAIL — dev-only npm high 1 | exact `f3bd37a`; TC-9 감점과 일치 |
 
 실제 Toss/Supabase 네트워크는 호출하지 않았고 transport 검증은
 `MockTransport` 중심이다. dedicated secret scanner는 이 반복에서 실행하지
@@ -200,16 +201,15 @@ binary gate 증거로 평가하며, 현재 `G0/G1/G2 FAIL`을 바꾸지 않는�
 
 ## 다음 구현 순서
 
-1. `TC-2`: 캐시 없는 전체 mypy의 기존 3개 타입 오류를 최소 변경으로 복구한다.
-2. `FC-6`: DI-6 fence를 사용하는 default-disabled 단일 candle collector를
+1. `FC-6`: DI-6 fence를 사용하는 default-disabled 단일 candle collector를
    구현한다.
-3. `TC-7`: provider read·append 전후 응답 유실과 취소 fault를 collector 수준에서
+2. `TC-7`: provider read·append 전후 응답 유실과 취소 fault를 collector 수준에서
    검증해 blind network I/O가 없음을 증명한다.
-4. `FC-7`·`OP-11`·`MA-7`: lease, retry budget, dead-letter, manual replay를 갖는
+3. `FC-7`·`OP-11`·`MA-7`: lease, retry budget, dead-letter, manual replay를 갖는
    restart-safe scheduler 조립 경계를 구현한다.
-5. `DI-5`·`FC-5`·`DI-7`: completeness/finality와 DQ가 인증된 dataset registry 및
+4. `DI-5`·`FC-5`·`DI-7`: completeness/finality와 DQ가 인증된 dataset registry 및
    certified replay를 별도 원자 커밋으로 진행한다.
-6. `TS-5`: 미확정 쓰기를 durable receipt로만 판정하는 수동 복구 경계를 구현한다.
-7. `TC-9`는 사용자의 현재 lockfile 작업과 안전하게 분리할 수 있을 때 처리한다.
-8. 각 기능마다 focused test, 전체 영향 test, Ruff, mypy, migration verifier를
+5. `TS-5`: 미확정 쓰기를 durable receipt로만 판정하는 수동 복구 경계를 구현한다.
+6. `TC-9`는 사용자의 현재 lockfile 작업과 안전하게 분리할 수 있을 때 처리한다.
+7. 각 기능마다 focused test, 전체 영향 test, Ruff, mypy, migration verifier를
    실행하고 커밋·푸시 후 이 표를 새 exact SHA로 다시 계산한다.
