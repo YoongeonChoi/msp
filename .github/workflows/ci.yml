@@ -109,10 +109,12 @@ jobs:
       - name: Block historical migration rewrites
         env:
           BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          NEW_REF_BASE_REF: refs/remotes/origin/${{ github.event.repository.default_branch }}
           HEAD_REVISION: ${{ github.sha }}
         run: >-
           python .github/scripts/migration_history_guard.py
           --base "$BASE_REVISION" --head "$HEAD_REVISION"
+          --new-ref-base-ref "$NEW_REF_BASE_REF"
       - name: Check migration order and safety
         shell: bash
         run: |

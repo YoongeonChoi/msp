@@ -419,6 +419,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base", help="exact base commit SHA")
     parser.add_argument("--head", help="exact head commit SHA")
+    parser.add_argument(
+        "--new-ref-base-ref",
+        help=(
+            "trusted Git ref to use when --base is the all-zero SHA from a "
+            "new branch push"
+        ),
+    )
     return parser
 
 
@@ -427,8 +434,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         repo_root = _repository_root(args.repo_root)
         if args.worktree:
-            if args.base is not None or args.head is not None:
-                raise GuardError("--worktree cannot be combined with --base or --head")
+            if (
+                args.base is not None
+                or args.head is not None
+                or args.new_ref_base_ref is not None
+            ):
+                raise GuardError(
+                    "--worktree cannot be combined with --base, --head, or "
+                    "--new-ref-base-ref"
+                )
             head = _commit(
                 repo_root,
                 _git(repo_root, "rev-parse", "HEAD").strip(),
@@ -505,7 +519,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             if args.base is None or args.head is None:
                 raise GuardError("provide --worktree or both --base and --head")
-            base = _commit(repo_root, args.base, "--base")
+            base_revision = args.base
+            if base_revision == _ZERO_SHA:
+                if args.new_ref_base_ref is None:
+                    raise GuardError(
+                        "--base is the all-zero SHA from a new ref; "
+                        "--new-ref-base-ref is required"
+                    )
+                base_revision = _git(
+                    repo_root,
+                    "rev-parse",
+                    "--verify",
+                    f"{args.new_ref_base_ref}^{{commit}}",
+                ).strip()
+            base = _commit(repo_root, base_revision, "--base")
             head = _commit(repo_root, args.head, "--head")
             _require_ancestor(repo_root, base, head)
             base_entries = _tree_entries(repo_root, base)
