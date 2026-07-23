@@ -2,8 +2,8 @@
 """Fail closed when a committed Supabase migration is rewritten.
 
 New migrations must append after the immediately preceding version and remain
-regular 100644 blobs. A migration path in the comparison base must never be
-modified, deleted, renamed, re-added, or type-changed.
+regular 100644 blobs. A migration becomes immutable as soon as a commit adds it,
+including within the candidate history being reviewed.
 """
 
 from __future__ import annotations
@@ -548,17 +548,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise GuardError("candidate history contains a parentless commit")
                 commit, first_parent = commit_and_parents[:2]
                 commit_boundary = f"commit {commit[:12]}"
+                first_parent_entries = _tree_entries(repo_root, first_parent)
+                first_parent_paths = set(first_parent_entries)
+                committed_paths = protected | first_parent_paths
                 violations.extend(
                     _protected_violations(
                         _changes(repo_root, (first_parent, commit)),
-                        protected,
+                        committed_paths,
                         boundary=commit_boundary,
                     )
                 )
-                first_parent_entries = _tree_entries(repo_root, first_parent)
                 commit_entries = _tree_entries(repo_root, commit)
                 commit_new_paths = set(commit_entries) - protected
-                first_parent_paths = set(first_parent_entries)
                 violations.extend(
                     _addition_violations(
                         first_parent_paths,

@@ -185,6 +185,47 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertIn("first-parent append", output)
         self.assertIn("must be newer than base tail 20260719100000", output)
 
+    def test_remote_rejects_modify_of_candidate_migration_after_add_commit(self) -> None:
+        _root, base = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719090000_candidate.sql"
+        self.fixture.write(path, "select 1;\n")
+        self.fixture.commit("add candidate migration", path)
+        self.fixture.write(path, "select 2;\n")
+        head = self.fixture.commit("modify candidate migration", path)
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(output, r"commit [0-9a-f]{12} M: .*20260719090000_candidate\.sql")
+
+    def test_remote_rejects_delete_of_candidate_migration_after_add_commit(self) -> None:
+        _root, base = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719090000_candidate.sql"
+        self.fixture.write(path)
+        self.fixture.commit("add candidate migration", path)
+        self.fixture.git("rm", "-q", "--", path)
+        head = self.fixture.commit("delete candidate migration")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(output, r"commit [0-9a-f]{12} D: .*20260719090000_candidate\.sql")
+
+    def test_remote_rejects_rename_of_candidate_migration_after_add_commit(self) -> None:
+        _root, base = self.fixture.timestamp_base()
+        source = "supabase/migrations/20260719090000_candidate.sql"
+        target = "supabase/migrations/20260719100000_renamed.sql"
+        self.fixture.write(source)
+        self.fixture.commit("add candidate migration", source)
+        self.fixture.git("mv", "--", source, target)
+        head = self.fixture.commit("rename candidate migration")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(source, output)
+        self.assertIn(target, output)
+
     def test_remote_rejects_modify_then_restore_of_protected_migration(self) -> None:
         _root, base = self.fixture.timestamp_base()
         path = "supabase/migrations/20260719080000_base.sql"
