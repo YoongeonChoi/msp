@@ -55,6 +55,10 @@ FENCED_AT = NOW + timedelta(seconds=2)
 CONFIRMED_AT = NOW + timedelta(seconds=3)
 
 
+class _TextSubclass(str):
+    pass
+
+
 async def test_store_routes_all_rpc_transitions_and_binds_authoritative_evidence() -> None:
     spec = _spec()
     candle = _candle()
@@ -168,6 +172,28 @@ async def test_store_inspects_absent_job_only_from_exact_null_snapshot() -> None
         await client.aclose()
 
     assert calls == 2
+
+
+async def test_inspect_rejects_text_subclass_before_rpc() -> None:
+    requests = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseDailyCandleCollectionJobStore(_settings(), client=client)
+    try:
+        with pytest.raises(
+            DailyCandleCollectionJobStoreError,
+            match="job_id_invalid",
+        ):
+            await store.inspect_job(_TextSubclass(JOB_ID))
+    finally:
+        await client.aclose()
+
+    assert requests == 0
 
 
 async def test_store_accepts_pre_candidate_unknown_block_and_replayed_receipt() -> None:

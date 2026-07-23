@@ -1043,7 +1043,7 @@ def _uuid4_text(value: object, field_name: str) -> str:
         raise DailyCandleCollectionJobStoreError(
             f"daily_candle_collection_job_store_{field_name}_invalid"
         )
-    return cast(str, value)
+    return str(parsed)
 
 
 def _sha256_value(value: object, field_name: str) -> str:
