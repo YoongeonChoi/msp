@@ -34,9 +34,10 @@
 - dead-man monitor는 Worker와 다른 failure domain에서 heartbeat, lease, outbox,
   incident ACK를 감시한다.
 - dead-man alert의 `episode_id`는 한 monitor process 안에서 reason 변화와 recovery를
-  동일 장애로 묶고, recovery 이후 재발에는 새 UUID를 사용한다. Idempotency key는
-  episode, event, reason, observation time에 결합되어 같은 실패 요청의 exact retry는
-  안정적이고 새 관측은 다른 요청이 된다. 인증 실패 payload는 성공할 때까지 보존하며,
+  동일 장애로 묶고, recovery 이후 재발에는 새 UUID를 사용한다. 성공한 동일
+  episode·reason의 unhealthy 상태는 다음 poll에서 다시 보내지 않으며, reason 전이와
+  recovery만 새 관측 요청을 만든다. Idempotency key는 episode, event, reason,
+  observation time에 결합된다. 인증 실패 payload는 성공할 때까지 exact하게 보존하며,
   unhealthy ACK가 성공하기 전에는 recovery 상태를 만들지 않는다.
 - process 재시작을 넘는 episode 연속성을 보장하는 외부 durable state store와 실제
   failure-domain 분리 배포가 아직 없다. 해당 저장소·복구 시험·수신측 upsert/dedupe

@@ -305,8 +305,9 @@
   attempt 2는 같은 request의 cached ACK를 still-configured current key 또는 rotation
   overlap의 previous key에 한해서만 허용한다. Retired/unknown key는 거부한다.
 - dead-man 인증 실패는 exact pending alert와 episode를 유지하고, unhealthy가 인증되기
-  전에 recovery를 보내지 않는다. observation이 바뀌면 request와 idempotency key도
-  함께 바뀌며 exact retry만 동일해야 한다.
+  전에 recovery를 보내지 않는다. 성공한 동일 episode·reason은 다음 poll에서 다시
+  보내지 않고, reason 전이·recovery·재발만 새 observation과 idempotency key를
+  만든다. 실패한 pending alert의 exact retry만 동일해야 한다.
 - request/response size와 전체 wall-clock timeout을 검증하고, `httpx`/`httpcore` INFO
   로그에 webhook path/query, body, key 또는 signature가 남지 않아야 한다.
 - emergency stop은 같은 transaction에서 `enabled=false`, `control_epoch+1`을 만든다.

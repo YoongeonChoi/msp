@@ -88,13 +88,14 @@ class RunDeadManMonitor:
         if not evaluation.healthy:
             if self._active_episode_id is None:
                 self._active_episode_id = _validated_episode_id(self.episode_id_factory())
-            self._pending_alert = _PendingDeadManAlert(
-                event="unhealthy",
-                reason_codes=evaluation.reason_codes,
-                observed_at=evaluation.evaluated_at,
-            )
-            await self._deliver_pending_alert()
-            delivered = True
+            if evaluation.reason_codes != self._last_unhealthy_reasons:
+                self._pending_alert = _PendingDeadManAlert(
+                    event="unhealthy",
+                    reason_codes=evaluation.reason_codes,
+                    observed_at=evaluation.evaluated_at,
+                )
+                await self._deliver_pending_alert()
+                delivered = True
         elif self._last_unhealthy_reasons is not None:
             if self._active_episode_id is None:
                 raise OperationsInvariantError("dead_man_episode_state_is_invalid")

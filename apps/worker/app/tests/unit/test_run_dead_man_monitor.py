@@ -58,6 +58,36 @@ async def test_snapshot_failure_uses_direct_monitor_source_alert() -> None:
     assert destination.events == [(EPISODE_ONE, "unhealthy", ("monitor_source_unreachable",))]
 
 
+async def test_stable_unhealthy_state_is_not_realerted_on_each_poll() -> None:
+    later = NOW + timedelta(seconds=10)
+    observed_times = iter((NOW, later))
+    source = SequenceSource(
+        (
+            _snapshot(observed_at=NOW, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=later, heartbeat_age=timedelta(minutes=6)),
+        )
+    )
+    destination = RecordingDestination()
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: next(observed_times),
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    first = await runner.run_once()
+    repeated = await runner.run_once()
+
+    assert first.alert_delivered
+    assert not repeated.alert_delivered
+    assert destination.events == [
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
+    ]
+    assert destination.observed_times == [NOW]
+
+
 async def test_reason_changes_share_episode_and_recurrence_gets_new_episode() -> None:
     episode_ids = iter((EPISODE_ONE, EPISODE_TWO))
     source = SequenceSource(
@@ -168,6 +198,44 @@ async def test_failed_unhealthy_delivery_retries_the_same_episode() -> None:
     )
 
 
+async def test_failed_stable_unhealthy_retries_only_the_original_observation() -> None:
+    later = NOW + timedelta(seconds=10)
+    latest = NOW + timedelta(seconds=20)
+    observed_times = iter((NOW, later, latest))
+    source = SequenceSource(
+        (
+            _snapshot(observed_at=NOW, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=later, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=latest, heartbeat_age=timedelta(minutes=6)),
+        )
+    )
+    destination = FailingCallsDestination({1})
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: next(observed_times),
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    with pytest.raises(
+        DeadManAlertDeliveryError,
+        match="dead_man_alert_delivery_failed",
+    ):
+        await runner.run_once()
+    retry = await runner.run_once()
+    stable = await runner.run_once()
+
+    assert retry.alert_delivered
+    assert not stable.alert_delivered
+    assert destination.events == [
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
+    ]
+    assert destination.observed_times == [NOW, NOW]
+
+
 async def test_failed_recovery_delivery_keeps_episode_open_for_retry() -> None:
     source = SequenceSource(
         (_snapshot(heartbeat_age=timedelta(minutes=6)), _snapshot(), _snapshot())
@@ -210,8 +278,9 @@ class SequenceSource:
         observed_at: datetime,
     ) -> DeadManSnapshot:
         assert account_id == "paper-primary"
-        assert observed_at == NOW
-        return self.snapshots.pop(0)
+        snapshot = self.snapshots.pop(0)
+        assert observed_at == snapshot.observed_at
+        return snapshot
 
 
 class FailingSource:
@@ -228,6 +297,7 @@ class FailingSource:
 class RecordingDestination:
     def __init__(self) -> None:
         self.events: list[tuple[str, str, tuple[str, ...]]] = []
+        self.observed_times: list[datetime] = []
 
     async def deliver_dead_man_alert(
         self,
@@ -239,8 +309,8 @@ class RecordingDestination:
         observed_at: datetime,
     ) -> None:
         assert account_id == "paper-primary"
-        assert observed_at == NOW
         self.events.append((episode_id, event, reason_codes))
+        self.observed_times.append(observed_at)
 
 
 class FailingCallsDestination(RecordingDestination):
@@ -270,21 +340,22 @@ class FailingCallsDestination(RecordingDestination):
 
 def _snapshot(
     *,
+    observed_at: datetime = NOW,
     heartbeat_age: timedelta = timedelta(seconds=1),
     dead_letter_count: int = 0,
 ) -> DeadManSnapshot:
     return DeadManSnapshot(
-        observed_at=NOW,
-        latest_heartbeat_at=NOW - heartbeat_age,
+        observed_at=observed_at,
+        latest_heartbeat_at=observed_at - heartbeat_age,
         latest_heartbeat_status="ok",
         latest_heartbeat_release_sha="a" * 40,
-        commands_last_completed_at=NOW - timedelta(seconds=1),
-        execution_last_completed_at=NOW - timedelta(seconds=1),
-        settlement_last_completed_at=NOW - timedelta(seconds=1),
-        reconciliation_last_completed_at=NOW - timedelta(seconds=1),
-        outbox_last_completed_at=NOW - timedelta(seconds=1),
+        commands_last_completed_at=observed_at - timedelta(seconds=1),
+        execution_last_completed_at=observed_at - timedelta(seconds=1),
+        settlement_last_completed_at=observed_at - timedelta(seconds=1),
+        reconciliation_last_completed_at=observed_at - timedelta(seconds=1),
+        outbox_last_completed_at=observed_at - timedelta(seconds=1),
         lease_holder_id="worker-a",
-        lease_expires_at=NOW + timedelta(minutes=1),
+        lease_expires_at=observed_at + timedelta(minutes=1),
         lease_release_sha="a" * 40,
         oldest_pending_outbox_at=None,
         dead_letter_count=dead_letter_count,
