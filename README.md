@@ -360,6 +360,7 @@ V2 migration을 적용하고 Worker에 서버 전용 Supabase 설정과
 - [Backtesting Policy](docs/BACKTESTING_POLICY.md) · [AI Upgrade Policy](docs/AI_UPGRADE_POLICY.md)
 - [API Connections](docs/API_CONNECTIONS.md) · [API Gaps](docs/API_GAPS.md)
 - [Cost Limits](docs/COST_LIMITS.md) · [Observability](docs/OBSERVABILITY.md)
+- [Current QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md) · [Test Plan](docs/TEST_PLAN.md)
 
 ## 기여와 보안
 
