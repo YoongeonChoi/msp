@@ -41,6 +41,8 @@ Jobs:
   - migration filename/order check
   - base-to-merge-candidate commit history rejects modification, deletion,
     rename, or type change of every migration already present in the base
+  - an all-zero push base is rejected; established long-lived branches cannot
+    substitute the current default branch for their lost historical boundary
   - new migrations append after the base tail with a unique canonical version
     and remain regular `100644` Git blobs/files
   - canonical UTF-8/LF SHA-256 inventory for every historical migration
@@ -183,6 +185,28 @@ Checks:
 - no destructive migration without rollback note or explicit destructive migration approval text
 - singleton paper safety seed
 - no committed `.env` files except `.env.example`
+
+### Long-lived branch ancestry
+
+`main` and `develop` are protected by two complementary controls:
+
+1. The active GitHub ruleset `protect-long-lived-branch-ancestry`, declared in
+   `.github/rulesets/long-lived-branch-ancestry.json`, blocks creation, deletion,
+   and non-fast-forward updates with no routine bypass actor.
+2. Both migration workflows reject an all-zero `github.event.before` instead of
+   falling back to `origin/main`. This prevents a recreated branch from being
+   treated as if its earlier branch-only migration history never existed.
+
+The ruleset is the preventive boundary because a workflow runs after GitHub accepts
+a push. The migration guard is an independent fail-closed signal and protects every
+normal nonzero base-to-head range. Normal fast-forward `develop` pushes, reviewed
+merge commits into `main`, and the post-integration fast-forward of `develop` remain
+allowed.
+
+Any missing protected ref or ruleset drift is a repository incident. Preserve the
+last trusted SHA and migration checksum evidence, use an audited administrator
+recovery, restore the active ruleset, and rerun the exact push and PR merge-candidate
+gates before development resumes.
 
 ## Workflow Security Rules
 

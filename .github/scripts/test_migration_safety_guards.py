@@ -114,74 +114,24 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn("new migrations: 1", output)
 
-    def test_new_ref_zero_base_uses_trusted_default_branch_ref(self) -> None:
-        _root, base = self.fixture.timestamp_base()
-        self.fixture.git("branch", "main", base)
-        path = "supabase/migrations/20260719090000_next.sql"
-        self.fixture.write(path)
-        head = self.fixture.commit("valid new branch tail", path)
-
-        result, output = self.fixture.guard(
-            "--base",
-            "0" * 40,
-            "--head",
-            head,
-            "--new-ref-base-ref",
-            "refs/heads/main",
-        )
-
-        self.assertEqual(result, 0, output)
-        self.assertIn(f"{base[:12]}..{head[:12]}", output)
-        self.assertIn("new migrations: 1", output)
-
-    def test_new_ref_zero_base_still_protects_default_branch_migrations(self) -> None:
-        _root, base = self.fixture.timestamp_base()
-        self.fixture.git("branch", "main", base)
-        path = "supabase/migrations/20260719080000_base.sql"
-        self.fixture.write(path, "select 2;\n")
-        head = self.fixture.commit("rewrite migration on new branch", path)
-
-        result, output = self.fixture.guard(
-            "--base",
-            "0" * 40,
-            "--head",
-            head,
-            "--new-ref-base-ref",
-            "refs/heads/main",
-        )
-
-        self.assertEqual(result, 1, output)
-        self.assertIn(f"final tree changed committed migration: {path}", output)
-
-    def test_new_ref_zero_base_requires_trusted_fallback_ref(self) -> None:
-        _root, _base = self.fixture.timestamp_base()
-        head = self.fixture.git("rev-parse", "HEAD")
+    def test_new_ref_zero_base_rejects_exact_existing_tip(self) -> None:
+        _root, head = self.fixture.timestamp_base()
 
         result, output = self.fixture.remote_guard("0" * 40, head)
 
         self.assertEqual(result, 2, output)
-        self.assertIn("--new-ref-base-ref is required", output)
+        self.assertIn("all-zero --base is not a trusted migration boundary", output)
 
-    def test_new_ref_zero_base_rejects_branch_without_default_branch_ancestry(
-        self,
-    ) -> None:
-        root, base = self.fixture.timestamp_base()
-        self.fixture.git("branch", "main", base)
-        self.fixture.git("switch", "-q", "--detach", root)
-        self.fixture.write("side.txt", "side\n")
-        head = self.fixture.commit("unrelated new branch", "side.txt")
+    def test_new_ref_zero_base_rejects_descendant_append(self) -> None:
+        _root, _base = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719090000_next.sql"
+        self.fixture.write(path)
+        head = self.fixture.commit("new ref descendant", path)
 
-        result, output = self.fixture.guard(
-            "--base",
-            "0" * 40,
-            "--head",
-            head,
-            "--new-ref-base-ref",
-            "refs/heads/main",
-        )
+        result, output = self.fixture.remote_guard("0" * 40, head)
 
         self.assertEqual(result, 2, output)
-        self.assertIn("--base is not an ancestor of --head", output)
+        self.assertIn("protected long-lived refs must not be created", output)
 
     def test_remote_rejects_backdated_timestamp(self) -> None:
         _root, base = self.fixture.timestamp_base()
@@ -555,6 +505,30 @@ class MigrationHistoryGuardTests(unittest.TestCase):
 
         self.assertEqual(result, 1, output)
         self.assertIn("must be a regular file", output)
+
+
+class LongLivedBranchRulesetTests(unittest.TestCase):
+    def test_ruleset_blocks_ref_recreation_deletion_and_force_push(self) -> None:
+        ruleset_path = (
+            SCRIPT_DIR.parent / "rulesets" / "long-lived-branch-ancestry.json"
+        )
+        ruleset = json.loads(ruleset_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(ruleset["name"], "protect-long-lived-branch-ancestry")
+        self.assertEqual(ruleset["target"], "branch")
+        self.assertEqual(ruleset["enforcement"], "active")
+        self.assertEqual(ruleset["bypass_actors"], [])
+        self.assertEqual(
+            ruleset["conditions"]["ref_name"],
+            {
+                "include": ["refs/heads/main", "refs/heads/develop"],
+                "exclude": [],
+            },
+        )
+        self.assertEqual(
+            {rule["type"] for rule in ruleset["rules"]},
+            {"creation", "deletion", "non_fast_forward"},
+        )
 
 
 class MigrationChecksumTests(unittest.TestCase):

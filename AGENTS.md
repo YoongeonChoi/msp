@@ -63,10 +63,11 @@ render.yaml       Render Background Worker blueprint
 ## Git Workflow
 
 - `develop` is the required development and integration branch. Do not start code, documentation, configuration, or migration work on `main`.
-- Before modifying repository files, switch to `develop`. If it does not exist, create it from the verified current `main` commit.
+- Before modifying repository files, switch to `develop`. In a fresh repository, establish it from the verified current `main` commit before enabling the long-lived branch ruleset. Once established, a missing `main` or `develop` is an incident; do not recreate it automatically.
 - Stage only the intended paths, keep each change in an atomic commit, run the relevant checks, and push completed commits to `origin/develop`.
 - Keep `main` stable during active development. After the development scope is complete, open a reviewed pull request from `develop` to `main`; require the exact `develop` head to pass its push CI and migration gates and the corresponding PR merge candidate to pass all required security, PR, and release gates before integration.
 - Preserve the long-lived branch ancestry when integrating: use a fast-forward or merge commit, never squash or rebase `develop` into `main`.
+- Keep the active `protect-long-lived-branch-ancestry` GitHub ruleset aligned with `.github/rulesets/long-lived-branch-ancestry.json`; creation, deletion, and non-fast-forward updates of `main` and `develop` have no routine bypass.
 - If the branches diverge, a conflict exists, a Git operation is unfinished, or unrelated staged changes are present, stop and resolve the state explicitly. Do not rewrite history or force-push.
 - Preserve unrelated working-tree changes across branch operations and never include them in development commits.
 - After successful `main` integration, fast-forward `develop` to the integrated `main` commit, push the synchronized `develop`, and remain on `develop` for the next coding task.
@@ -89,4 +90,3 @@ npm run desktop:build
 - Supabase service/secret key is worker-only.
 - Realtime is limited to lightweight control/status tables.
 - Supabase Free budget is treated as 500MB until current plan limits are verified.
-
