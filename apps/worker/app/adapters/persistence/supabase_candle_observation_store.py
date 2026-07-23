@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -10,21 +11,24 @@ import httpx
 
 from app.application.ports.candle_observation_store_port import (
     CandleObservationStoreError,
+    CandleObservationStorePersistenceKind,
     CandleObservationWriteReceipt,
 )
 from app.config import Settings
 from app.domain.common.json import JsonObject
 from app.domain.market_data.point_in_time import (
     PointInTimeCandleV1,
-    PointInTimeDataError,
+)
+from app.infrastructure.bounded_json import (
+    BoundedJsonError,
+    bounded_json_response,
 )
 from app.infrastructure.supabase_headers import supabase_api_headers
 
 PITCandleRpc = Literal["append_pit_candle_observation_v1"]
 
-PIT_CANDLE_RPC_ALLOWLIST: frozenset[str] = frozenset(
-    {"append_pit_candle_observation_v1"}
-)
+PIT_CANDLE_RPC_ALLOWLIST: frozenset[str] = frozenset({"append_pit_candle_observation_v1"})
+PIT_CANDLE_MAX_RPC_RESPONSE_BYTES = 64 * 1024
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _QUARANTINE_REASONS = frozenset(
@@ -54,6 +58,8 @@ class SupabaseCandleObservationStore:
     and collection completeness remain separate contracts.
     """
 
+    persistence_kind: CandleObservationStorePersistenceKind = "durable"
+
     def __init__(
         self,
         settings: Settings,
@@ -61,13 +67,12 @@ class SupabaseCandleObservationStore:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not settings.supabase_url or settings.supabase_secret_key is None:
-            raise CandleObservationStoreError(
-                "candle_observation_store_credentials_missing"
-            )
+            raise CandleObservationStoreError("candle_observation_store_credentials_missing")
         secret = settings.supabase_secret_key.get_secret_value()
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
         self.headers = supabase_api_headers(secret) | {
             "accept-profile": "worker_api",
+            "accept-encoding": "identity",
             "content-profile": "worker_api",
             "content-type": "application/json",
         }
@@ -93,9 +98,7 @@ class SupabaseCandleObservationStore:
             )
         )
         if set(row) != _RECEIPT_FIELDS:
-            raise CandleObservationStoreError(
-                "candle_observation_store_rpc_result_shape_invalid"
-            )
+            raise CandleObservationStoreError("candle_observation_store_rpc_result_shape_invalid")
 
         status = _required_text(row, "status")
         idempotency_key = _sha256(row, "idempotency_key")
@@ -108,9 +111,7 @@ class SupabaseCandleObservationStore:
         stored_observed_at = _aware_datetime(row, "stored_observed_at")
 
         if idempotency_key != canonical.idempotency_key:
-            raise CandleObservationStoreError(
-                "candle_observation_store_rpc_identity_mismatch"
-            )
+            raise CandleObservationStoreError("candle_observation_store_rpc_identity_mismatch")
         if observation_sha256 != canonical.canonical_observation_sha256:
             raise CandleObservationStoreError(
                 "candle_observation_store_rpc_observation_hash_mismatch"
@@ -119,24 +120,16 @@ class SupabaseCandleObservationStore:
         reason_code = row.get("reason_code")
         if status == "quarantined":
             _canonical_uuid(quarantine_id)
-            if (
-                not isinstance(reason_code, str)
-                or reason_code not in _QUARANTINE_REASONS
-                or inserted
-            ):
+            if type(reason_code) is not str or reason_code not in _QUARANTINE_REASONS or inserted:
                 raise CandleObservationStoreError(
                     "candle_observation_store_quarantine_receipt_invalid"
                 )
             raise CandleObservationStoreError(reason_code)
 
         if quarantine_id is not None or reason_code is not None:
-            raise CandleObservationStoreError(
-                "candle_observation_store_rpc_result_shape_invalid"
-            )
+            raise CandleObservationStoreError("candle_observation_store_rpc_result_shape_invalid")
         if (status, inserted) not in {("stored", True), ("replayed", False)}:
-            raise CandleObservationStoreError(
-                "candle_observation_store_rpc_status_invalid"
-            )
+            raise CandleObservationStoreError("candle_observation_store_rpc_status_invalid")
         if stored_observed_at > canonical.observed_at.astimezone(UTC):
             raise CandleObservationStoreError(
                 "candle_observation_store_rpc_observation_time_invalid"
@@ -156,119 +149,131 @@ class SupabaseCandleObservationStore:
 
     async def _rpc(self, rpc: PITCandleRpc, payload: JsonObject) -> object:
         if rpc not in PIT_CANDLE_RPC_ALLOWLIST:
-            raise CandleObservationStoreError(
-                "candle_observation_store_rpc_not_allowed"
-            )
+            raise CandleObservationStoreError("candle_observation_store_rpc_not_allowed")
+        result: object = None
+        failed = False
         try:
-            response = await self.client.post(
+            async with self.client.stream(
+                "POST",
                 f"{self.base_url}/{rpc}",
                 headers=self.headers,
                 json=payload,
-            )
-            response.raise_for_status()
-            return response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+            ) as response:
+                try:
+                    result = await bounded_json_response(
+                        response,
+                        max_bytes=PIT_CANDLE_MAX_RPC_RESPONSE_BYTES,
+                    )
+                except BoundedJsonError:
+                    failed = True
+                if not response.is_success:
+                    failed = True
+        except Exception:
+            failed = True
+        if failed:
             raise CandleObservationStoreError(
                 "candle_observation_store_rpc_failed_or_returned_invalid_json"
-            ) from exc
+            ) from None
+        return result
 
 
 def _canonical_candle(value: object) -> PointInTimeCandleV1:
-    if not isinstance(value, PointInTimeCandleV1):
-        raise CandleObservationStoreError(
-            "candle_observation_store_item_invalid"
-        )
-    try:
+    if type(value) is not PointInTimeCandleV1:
+        raise CandleObservationStoreError("candle_observation_store_item_invalid")
+    if not _candle_fields_are_exact(value):
+        raise CandleObservationStoreError("candle_observation_store_item_invalid")
+    canonical: PointInTimeCandleV1 | None = None
+    with suppress(Exception):
         canonical = PointInTimeCandleV1.from_payload(value.to_payload())
-    except (
-        AttributeError,
-        OverflowError,
-        TypeError,
-        ValueError,
-        PointInTimeDataError,
-    ) as exc:
-        raise CandleObservationStoreError(
-            "candle_observation_store_item_invalid"
-        ) from exc
-    if canonical != value:
-        raise CandleObservationStoreError(
-            "candle_observation_store_item_invalid"
-        )
+    if canonical is None or canonical != value:
+        raise CandleObservationStoreError("candle_observation_store_item_invalid")
     return canonical
 
 
+def _candle_fields_are_exact(value: PointInTimeCandleV1) -> bool:
+    return (
+        type(value.schema_version) is int
+        and type(value.provider) is str
+        and type(value.symbol) is str
+        and type(value.market) is str
+        and type(value.interval) is str
+        and type(value.adjusted) is bool
+        and type(value.provider_event_at) is datetime
+        and value.provider_event_at.tzinfo is not None
+        and value.provider_event_at.utcoffset() is not None
+        and type(value.observed_at) is datetime
+        and value.observed_at.tzinfo is not None
+        and value.observed_at.utcoffset() is not None
+        and type(value.currency) is str
+        and type(value.open_krw) is int
+        and type(value.high_krw) is int
+        and type(value.low_krw) is int
+        and type(value.close_krw) is int
+        and type(value.volume) is int
+        and type(value.provider_contract_sha256) is str
+        and type(value.canonical_observation_sha256) is str
+    )
+
+
 def _singleton_row(value: object) -> Mapping[str, object]:
-    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
-        raise CandleObservationStoreError(
-            "candle_observation_store_rpc_result_invalid"
-        )
+    if type(value) is not list or len(value) != 1 or type(value[0]) is not dict:
+        raise CandleObservationStoreError("candle_observation_store_rpc_result_invalid")
     return value[0]
 
 
 def _required_text(row: Mapping[str, object], key: str) -> str:
     value = row.get(key)
-    if not isinstance(value, str) or not value:
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        )
+    if type(value) is not str or not value:
+        raise CandleObservationStoreError(f"candle_observation_store_rpc_{key}_invalid")
     return value
 
 
 def _sha256(row: Mapping[str, object], key: str) -> str:
     value = _required_text(row, key)
     if _SHA256.fullmatch(value) is None:
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        )
+        raise CandleObservationStoreError(f"candle_observation_store_rpc_{key}_invalid")
     return value
 
 
 def _positive_int(row: Mapping[str, object], key: str) -> int:
     value = row.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        )
+    if type(value) is not int or value <= 0:
+        raise CandleObservationStoreError(f"candle_observation_store_rpc_{key}_invalid")
     return value
 
 
 def _boolean(row: Mapping[str, object], key: str) -> bool:
     value = row.get(key)
-    if not isinstance(value, bool):
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        )
+    if type(value) is not bool:
+        raise CandleObservationStoreError(f"candle_observation_store_rpc_{key}_invalid")
     return value
 
 
 def _aware_datetime(row: Mapping[str, object], key: str) -> datetime:
     value = _required_text(row, key)
-    try:
+    parsed: datetime | None = None
+    with suppress(ValueError):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        ) from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise CandleObservationStoreError(
-            f"candle_observation_store_rpc_{key}_invalid"
-        )
+    if (
+        parsed is None
+        or parsed.tzinfo is None
+        or parsed.utcoffset() != timedelta(0)
+        or value
+        not in {
+            parsed.isoformat(),
+            parsed.isoformat().replace("+00:00", "Z"),
+        }
+    ):
+        raise CandleObservationStoreError(f"candle_observation_store_rpc_{key}_invalid")
     return parsed.astimezone(UTC)
 
 
 def _canonical_uuid(value: object) -> str:
-    if not isinstance(value, str):
-        raise CandleObservationStoreError(
-            "candle_observation_store_quarantine_receipt_invalid"
-        )
-    try:
+    if type(value) is not str:
+        raise CandleObservationStoreError("candle_observation_store_quarantine_receipt_invalid")
+    parsed: UUID | None = None
+    with suppress(ValueError):
         parsed = UUID(value)
-    except ValueError as exc:
-        raise CandleObservationStoreError(
-            "candle_observation_store_quarantine_receipt_invalid"
-        ) from exc
-    if str(parsed) != value or parsed.version not in {1, 2, 3, 4, 5}:
-        raise CandleObservationStoreError(
-            "candle_observation_store_quarantine_receipt_invalid"
-        )
+    if parsed is None or str(parsed) != value or parsed.version not in {1, 2, 3, 4, 5}:
+        raise CandleObservationStoreError("candle_observation_store_quarantine_receipt_invalid")
     return value

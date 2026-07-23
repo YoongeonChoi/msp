@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gzip
+import json
+import traceback
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any, cast
@@ -23,6 +26,21 @@ from app.domain.common.errors import (
 from app.domain.common.json import JsonObject
 from app.tools.test_toss_readonly import _mask_identifier
 
+_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024
+_READ_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024
+
+
+class AlwaysEqualText(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class TossCandleQuerySubclass(TossCandleQuery):
+    pass
+
 
 async def test_toss_auth_uses_client_credentials_form_token_flow() -> None:
     requests: list[httpx.Request] = []
@@ -32,6 +50,7 @@ async def test_toss_auth_uses_client_credentials_form_token_flow() -> None:
         form = parse_qs(request.content.decode())
         assert request.method == "POST"
         assert request.url.path == "/oauth2/token"
+        assert request.headers["accept-encoding"] == "identity"
         assert form["grant_type"] == ["client_credentials"]
         assert form["client_id"] == ["client-id"]
         assert form["client_secret"] == ["client-secret"]
@@ -48,6 +67,98 @@ async def test_toss_auth_uses_client_credentials_form_token_flow() -> None:
     assert token == "token-value"
     assert len(requests) == 1
     await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            content=gzip.compress(
+                b'{"access_token":"token-value","token_type":"Bearer","expires_in":3600}'
+            ),
+        ),
+        httpx.Response(
+            200,
+            content=(
+                b'{"access_token":"token-value","token_type":"Bearer",'
+                b'"expires_in":3600}' + b" " * _TOKEN_RESPONSE_LIMIT_BYTES
+            ),
+        ),
+        httpx.Response(
+            200,
+            content=(
+                b'{"access_token":"token-a","access_token":"token-b",'
+                b'"token_type":"Bearer","expires_in":3600}'
+            ),
+        ),
+        httpx.Response(
+            200,
+            content=(
+                b'{"access_token":"token-value","token_type":"Bearer",'
+                b'"expires_in":3600,"metadata":{"key":1,"key":1}}'
+            ),
+        ),
+    ],
+)
+async def test_toss_auth_rejects_encoded_oversized_or_duplicate_json(
+    response: httpx.Response,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return response
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = TossAuth(_settings(), client=client)
+    try:
+        with pytest.raises(ProviderSchemaError, match="toss_auth_schema_invalid"):
+            await auth.access_token()
+    finally:
+        await client.aclose()
+
+    assert len(requests) == 1
+    assert requests[0].headers["accept-encoding"] == "identity"
+
+
+async def test_toss_auth_rejects_extra_token_field() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "token-value",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "unexpected": "secret-token-metadata",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = TossAuth(_settings(), client=client)
+    try:
+        with pytest.raises(ProviderSchemaError, match="toss_auth_schema_invalid"):
+            await auth.access_token()
+    finally:
+        await client.aclose()
+
+
+async def test_toss_auth_accepts_response_at_exact_size_limit() -> None:
+    canonical = b'{"access_token":"token-value","token_type":"Bearer","expires_in":3600}'
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(canonical + b" " * (_TOKEN_RESPONSE_LIMIT_BYTES - len(canonical))),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = TossAuth(_settings(), client=client)
+    try:
+        assert await auth.access_token() == "token-value"
+    finally:
+        await client.aclose()
 
 
 async def test_toss_auth_missing_credentials_fails_closed_without_http_call() -> None:
@@ -220,8 +331,7 @@ async def test_toss_client_parses_position_response() -> None:
     account_headers = [
         request.headers["x-tossinvest-account"]
         for request in requests
-        if request.url.path == "/api/v1/holdings"
-        and "x-tossinvest-account" in request.headers
+        if request.url.path == "/api/v1/holdings" and "x-tossinvest-account" in request.headers
     ]
     assert account_headers == ["1", "1"]
 
@@ -264,9 +374,7 @@ async def test_toss_client_rejects_incomplete_or_unvalued_positions(
 async def test_toss_client_parses_buying_power_calendar_and_account_state() -> None:
     client, requests = _client_with_responses(
         {
-            "/api/v1/buying-power": {
-                "result": {"currency": "KRW", "cashBuyingPower": "5000000"}
-            },
+            "/api/v1/buying-power": {"result": {"currency": "KRW", "cashBuyingPower": "5000000"}},
             "/api/v1/holdings": _holdings_payload(),
             "/api/v1/market-calendar/KR": _kr_market_calendar_payload(),
         }
@@ -285,9 +393,7 @@ async def test_toss_client_parses_buying_power_calendar_and_account_state() -> N
     assert calendar.next_business_day.integrated.regular_market is not None
     assert calendar.next_business_day.integrated.regular_market.start_time.hour == 9
     calendar_request = next(
-        request
-        for request in requests
-        if request.url.path == "/api/v1/market-calendar/KR"
+        request for request in requests if request.url.path == "/api/v1/market-calendar/KR"
     )
     assert calendar_request.url.params["date"] == "2026-03-25"
     assert account_state.cash_krw == 5_000_000
@@ -296,9 +402,7 @@ async def test_toss_client_parses_buying_power_calendar_and_account_state() -> N
     assert account_state.daily_order_count == 0
     assert account_state.daily_order_count_verified is False
     account_paths = [
-        request.url.path
-        for request in requests
-        if "x-tossinvest-account" in request.headers
+        request.url.path for request in requests if "x-tossinvest-account" in request.headers
     ]
     assert account_paths == [
         "/api/v1/buying-power",
@@ -320,9 +424,7 @@ async def test_toss_client_rejects_missing_required_calendar_fields(
         integrated = cast(dict[str, Any], next_day["integrated"])
         regular = cast(dict[str, Any], integrated["regularMarket"])
         del regular["endTime"]
-    client, _requests = _client_with_responses(
-        {"/api/v1/market-calendar/KR": payload}
-    )
+    client, _requests = _client_with_responses({"/api/v1/market-calendar/KR": payload})
 
     with pytest.raises(ProviderSchemaError, match="toss_read_schema_invalid"):
         await client.get_kr_market_calendar(date(2026, 3, 25))
@@ -366,6 +468,134 @@ async def test_toss_client_parses_price_and_candle_responses() -> None:
     assert prices[0].last_price == 72000
     assert candles.candles[0].close_price == 72000
     assert {request.url.path for request in requests} >= {"/api/v1/prices", "/api/v1/candles"}
+    assert all(request.headers["accept-encoding"] == "identity" for request in requests)
+
+
+@pytest.mark.parametrize(
+    "response_case",
+    [
+        "encoded",
+        "oversized",
+        "duplicate",
+        "nested_duplicate",
+    ],
+)
+async def test_toss_candle_read_rejects_encoded_oversized_or_duplicate_json(
+    response_case: str,
+) -> None:
+    canonical_body = json.dumps(
+        _candle_response_payload(),
+        separators=(",", ":"),
+    ).encode()
+    responses = {
+        "encoded": httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            content=gzip.compress(canonical_body),
+        ),
+        "oversized": httpx.Response(
+            200,
+            content=canonical_body + b" " * _READ_RESPONSE_LIMIT_BYTES,
+        ),
+        "duplicate": httpx.Response(
+            200,
+            content=_duplicate_candle_envelope_bytes(),
+        ),
+        "nested_duplicate": httpx.Response(
+            200,
+            content=_nested_duplicate_candle_bytes(),
+        ),
+    }
+    response = responses[response_case]
+    client, requests = _client_with_raw_response(response)
+    try:
+        with pytest.raises(ProviderSchemaError, match="toss_read_schema_invalid"):
+            await client.get_candles(TossCandleQuery(symbol="005930", interval="1d", count=1))
+    finally:
+        await client.client.aclose()
+
+    assert [request.url.path for request in requests] == [
+        "/oauth2/token",
+        "/api/v1/candles",
+    ]
+    assert all(request.headers["accept-encoding"] == "identity" for request in requests)
+
+
+async def test_toss_candle_read_accepts_response_at_exact_size_limit() -> None:
+    canonical = json.dumps(
+        _candle_response_payload(),
+        separators=(",", ":"),
+    ).encode()
+    response = httpx.Response(
+        200,
+        content=(canonical + b" " * (_READ_RESPONSE_LIMIT_BYTES - len(canonical))),
+    )
+    client, _requests = _client_with_raw_response(response)
+    try:
+        page = await client.get_candles(TossCandleQuery(symbol="005930", interval="1d", count=1))
+    finally:
+        await client.client.aclose()
+
+    assert len(page.candles) == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        TossCandleQuerySubclass(symbol="005930", interval="1d", count=1),
+        TossCandleQuery(
+            symbol="005930",
+            interval=cast(Any, AlwaysEqualText("1d")),
+            count=1,
+        ),
+    ],
+)
+async def test_toss_client_rejects_candle_query_subtypes_before_network(
+    query: TossCandleQuery,
+) -> None:
+    client, requests = _client_with_responses({})
+
+    with pytest.raises(ProviderSchemaError, match="toss_candle_query_invalid"):
+        await client.get_candles(query)
+
+    assert requests == []
+
+
+@pytest.mark.parametrize("extra_scope", ["envelope", "page", "candle"])
+async def test_toss_candle_read_rejects_extra_fields_at_every_scope(
+    extra_scope: str,
+) -> None:
+    payload = _candle_response_payload()
+    if extra_scope == "envelope":
+        payload["unexpected"] = "secret-envelope-field"
+    elif extra_scope == "page":
+        page = cast(dict[str, Any], payload["result"])
+        page["hasNext"] = False
+    else:
+        page = cast(dict[str, Any], payload["result"])
+        candle = cast(list[dict[str, Any]], page["candles"])[0]
+        candle["unexpected"] = "secret-candle-field"
+
+    client, _requests = _client_with_raw_response(httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(ProviderSchemaError, match="toss_read_schema_invalid"):
+            await client.get_candles(TossCandleQuery(symbol="005930", interval="1d", count=1))
+    finally:
+        await client.client.aclose()
+
+
+async def test_toss_candle_transport_error_does_not_expose_response_body() -> None:
+    secret = "secret-candle-response-must-not-leak"
+    client, _requests = _client_with_raw_response(httpx.Response(200, content=secret.encode()))
+    try:
+        with pytest.raises(ProviderSchemaError) as captured:
+            await client.get_candles(TossCandleQuery(symbol="005930", interval="1d", count=1))
+    finally:
+        await client.client.aclose()
+
+    formatted = "".join(traceback.format_exception(captured.value))
+    assert secret not in str(captured.value)
+    assert secret not in formatted
 
 
 async def test_toss_provider_error_mapping_uses_safe_error_code() -> None:
@@ -387,7 +617,63 @@ async def test_toss_provider_error_mapping_uses_safe_error_code() -> None:
     with pytest.raises(ProviderRateLimitError) as exc_info:
         await client.list_accounts()
 
-    assert exc_info.value.safe_message == "toss_rate-limit-exceeded"
+    assert exc_info.value.safe_message == "toss_http_429"
+
+
+async def test_toss_provider_error_body_cannot_inject_safe_message() -> None:
+    secret = "SECRET_SENSITIVE_123\nforged-log-line"
+    client, _requests = _client_with_responses(
+        {
+            "/api/v1/accounts": (
+                429,
+                {
+                    "error": {
+                        "requestId": "request-id",
+                        "code": secret,
+                        "message": secret,
+                    }
+                },
+            )
+        }
+    )
+
+    with pytest.raises(ProviderRateLimitError) as captured:
+        await client.list_accounts()
+
+    error = captured.value
+    formatted = "".join(traceback.format_exception(error))
+    assert error.safe_message == "toss_http_429"
+    assert secret not in formatted
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+async def test_toss_auth_error_body_cannot_inject_safe_message() -> None:
+    secret = "SECRET_AUTH_123\nforged-log-line"
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "error": secret,
+                "error_description": secret,
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = TossAuth(_settings(), client=client)
+    try:
+        with pytest.raises(ProviderAuthError) as captured:
+            await auth.access_token()
+    finally:
+        await client.aclose()
+
+    error = captured.value
+    formatted = "".join(traceback.format_exception(error))
+    assert error.safe_message == "toss_http_401"
+    assert secret not in formatted
+    assert error.__cause__ is None
+    assert error.__context__ is None
 
 
 async def test_toss_place_order_is_quarantined_without_network_call() -> None:
@@ -494,6 +780,67 @@ def _client_with_responses(
     return TossClient(resolved_settings, auth=auth, client=http_client), requests
 
 
+def _client_with_raw_response(
+    response: httpx.Response,
+) -> tuple[TossClient, list[httpx.Request]]:
+    requests: list[httpx.Request] = []
+    settings = _settings()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "token-value",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+        return response
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    auth = TossAuth(settings, client=http_client)
+    return TossClient(settings, auth=auth, client=http_client), requests
+
+
+def _candle_response_payload() -> JsonObject:
+    return {
+        "result": {
+            "candles": [
+                {
+                    "timestamp": "2026-03-25T09:00:00+09:00",
+                    "openPrice": "71600",
+                    "highPrice": "72300",
+                    "lowPrice": "71500",
+                    "closePrice": "72000",
+                    "volume": "3521000",
+                    "currency": "KRW",
+                }
+            ],
+            "nextBefore": None,
+        }
+    }
+
+
+def _duplicate_candle_envelope_bytes() -> bytes:
+    page = json.dumps(
+        _candle_response_payload()["result"],
+        separators=(",", ":"),
+    ).encode()
+    return b'{"result":' + page + b',"result":' + page + b"}"
+
+
+def _nested_duplicate_candle_bytes() -> bytes:
+    return (
+        b'{"result":{"candles":[{"timestamp":'
+        b'"2026-03-25T09:00:00+09:00","openPrice":"71600",'
+        b'"highPrice":"72300","lowPrice":"71500","closePrice":"72000",'
+        b'"volume":"3521000","currency":"KRW","currency":"KRW"}],'
+        b'"nextBefore":null}}'
+    )
+
+
 def _holdings_payload() -> JsonObject:
     return {
         "result": {
@@ -562,9 +909,7 @@ def _kr_market_calendar_payload() -> JsonObject:
                 "integrated": {
                     "regularMarket": {
                         "startTime": "2026-03-26T09:00:00+09:00",
-                        "singlePriceAuctionStartTime": (
-                            "2026-03-26T15:20:00+09:00"
-                        ),
+                        "singlePriceAuctionStartTime": ("2026-03-26T15:20:00+09:00"),
                         "endTime": "2026-03-26T15:30:00+09:00",
                     }
                 },

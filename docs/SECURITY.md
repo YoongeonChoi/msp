@@ -70,6 +70,14 @@ production order endpoint or order-capable credential. The local
 `contract_test` simulator performs create/status/cancel qualification without
 network access and must never be described as an official sandbox.
 
+Toss authentication responses are identity-encoded and limited to 64 KiB;
+read responses are identity-encoded and limited to 4 MiB. The candle envelope,
+page, and item schemas reject unknown fields. Toss and candle-store JSON reject
+duplicate keys at every nesting level. The Worker-only candle append RPC also
+requires identity encoding and a response no larger than 64 KiB. Transport,
+schema, and canonicalization failures expose only fixed safe error codes, not
+provider bodies, tokens, credentials, or exception chains.
+
 Provider contract artifacts record source URL, retrieval time, and SHA-256.
 Unknown or mismatched contracts block execution. OpenAI output has no direct or
 indirect trade execution authority and may create only reviewable research

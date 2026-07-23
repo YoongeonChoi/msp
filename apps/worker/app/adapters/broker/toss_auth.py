@@ -6,7 +6,7 @@ from time import monotonic
 import httpx
 from pydantic import ValidationError
 
-from app.adapters.broker.toss_models import TossOAuthError, TossOAuthToken
+from app.adapters.broker.toss_models import TossOAuthToken
 from app.config import Settings
 from app.domain.common.errors import (
     ProviderAuthError,
@@ -17,9 +17,14 @@ from app.domain.common.errors import (
     ProviderUnavailableError,
     ProviderUnknownError,
 )
+from app.infrastructure.bounded_json import (
+    BoundedJsonError,
+    bounded_json_response,
+)
 
 TOSS_OPENAPI_BASE_URL = "https://openapi.tossinvest.com"
 TOKEN_REFRESH_SKEW_SEC = 60.0
+TOSS_AUTH_MAX_RESPONSE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,26 +61,61 @@ class TossAuth:
         credentials = self.credentials
         if credentials is None:
             raise ProviderAuthError("toss", "toss_credentials_missing")
+        token: TossOAuthToken | None = None
+        transport_failure: str | None = None
         try:
-            response = await self.client.post(
+            async with self.client.stream(
+                "POST",
                 f"{self.base_url}/oauth2/token",
                 data={
                     "grant_type": "client_credentials",
                     "client_id": credentials.client_id,
                     "client_secret": credentials.client_secret,
                 },
-                headers={"content-type": "application/x-www-form-urlencoded"},
-            )
-            _raise_for_toss_status(response)
-            return TossOAuthToken.model_validate_json(response.text)
-        except httpx.TimeoutException as exc:
-            raise ProviderTimeoutError("toss", "toss_auth_timeout") from exc
-        except httpx.HTTPStatusError as exc:
-            raise _provider_error_from_response(exc.response) from exc
-        except httpx.RequestError as exc:
-            raise ProviderUnavailableError("toss", "toss_auth_request_failed") from exc
-        except ValidationError as exc:
-            raise ProviderSchemaError("toss", "toss_auth_schema_invalid") from exc
+                headers={
+                    "accept-encoding": "identity",
+                    "content-type": "application/x-www-form-urlencoded",
+                },
+            ) as response:
+                payload: object = None
+                body_invalid = False
+                try:
+                    payload = await bounded_json_response(
+                        response,
+                        max_bytes=TOSS_AUTH_MAX_RESPONSE_BYTES,
+                    )
+                except BoundedJsonError:
+                    body_invalid = True
+                if body_invalid:
+                    if response.is_error:
+                        raise _provider_error_from_status(response.status_code)
+                    raise ProviderSchemaError(
+                        "toss",
+                        "toss_auth_schema_invalid",
+                    )
+                if response.is_error:
+                    raise _provider_error_from_status(response.status_code)
+                validation_failed = False
+                try:
+                    token = TossOAuthToken.model_validate(payload)
+                except ValidationError:
+                    validation_failed = True
+                if validation_failed:
+                    raise ProviderSchemaError(
+                        "toss",
+                        "toss_auth_schema_invalid",
+                    )
+        except httpx.TimeoutException:
+            transport_failure = "timeout"
+        except httpx.RequestError:
+            transport_failure = "request"
+        if transport_failure == "timeout":
+            raise ProviderTimeoutError("toss", "toss_auth_timeout")
+        if transport_failure == "request":
+            raise ProviderUnavailableError("toss", "toss_auth_request_failed")
+        if token is None:
+            raise ProviderSchemaError("toss", "toss_auth_schema_invalid")
+        return token
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -91,14 +131,9 @@ def _credentials_from_settings(settings: Settings) -> TossCredentials | None:
     )
 
 
-def _raise_for_toss_status(response: httpx.Response) -> None:
-    if response.is_error:
-        response.raise_for_status()
-
-
-def _provider_error_from_response(response: httpx.Response) -> ProviderError:
-    safe_code = _safe_error_code(response)
-    match response.status_code:
+def _provider_error_from_status(status_code: int) -> ProviderError:
+    safe_code = f"toss_http_{status_code}"
+    match status_code:
         case 400 | 401 | 403:
             return ProviderAuthError("toss", safe_code)
         case 429:
@@ -107,11 +142,3 @@ def _provider_error_from_response(response: httpx.Response) -> ProviderError:
             return ProviderUnavailableError("toss", safe_code)
         case _:
             return ProviderUnknownError("toss", safe_code)
-
-
-def _safe_error_code(response: httpx.Response) -> str:
-    try:
-        oauth_error = TossOAuthError.model_validate_json(response.text)
-    except ValidationError:
-        return f"toss_http_{response.status_code}"
-    return f"toss_{oauth_error.error}"

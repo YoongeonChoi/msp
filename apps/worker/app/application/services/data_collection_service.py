@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.application.ports.candle_data_port import (
     DailyCandleReadPage,
@@ -12,6 +12,7 @@ from app.application.ports.candle_data_port import (
 from app.domain.common.errors import KnownFailClosedError
 from app.domain.common.time import now_utc
 from app.domain.market_data.point_in_time import (
+    PointInTimeCandleV1,
     PointInTimeDataError,
     validate_point_in_time_candle_page,
 )
@@ -39,39 +40,38 @@ class DataCollectionService:
         request: DailyCandleReadRequest,
     ) -> DailyCandleReadPage:
         started_at = _read_clock(self.clock)
-        _validate_request(request, started_at=started_at)
-        page = await self.source.read_daily_candle_page(request)
+        canonical_request = _canonical_request(request, started_at=started_at)
+        page: object = None
+        source_failed = False
+        try:
+            page = await self.source.read_daily_candle_page(canonical_request)
+        except Exception:
+            source_failed = True
+        if source_failed:
+            raise CandleCollectionError("candle_collection_source_failed")
         completed_at = _read_clock(self.clock)
         if completed_at < started_at:
             raise CandleCollectionError("candle_collection_clock_moved_backwards")
-        _validate_page(
+        return _canonical_page(
             page,
-            request=request,
+            request=canonical_request,
             started_at=started_at,
             completed_at=completed_at,
         )
-        return page
 
 
-def _validate_request(
+def _canonical_request(
     request: object,
     *,
     started_at: datetime,
-) -> None:
-    if not isinstance(request, DailyCandleReadRequest):
+) -> DailyCandleReadRequest:
+    if type(request) is not DailyCandleReadRequest:
         raise CandleCollectionError("candle_collection_request_invalid")
-    if (
-        not isinstance(request.symbol, str)
-        or _KR_SYMBOL_RE.fullmatch(request.symbol) is None
-    ):
+    if type(request.symbol) is not str or _KR_SYMBOL_RE.fullmatch(request.symbol) is None:
         raise CandleCollectionError("candle_collection_symbol_invalid")
-    if (
-        not isinstance(request.count, int)
-        or isinstance(request.count, bool)
-        or not 1 <= request.count <= 200
-    ):
+    if type(request.count) is not int or not 1 <= request.count <= 200:
         raise CandleCollectionError("candle_collection_count_out_of_range")
-    if not isinstance(request.adjusted, bool):
+    if type(request.adjusted) is not bool:
         raise CandleCollectionError("candle_collection_adjusted_must_be_boolean")
     before = _require_aware_timestamp(
         request.before,
@@ -79,18 +79,24 @@ def _validate_request(
     )
     if before > started_at:
         raise CandleCollectionError("candle_collection_before_is_in_future")
+    return DailyCandleReadRequest(
+        symbol=request.symbol,
+        before=before,
+        count=request.count,
+        adjusted=request.adjusted,
+    )
 
 
-def _validate_page(
+def _canonical_page(
     page: object,
     *,
     request: DailyCandleReadRequest,
     started_at: datetime,
     completed_at: datetime,
-) -> None:
-    if not isinstance(page, DailyCandleReadPage):
+) -> DailyCandleReadPage:
+    if type(page) is not DailyCandleReadPage:
         raise CandleCollectionError("candle_collection_page_invalid")
-    if not isinstance(page.candles, tuple):
+    if type(page.candles) is not tuple:
         raise CandleCollectionError("candle_collection_page_candles_invalid")
     observed_at = _require_aware_timestamp(
         page.observed_at,
@@ -98,10 +104,14 @@ def _validate_page(
     )
     if observed_at < started_at or observed_at > completed_at:
         raise CandleCollectionError("candle_collection_observed_at_outside_read")
+    candles: tuple[PointInTimeCandleV1, ...] = ()
+    candle_error_reason: str | None = None
     try:
         candles = validate_point_in_time_candle_page(page.candles)
     except PointInTimeDataError as exc:
-        raise CandleCollectionError(exc.safe_message) from exc
+        candle_error_reason = exc.safe_message
+    if candle_error_reason is not None:
+        raise CandleCollectionError(candle_error_reason)
     if len(candles) > request.count:
         raise CandleCollectionError("candle_collection_page_exceeds_count")
     if any(candle.symbol != request.symbol for candle in candles):
@@ -120,30 +130,39 @@ def _validate_page(
         raise CandleCollectionError("candle_collection_mixed_contract_hashes")
     next_before = page.next_before
     if next_before is None:
-        return
-    next_before = _require_aware_timestamp(
-        next_before,
-        "candle_collection_next_before_timezone_missing",
+        canonical_next_before = None
+    else:
+        canonical_next_before = _require_aware_timestamp(
+            next_before,
+            "candle_collection_next_before_timezone_missing",
+        )
+        if canonical_next_before >= request.before:
+            raise CandleCollectionError("candle_collection_next_before_not_progressing")
+        if candles and canonical_next_before > min(c.provider_event_at for c in candles):
+            raise CandleCollectionError("candle_collection_next_before_after_oldest")
+    return DailyCandleReadPage(
+        candles=candles,
+        next_before=canonical_next_before,
+        observed_at=observed_at,
     )
-    if next_before >= request.before:
-        raise CandleCollectionError("candle_collection_next_before_not_progressing")
-    if candles and next_before > min(c.provider_event_at for c in candles):
-        raise CandleCollectionError("candle_collection_next_before_after_oldest")
 
 
 def _read_clock(clock: Callable[[], datetime]) -> datetime:
+    value: object = None
+    failed = False
+    try:
+        value = clock()
+    except Exception:
+        failed = True
+    if failed:
+        raise CandleCollectionError("candle_collection_clock_invalid")
     return _require_aware_timestamp(
-        clock(),
+        value,
         "candle_collection_clock_timezone_missing",
     )
 
 
 def _require_aware_timestamp(value: object, reason: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise CandleCollectionError(reason)
-    return value
-
+    return value.astimezone(UTC)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import json
+import traceback
 from datetime import timedelta
 from typing import Any, cast
 
@@ -9,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.adapters.persistence.supabase_candle_observation_store import (
+    PIT_CANDLE_MAX_RPC_RESPONSE_BYTES,
     PIT_CANDLE_RPC_ALLOWLIST,
     SupabaseCandleObservationStore,
 )
@@ -16,12 +19,25 @@ from app.application.ports.candle_observation_store_port import (
     CandleObservationStoreError,
 )
 from app.config import Settings
+from app.domain.market_data.point_in_time import PointInTimeCandleV1
 from app.tests.unit.test_candle_observation_store import (
     OBSERVED_AT,
     _candle,
 )
 
 QUARANTINE_ID = "a7eeb600-d8d3-4e8b-a9b7-6330666c0590"
+
+
+class AlwaysEqualText(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class PointInTimeCandleSubclass(PointInTimeCandleV1):
+    pass
 
 
 async def test_store_posts_canonical_candle_to_only_worker_rpc() -> None:
@@ -32,6 +48,7 @@ async def test_store_posts_canonical_candle_to_only_worker_rpc() -> None:
         requests.append(request)
         payload = json.loads(request.content)
         assert request.headers["accept-profile"] == "worker_api"
+        assert request.headers["accept-encoding"] == "identity"
         assert request.headers["content-profile"] == "worker_api"
         assert request.url.path.endswith("/append_pit_candle_observation_v1")
         assert payload == {"p_candle": candle.to_payload()}
@@ -45,9 +62,7 @@ async def test_store_posts_canonical_candle_to_only_worker_rpc() -> None:
         await client.aclose()
 
     assert receipt.idempotency_key == candle.idempotency_key
-    assert receipt.canonical_observation_sha256 == (
-        candle.canonical_observation_sha256
-    )
+    assert receipt.canonical_observation_sha256 == (candle.canonical_observation_sha256)
     assert receipt.revision == 1
     assert receipt.inserted is True
     assert receipt.stored_observed_at == candle.observed_at
@@ -95,9 +110,7 @@ async def test_store_turns_committed_quarantine_receipt_into_fail_closed_error()
                     inserted=False,
                     status="quarantined",
                     quarantine_id=QUARANTINE_ID,
-                    reason_code=(
-                        "candle_observation_store_revision_time_not_increasing"
-                    ),
+                    reason_code=("candle_observation_store_revision_time_not_increasing"),
                 )
             ],
         )
@@ -127,9 +140,7 @@ async def test_store_preserves_regression_quarantine_reason_with_later_head() ->
                     status="quarantined",
                     stored_at=OBSERVED_AT.isoformat(),
                     quarantine_id=QUARANTINE_ID,
-                    reason_code=(
-                        "candle_observation_store_observation_time_regressed"
-                    ),
+                    reason_code=("candle_observation_store_observation_time_regressed"),
                 )
             ],
         )
@@ -224,6 +235,107 @@ async def test_store_maps_transport_and_json_failures_to_known_error(
         await client.aclose()
 
 
+async def test_store_suppresses_secret_bearing_transport_or_json_chain() -> None:
+    secret = "secret-candle-rpc-body-must-not-leak"
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=secret.encode())
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseCandleObservationStore(_settings(), client=client)
+    try:
+        with pytest.raises(CandleObservationStoreError) as captured:
+            await store.append_observation(_candle())
+    finally:
+        await client.aclose()
+
+    error = captured.value
+    formatted = "".join(traceback.format_exception(error))
+    assert secret not in str(error)
+    assert secret not in formatted
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "response_case",
+    ["encoded", "oversized", "duplicate", "nested_duplicate"],
+)
+async def test_store_rejects_encoded_oversized_or_duplicate_rpc_response(
+    response_case: str,
+) -> None:
+    candle = _candle()
+    canonical_body = json.dumps(
+        [_receipt(candle, inserted=True)],
+        separators=(",", ":"),
+    ).encode()
+    responses = {
+        "encoded": httpx.Response(
+            200,
+            headers={"content-encoding": "gzip"},
+            content=gzip.compress(canonical_body),
+        ),
+        "oversized": httpx.Response(
+            200,
+            content=(canonical_body + b" " * PIT_CANDLE_MAX_RPC_RESPONSE_BYTES),
+        ),
+        "duplicate": httpx.Response(
+            200,
+            content=(
+                b'[{"status":"stored","status":"stored",'
+                b'"idempotency_key":"' + candle.idempotency_key.encode() + b'",'
+                b'"canonical_observation_sha256":"'
+                + candle.canonical_observation_sha256.encode()
+                + b'","revision":1,"inserted":true,"stored_observed_at":"'
+                + candle.observed_at.isoformat().encode()
+                + b'","quarantine_id":null,"reason_code":null}]'
+            ),
+        ),
+        "nested_duplicate": httpx.Response(
+            200,
+            content=b'[{"unexpected":{"key":1,"key":1}}]',
+        ),
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        return responses[response_case]
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseCandleObservationStore(_settings(), client=client)
+    try:
+        with pytest.raises(
+            CandleObservationStoreError,
+            match="candle_observation_store_rpc_failed_or_returned_invalid_json",
+        ):
+            await store.append_observation(candle)
+    finally:
+        await client.aclose()
+
+
+async def test_store_accepts_rpc_response_at_exact_size_limit() -> None:
+    candle = _candle()
+    canonical = json.dumps(
+        [_receipt(candle, inserted=True)],
+        separators=(",", ":"),
+    ).encode()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(canonical + b" " * (PIT_CANDLE_MAX_RPC_RESPONSE_BYTES - len(canonical))),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = SupabaseCandleObservationStore(_settings(), client=client)
+    try:
+        receipt = await store.append_observation(candle)
+    finally:
+        await client.aclose()
+
+    assert receipt.idempotency_key == candle.idempotency_key
+
+
 async def test_store_revalidates_candle_before_network() -> None:
     requests = 0
 
@@ -236,8 +348,11 @@ async def test_store_revalidates_candle_before_network() -> None:
     store = SupabaseCandleObservationStore(_settings(), client=client)
     tampered = _candle()
     object.__setattr__(tampered, "close_krw", 1)
+    always_equal = _candle()
+    object.__setattr__(always_equal, "provider", AlwaysEqualText("toss"))
+    subclass = _candle_subclass(_candle())
     try:
-        for invalid in (cast(Any, object()), tampered):
+        for invalid in (cast(Any, object()), tampered, always_equal, subclass):
             with pytest.raises(
                 CandleObservationStoreError,
                 match="candle_observation_store_item_invalid",
@@ -284,4 +399,27 @@ def _settings() -> Settings:
             "SUPABASE_URL": "http://127.0.0.1:54321",
             "SUPABASE_SECRET_KEY": SecretStr("test-secret"),
         }
+    )
+
+
+def _candle_subclass(
+    candle: PointInTimeCandleV1,
+) -> PointInTimeCandleSubclass:
+    return PointInTimeCandleSubclass(
+        provider=candle.provider,
+        symbol=candle.symbol,
+        market=candle.market,
+        interval=candle.interval,
+        adjusted=candle.adjusted,
+        provider_event_at=candle.provider_event_at,
+        observed_at=candle.observed_at,
+        currency=candle.currency,
+        open_krw=candle.open_krw,
+        high_krw=candle.high_krw,
+        low_krw=candle.low_krw,
+        close_krw=candle.close_krw,
+        volume=candle.volume,
+        provider_contract_sha256=candle.provider_contract_sha256,
+        canonical_observation_sha256=candle.canonical_observation_sha256,
+        schema_version=candle.schema_version,
     )

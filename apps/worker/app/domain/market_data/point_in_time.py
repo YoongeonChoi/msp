@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -69,9 +70,7 @@ class PointInTimeCandleV1:
         _require_aware(self.provider_event_at, "provider_event_at")
         _require_aware(self.observed_at, "observed_at")
         if self.observed_at < self.provider_event_at:
-            raise PointInTimeDataError(
-                "point_in_time_candle_observed_before_provider_event"
-            )
+            raise PointInTimeDataError("point_in_time_candle_observed_before_provider_event")
         _require_literal(self.currency, "KRW", "currency")
         _require_positive_int(self.open_krw, "open_krw")
         _require_positive_int(self.high_krw, "high_krw")
@@ -79,13 +78,9 @@ class PointInTimeCandleV1:
         _require_positive_int(self.close_krw, "close_krw")
         _require_nonnegative_int(self.volume, "volume")
         if self.high_krw < max(self.open_krw, self.close_krw):
-            raise PointInTimeDataError(
-                "point_in_time_candle_high_below_open_or_close"
-            )
+            raise PointInTimeDataError("point_in_time_candle_high_below_open_or_close")
         if self.low_krw > min(self.open_krw, self.close_krw):
-            raise PointInTimeDataError(
-                "point_in_time_candle_low_above_open_or_close"
-            )
+            raise PointInTimeDataError("point_in_time_candle_low_above_open_or_close")
         _require_sha256(self.provider_contract_sha256, "provider_contract_sha256")
         _require_sha256(
             self.canonical_observation_sha256,
@@ -107,9 +102,7 @@ class PointInTimeCandleV1:
             provider_contract_sha256=self.provider_contract_sha256,
         )
         if self.canonical_observation_sha256 != expected_sha256:
-            raise PointInTimeDataError(
-                "point_in_time_candle_observation_sha256_mismatch"
-            )
+            raise PointInTimeDataError("point_in_time_candle_observation_sha256_mismatch")
 
     @classmethod
     def create(
@@ -217,9 +210,7 @@ class PointInTimeCandleV1:
             provider_contract_sha256=payload["provider_contract_sha256"],
         )
         if candle.canonical_observation_sha256 != expected_sha256:
-            raise PointInTimeDataError(
-                "point_in_time_candle_observation_sha256_mismatch"
-            )
+            raise PointInTimeDataError("point_in_time_candle_observation_sha256_mismatch")
         return candle
 
     @property
@@ -296,32 +287,30 @@ def assert_idempotent_candle_replay(
     candidate: PointInTimeCandleV1,
 ) -> None:
     if existing.idempotency_key != candidate.idempotency_key:
-        raise PointInTimeDataError(
-            "point_in_time_candle_idempotency_key_mismatch"
-        )
-    if (
-        existing.canonical_observation_sha256
-        != candidate.canonical_observation_sha256
-    ):
+        raise PointInTimeDataError("point_in_time_candle_idempotency_key_mismatch")
+    if existing.canonical_observation_sha256 != candidate.canonical_observation_sha256:
         raise PointInTimeDataError("point_in_time_candle_idempotency_conflict")
 
 
 def validate_point_in_time_candle_page(
     candles: Sequence[object],
 ) -> tuple[PointInTimeCandleV1, ...]:
+    if type(candles) not in {list, tuple}:
+        raise PointInTimeDataError("point_in_time_candle_page_is_invalid")
     result: list[PointInTimeCandleV1] = []
     identities: set[str] = set()
     for candle in candles:
-        if not isinstance(candle, PointInTimeCandleV1):
-            raise PointInTimeDataError(
-                "point_in_time_candle_page_item_is_invalid"
-            )
-        if candle.idempotency_key in identities:
-            raise PointInTimeDataError(
-                "point_in_time_candle_page_duplicate_identity"
-            )
-        identities.add(candle.idempotency_key)
-        result.append(candle)
+        if type(candle) is not PointInTimeCandleV1:
+            raise PointInTimeDataError("point_in_time_candle_page_item_is_invalid")
+        canonical: PointInTimeCandleV1 | None = None
+        with suppress(Exception):
+            canonical = PointInTimeCandleV1.from_payload(candle.to_payload())
+        if canonical is None or canonical != candle:
+            raise PointInTimeDataError("point_in_time_candle_page_item_is_invalid")
+        if canonical.idempotency_key in identities:
+            raise PointInTimeDataError("point_in_time_candle_page_duplicate_identity")
+        identities.add(canonical.idempotency_key)
+        result.append(canonical)
     return tuple(result)
 
 
@@ -340,91 +329,70 @@ def _canonical_timestamp(value: datetime) -> str:
 
 
 def _parse_canonical_timestamp(value: object, field_name: str) -> datetime:
-    if not isinstance(value, str):
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_timestamp"
-        )
-    try:
+    if type(value) is not str:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_timestamp")
+    parsed: datetime | None = None
+    with suppress(ValueError):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_timestamp"
-        ) from exc
+    if parsed is None:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_timestamp")
     _require_aware(parsed, field_name)
     if _canonical_timestamp(parsed) != value:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_canonical_utc"
-        )
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_canonical_utc")
     return parsed
 
 
 def _require_schema_version(value: object) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value != 1:
-        raise PointInTimeDataError(
-            "point_in_time_candle_schema_version_must_be_1"
-        )
+    if type(value) is not int or value != 1:
+        raise PointInTimeDataError("point_in_time_candle_schema_version_must_be_1")
     return value
 
 
 def _require_provider(value: object) -> str:
-    if not isinstance(value, str) or _PROVIDER_RE.fullmatch(value) is None:
+    if type(value) is not str or _PROVIDER_RE.fullmatch(value) is None:
         raise PointInTimeDataError("point_in_time_candle_provider_is_invalid")
     return value
 
 
 def _require_kr_symbol(value: object) -> str:
-    if not isinstance(value, str) or _KR_SYMBOL_RE.fullmatch(value) is None:
+    if type(value) is not str or _KR_SYMBOL_RE.fullmatch(value) is None:
         raise PointInTimeDataError("point_in_time_candle_symbol_is_invalid")
     return value
 
 
 def _require_literal(value: object, expected: str, field_name: str) -> str:
-    if not isinstance(value, str) or value != expected:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_{expected.lower()}"
-        )
+    if type(value) is not str or value != expected:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_{expected.lower()}")
     return value
 
 
 def _require_bool(value: object, field_name: str) -> bool:
-    if not isinstance(value, bool):
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_boolean"
-        )
+    if type(value) is not bool:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_boolean")
     return value
 
 
 def _require_aware(value: object, field_name: str) -> datetime:
-    if not isinstance(value, datetime):
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_requires_timezone"
-        )
+    if type(value) is not datetime:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_requires_timezone")
     if value.tzinfo is None or value.utcoffset() is None:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_requires_timezone"
-        )
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_requires_timezone")
     return value
 
 
 def _require_positive_int(value: object, field_name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_positive_integer"
-        )
+    if type(value) is not int or value <= 0:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_positive_integer")
     return value
 
 
 def _require_nonnegative_int(value: object, field_name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_nonnegative_integer"
-        )
+    if type(value) is not int or value < 0:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_nonnegative_integer")
     return value
 
 
 def _require_sha256(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
-        raise PointInTimeDataError(
-            f"point_in_time_candle_{field_name}_must_be_sha256_hex"
-        )
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise PointInTimeDataError(f"point_in_time_candle_{field_name}_must_be_sha256_hex")
     return value

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.application.ports.candle_observation_store_port import (
     CandleObservationStoreError,
+    CandleObservationStorePersistenceKind,
     CandleObservationWriteReceipt,
 )
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
@@ -17,6 +19,8 @@ class StoredCandleObservation:
 
 
 class InMemoryCandleObservationStore:
+    persistence_kind: CandleObservationStorePersistenceKind = "reference"
+
     def __init__(self) -> None:
         self._revisions: dict[str, list[StoredCandleObservation]] = {}
         self._last_seen_observed_at: dict[str, datetime] = {}
@@ -25,10 +29,14 @@ class InMemoryCandleObservationStore:
         self,
         candle: PointInTimeCandleV1,
     ) -> CandleObservationWriteReceipt:
-        if not isinstance(candle, PointInTimeCandleV1):
-            raise CandleObservationStoreError(
-                "candle_observation_store_item_invalid"
-            )
+        if type(candle) is not PointInTimeCandleV1:
+            raise CandleObservationStoreError("candle_observation_store_item_invalid")
+        canonical: PointInTimeCandleV1 | None = None
+        with suppress(Exception):
+            canonical = PointInTimeCandleV1.from_payload(candle.to_payload())
+        if canonical is None or canonical != candle:
+            raise CandleObservationStoreError("candle_observation_store_item_invalid")
+        candle = canonical
         identity = candle.idempotency_key
         revisions = self._revisions.setdefault(identity, [])
         if not revisions:
@@ -40,19 +48,13 @@ class InMemoryCandleObservationStore:
         latest_candle = latest.candle
         last_seen_observed_at = self._last_seen_observed_at[identity]
         if candle.observed_at < last_seen_observed_at:
-            raise CandleObservationStoreError(
-                "candle_observation_store_observation_time_regressed"
-            )
-        if (
-            candle.canonical_observation_sha256
-            == latest_candle.canonical_observation_sha256
-        ):
+            raise CandleObservationStoreError("candle_observation_store_observation_time_regressed")
+        if candle.canonical_observation_sha256 == latest_candle.canonical_observation_sha256:
             self._last_seen_observed_at[identity] = candle.observed_at
             return _receipt(latest, inserted=False)
 
         if any(
-            stored.candle.canonical_observation_sha256
-            == candle.canonical_observation_sha256
+            stored.candle.canonical_observation_sha256 == candle.canonical_observation_sha256
             for stored in revisions[:-1]
         ):
             raise CandleObservationStoreError(
@@ -89,10 +91,8 @@ def _receipt(
 ) -> CandleObservationWriteReceipt:
     return CandleObservationWriteReceipt(
         idempotency_key=stored.candle.idempotency_key,
-        canonical_observation_sha256=(
-            stored.candle.canonical_observation_sha256
-        ),
+        canonical_observation_sha256=(stored.candle.canonical_observation_sha256),
         revision=stored.revision,
         inserted=inserted,
-        stored_observed_at=stored.candle.observed_at,
+        stored_observed_at=stored.candle.observed_at.astimezone(UTC),
     )
