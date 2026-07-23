@@ -30,6 +30,10 @@ from app.application.ports.daily_candle_collection_job_store_port import (
     canonical_daily_candle_collection_job_snapshot,
     canonical_daily_candle_collection_job_spec,
 )
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -44,6 +48,11 @@ class InMemoryDailyCandleCollectionJobStore:
     """
 
     persistence_kind: DailyCandleCollectionJobPersistenceKind = "reference"
+    persistence_authority: PersistenceAuthority = persistence_authority_fingerprint(
+        namespace="in-memory",
+        origin="http://process-local.invalid",
+        profile="reference",
+    )
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()

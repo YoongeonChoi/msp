@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
+from app.application.ports.persistence_authority import PersistenceAuthority
 from app.domain.common.errors import KnownFailClosedError
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
 
@@ -53,6 +54,7 @@ class CandleObservationWriteReceipt:
 
 class CandleObservationStorePort(Protocol):
     persistence_kind: CandleObservationStorePersistenceKind
+    persistence_authority: PersistenceAuthority
 
     async def append_observation(
         self,

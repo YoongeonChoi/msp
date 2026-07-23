@@ -12,6 +12,7 @@ from uuid import UUID
 from app.application.ports.candle_observation_store_port import (
     CandleObservationWriteReceipt,
 )
+from app.application.ports.persistence_authority import PersistenceAuthority
 from app.domain.common.errors import KnownFailClosedError
 from app.domain.common.json import JsonObject
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
@@ -321,6 +322,9 @@ class DailyCandleCollectionJobSnapshotV1:
 class DailyCandleCollectionJobStorePort(Protocol):
     @property
     def persistence_kind(self) -> DailyCandleCollectionJobPersistenceKind: ...
+
+    @property
+    def persistence_authority(self) -> PersistenceAuthority: ...
 
     async def load_or_create_job(
         self,

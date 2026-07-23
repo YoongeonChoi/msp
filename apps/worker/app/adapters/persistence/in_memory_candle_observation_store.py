@@ -9,6 +9,10 @@ from app.application.ports.candle_observation_store_port import (
     CandleObservationStorePersistenceKind,
     CandleObservationWriteReceipt,
 )
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
 
 
@@ -20,6 +24,11 @@ class StoredCandleObservation:
 
 class InMemoryCandleObservationStore:
     persistence_kind: CandleObservationStorePersistenceKind = "reference"
+    persistence_authority: PersistenceAuthority = persistence_authority_fingerprint(
+        namespace="in-memory",
+        origin="http://process-local.invalid",
+        profile="reference",
+    )
 
     def __init__(self) -> None:
         self._revisions: dict[str, list[StoredCandleObservation]] = {}

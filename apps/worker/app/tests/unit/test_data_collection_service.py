@@ -13,6 +13,15 @@ from app.application.services.data_collection_service import (
     CandleCollectionError,
     DataCollectionService,
 )
+from app.domain.common.errors import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderSchemaError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+    ProviderUnknownError,
+)
 from app.domain.market_data.point_in_time import PointInTimeCandleV1
 
 CONTRACT_SHA = "a" * 64
@@ -210,9 +219,10 @@ async def test_collection_rejects_request_subclass_before_source_call() -> None:
     with pytest.raises(
         CandleCollectionError,
         match="candle_collection_request_invalid",
-    ):
+    ) as captured:
         await service.collect_daily_candle_page(request)
 
+    assert captured.value.read_outcome == "not_attempted"
     assert source.calls == []
 
 
@@ -248,9 +258,41 @@ async def test_collection_sanitizes_source_error_without_converting_to_success()
         await service.collect_daily_candle_page(_request())
 
     assert secret not in str(exc_info.value)
+    assert exc_info.value.read_outcome == "unknown"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source.calls == [_request()]
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_outcome"),
+    [
+        (ProviderAuthError("toss", "auth-secret"), "failed"),
+        (ProviderRateLimitError("toss", "rate-limit-secret"), "failed"),
+        (ProviderSchemaError("toss", "schema-secret"), "succeeded"),
+        (ProviderTimeoutError("toss", "timeout-secret"), "unknown"),
+        (ProviderUnavailableError("toss", "unavailable-secret"), "unknown"),
+        (ProviderUnknownError("toss", "unknown-secret"), "unknown"),
+        (ProviderError("toss", "base-provider-secret"), "unknown"),
+    ],
+)
+async def test_collection_classifies_every_provider_error_without_leaking_detail(
+    provider_error: ProviderError,
+    expected_outcome: str,
+) -> None:
+    source = FakeDailyCandleSource(_page(), error=provider_error)
+    service = DataCollectionService(source, clock=SequenceClock(STARTED_AT))
+
+    with pytest.raises(
+        CandleCollectionError,
+        match="^candle_collection_source_failed$",
+    ) as captured:
+        await service.collect_daily_candle_page(_request())
+
+    assert captured.value.read_outcome == expected_outcome
+    assert provider_error.safe_message not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.parametrize(
@@ -357,9 +399,10 @@ async def test_collection_rejects_invalid_source_page(
         clock=SequenceClock(STARTED_AT, COMPLETED_AT),
     )
 
-    with pytest.raises(CandleCollectionError, match=reason):
+    with pytest.raises(CandleCollectionError, match=reason) as captured:
         await service.collect_daily_candle_page(request)
 
+    assert captured.value.read_outcome == "succeeded"
     assert source.calls == [request]
 
 

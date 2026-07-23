@@ -81,10 +81,15 @@ provider bodies, tokens, credentials, or exception chains.
 The daily-candle collection job RPCs are service-role-only and expose no table
 CRUD. Private job rows use RLS, while attempt transitions are append-only. Begin
 binds the exact spec, revision, attempt, and holder while atomically assigning a
-fence; every later mutation also rebinds that fence. A future collector must
-call begin before provider I/O and fence the candidate before append. This
-store cannot enforce that call order or stop out-of-band I/O because the current
-provider and append ports do not carry the job fence and no collector is wired.
+fence; every later mutation also rebinds that fence. The default-disabled
+`RunDailyCandleCollectionJobOnce` boundary requires durable stores with the same
+non-secret service-origin/profile fingerprint, calls begin before provider I/O,
+and confirms a candidate fence before its single append. The public execution
+boundary also removes provider/store details and cancellation messages from
+escaping exception chains.
+It is not wired into a runtime, scheduler, command, Desktop, feature, strategy,
+or order path. The store cannot stop out-of-band I/O because the current provider
+and append ports do not carry the job fence.
 After a caller records those transitions, the job state has no TTL takeover or
 automatic restart for an in-flight, candidate-fenced, or unknown attempt.
 Completion is allowed only after PostgreSQL rechecks the exact observation
@@ -102,7 +107,9 @@ candidates.
   and untracked.
 - Render owns Worker secrets. Desktop may contain only
   `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
-- Supabase secret/service keys and all provider secrets are Worker-only.
+- Supabase secret/service keys and all provider secrets are Worker-only. Store
+  authority fingerprints bind only a canonical origin and public adapter profile;
+  credentials are never fingerprint inputs.
 - Webhook secrets, account numbers, authorization headers, session tokens, and
   provider raw payloads are excluded from audit and outbox payloads.
 - Logs, verifier errors, and CI scan output redact values and identify only the

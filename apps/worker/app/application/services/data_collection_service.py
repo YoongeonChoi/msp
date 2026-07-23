@@ -3,13 +3,20 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Literal
 
 from app.application.ports.candle_data_port import (
     DailyCandleReadPage,
     DailyCandleReadRequest,
     DailyCandleSourcePort,
 )
-from app.domain.common.errors import KnownFailClosedError
+from app.domain.common.errors import (
+    KnownFailClosedError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderSchemaError,
+)
 from app.domain.common.time import now_utc
 from app.domain.market_data.point_in_time import (
     PointInTimeCandleV1,
@@ -19,10 +26,23 @@ from app.domain.market_data.point_in_time import (
 
 _KR_SYMBOL_RE = re.compile(r"[0-9]{6}")
 
+CandleCollectionReadOutcome = Literal[
+    "not_attempted",
+    "failed",
+    "unknown",
+    "succeeded",
+]
+
 
 class CandleCollectionError(KnownFailClosedError):
-    def __init__(self, safe_message: str) -> None:
+    def __init__(
+        self,
+        safe_message: str,
+        *,
+        read_outcome: CandleCollectionReadOutcome = "not_attempted",
+    ) -> None:
         super().__init__("candle_collection", safe_message)
+        self.read_outcome = read_outcome
 
 
 class DataCollectionService:
@@ -42,22 +62,37 @@ class DataCollectionService:
         started_at = _read_clock(self.clock)
         canonical_request = _canonical_request(request, started_at=started_at)
         page: object = None
-        source_failed = False
+        source_failure: CandleCollectionReadOutcome | None = None
         try:
             page = await self.source.read_daily_candle_page(canonical_request)
+        except (ProviderAuthError, ProviderRateLimitError):
+            source_failure = "failed"
+        except ProviderSchemaError:
+            source_failure = "succeeded"
+        except ProviderError:
+            source_failure = "unknown"
         except Exception:
-            source_failed = True
-        if source_failed:
-            raise CandleCollectionError("candle_collection_source_failed")
-        completed_at = _read_clock(self.clock)
-        if completed_at < started_at:
-            raise CandleCollectionError("candle_collection_clock_moved_backwards")
-        return _canonical_page(
-            page,
-            request=canonical_request,
-            started_at=started_at,
-            completed_at=completed_at,
-        )
+            source_failure = "unknown"
+        if source_failure is not None:
+            raise CandleCollectionError(
+                "candle_collection_source_failed",
+                read_outcome=source_failure,
+            )
+        try:
+            completed_at = _read_clock(self.clock)
+            if completed_at < started_at:
+                raise CandleCollectionError("candle_collection_clock_moved_backwards")
+            return _canonical_page(
+                page,
+                request=canonical_request,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+        except CandleCollectionError as exc:
+            raise CandleCollectionError(
+                exc.safe_message,
+                read_outcome="succeeded",
+            ) from None
 
 
 def _canonical_request(

@@ -4,7 +4,10 @@ Toss: account, position, quote, candle, order contracts are represented as ports
 The candle path exposes an explicit, bounded single-page read through
 `DataCollectionService`; it does not persist observations, follow pagination,
 schedule collection, certify a completed bar, calculate a feature, or authorize
-an order.
+an order. `RunDailyCandleCollectionJobOnce` is a separate default-disabled
+application boundary that may combine this read with durable job and observation
+stores only after an explicit manual confirmation. It is not selected by the
+normal Worker runtime.
 
 The Toss KR market-calendar adapter can map one explicitly requested date into
 strict point-in-time session evidence. It preserves a closed day without
@@ -61,12 +64,13 @@ The daily-candle collection job store adds a separate, default-unused fence
 around one explicit candle request. Its immutable spec binds one UUIDv4 job,
 provider, KR symbol, `1d` interval, adjusted flag, inclusive `before` clock,
 pinned provider-contract SHA-256, `count=1`, no pagination, the `manual`
-trigger, and no automatic retry. The intended future collector protocol calls
-CAS begin before a provider read and fences the canonical candidate before an
-append. The store durably records those transitions, atomically assigns the
-fencing revision, and rejects stale job-state progress. It cannot yet enforce
-the I/O order or stop an out-of-band provider/append call because the existing
-ports carry no job or fence and no collector is wired. Every mutation after
+trigger, and no automatic retry. The explicit one-shot use case calls CAS begin
+before one provider read, validates exactly one in-scope candle, fences that
+canonical candidate, appends the fenced copy exactly once, and asks the job
+store to confirm the exact durable receipt. The store records those transitions,
+atomically assigns the fencing revision, and rejects stale job-state progress.
+The ports still carry no job or fence, so this boundary cannot prevent a future
+caller from making an out-of-band provider or append call. Every mutation after
 begin rebinds the spec SHA-256, expected revision, attempt, holder, and fencing
 revision.
 
@@ -83,10 +87,14 @@ the database-confirmed occurrence and content-revision UUIDs.
 The in-memory implementation proves only lock/CAS state semantics and loses all
 state on restart. The Supabase implementation stores private RLS-protected job
 state and an append-only attempt-event ledger behind service-role-only Worker
-RPCs. Neither adapter is selected by the normal runtime, scheduler, Desktop,
-features, backtests, strategies, or order paths. This store is a prerequisite
-for a later single-candle collector; it does not itself call the provider or
-append a candle.
+RPCs. The one-shot use case rejects reference stores and requires both durable
+adapters to expose the same non-secret persistence-authority fingerprint before
+clock or network I/O, but no runtime, scheduler, command, Desktop, feature,
+backtest, strategy, or order path constructs it. Known pre-candidate authentication or rate-limit failures
+may be recorded as `paused_retryable`, but this use case refuses that state on a
+later invocation. Ambiguous reads, invalid evidence, append uncertainty,
+confirmation uncertainty, and cancellation remain blocked or unresolved; none
+authorizes an internal retry.
 
 The daily-candle timing store adds an append-only calendar content ledger and
 separate append-only candle/calendar observation-occurrence ledgers. Content is

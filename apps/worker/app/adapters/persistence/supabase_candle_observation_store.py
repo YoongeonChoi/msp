@@ -14,6 +14,10 @@ from app.application.ports.candle_observation_store_port import (
     CandleObservationStorePersistenceKind,
     CandleObservationWriteReceipt,
 )
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
 from app.config import Settings
 from app.domain.common.json import JsonObject
 from app.domain.market_data.point_in_time import (
@@ -68,6 +72,14 @@ class SupabaseCandleObservationStore:
     ) -> None:
         if not settings.supabase_url or settings.supabase_secret_key is None:
             raise CandleObservationStoreError("candle_observation_store_credentials_missing")
+        try:
+            self.persistence_authority: PersistenceAuthority = persistence_authority_fingerprint(
+                namespace="supabase-worker-api",
+                origin=settings.supabase_url,
+                profile="worker_api",
+            )
+        except ValueError:
+            raise CandleObservationStoreError("candle_observation_store_origin_invalid") from None
         secret = settings.supabase_secret_key.get_secret_value()
         self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
         self.headers = supabase_api_headers(secret) | {

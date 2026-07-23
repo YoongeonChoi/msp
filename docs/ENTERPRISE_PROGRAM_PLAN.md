@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, single-candle request의 durable attempt/candidate fence와 exact occurrence confirm, retained open-session-chain research-slice gate와 canonical scope/data-lineage fingerprint가 있다. slice는 `full_research_certified=false`이며 candle collector/runtime/scheduler 선택·unknown-write reconciliation·자동 수집/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, single-candle request의 durable attempt/candidate fence와 exact occurrence confirm, 그리고 begin→read→fence→append→confirm을 강제하는 default-disabled 단일 candle application runner가 있다. retained slice는 `full_research_certified=false`이며 candle runtime/scheduler 선택·unknown-write reconciliation·자동 수집/feature/backtest 연결, completeness·finality·corporate-action·DQ 인증은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -121,13 +121,15 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
   wiring, completeness 또는 feature readiness는 제공하지 않는다.
 - 별도 daily-candle collection job store는 manual `count=1`/no-pagination
   요청의 exact spec SHA와 attempt/holder/fence, canonical candidate를 기록하는
-  미래 collector용 상태 계약이다. 향후 caller는 provider read 전에 begin하고
-  append 전에 candidate를 fence해야 한다. 현재 provider/append port는 job fence를
-  받지 않으므로 store만으로 I/O 순서나 out-of-band 호출을 막지는 못한다.
+  durable 상태 계약이다. 별도 default-disabled application runner는 두 durable
+  store가 같은 non-secret persistence authority에 결합됐는지 먼저 확인하고,
+  provider read 전에 begin하며 append 전에 candidate를 fence한다. 현재
+  provider/append port는 job fence를 받지 않으므로 이 경계 밖의 out-of-band 호출을
+  막지는 못한다.
   Supabase confirm은 append receipt를 exact occurrence/content revision에 다시
   결합하며, 기록된 job state에는 response loss·cancellation 뒤 TTL takeover나
-  blind restart 전이가 없다. 현재는 in-memory reference와 Worker-only durable
-  store 계약뿐이며 collector/runtime/scheduler에는 연결되지 않았다.
+  blind restart 전이가 없다. in-memory reference, Worker-only durable store,
+  그리고 명시적 one-shot runner는 있으나 runtime/scheduler에는 연결되지 않았다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
   않는다. 별도 Worker-only calendar observation store는 개장·휴장 증거 모두를
@@ -588,6 +590,7 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [ ] `E3 Point-in-Time Data Plane` 구현
 - [x] `E3` occurrence-backed bounded durable as-of reader 로컬 구현
 - [x] `E3` single-candle request attempt/CAS fence와 durable occurrence-confirm 계약 로컬 구현
+- [x] `E3` default-disabled durable single-candle source→fence→append→confirm application boundary와 direct fault 계약 로컬 구현
 - [x] `E3` retained-open-session research-slice gate와 canonical scope/data-lineage fingerprint 로컬 구현
 - [x] `E3` 개장·휴장 독립 calendar observation store와 durable ambiguity quarantine 로컬 구현
 - [x] `E3` 개장·휴장 bounded durable calendar as-of range reader 로컬 구현

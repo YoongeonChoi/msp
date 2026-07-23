@@ -30,6 +30,13 @@
 
 ### 1.1 Daily-candle collection attempt fence
 
+- one-shot application runner는 기본 비활성이며 명시적 수동 확인과 durable
+  job/observation store를 모두 요구한다. 이 gate는 clock, job store, provider,
+  append I/O보다 먼저 실패해야 한다. 두 durable store의 credential 비포함
+  origin/profile authority fingerprint가 다르거나 비정상이면 같은 지점에서 차단한다.
+- fresh run의 순서는 `load -> begin -> provider read -> candidate fence -> append
+  -> confirm`으로 고정한다. `count=1`만 요청하고 반환 cursor를 따라가지 않으며,
+  fenced snapshot의 candle을 append하고 각 외부 경계를 최대 한 번만 호출한다.
 - job spec은 UUIDv4 job, provider, KR 6자리 symbol, `1d`, adjusted flag,
   canonical UTC `before`, pinned provider-contract SHA-256, `count=1`,
   `pagination_allowed=false`, `automatic_retry_allowed=false`, exact
@@ -51,7 +58,16 @@
   선택해야 한다. client `inserted` 값만으로 완료하지 않는다.
 - begin/fence/block/confirm commit 전후 응답 유실과 cancellation, process
   restart, stale CAS를 fault-injection한다. candidate fence나 unknown state를
-  읽은 후 provider/append 호출이 0회임을 확인한다.
+  읽은 후 provider/append 호출이 0회임을 확인한다. 외부 경계와 cleanup에
+  secret-bearing cancellation을 주입해 최종 exception cause/context/traceback에
+  원문이 남지 않는지 확인한다.
+- provider authentication/rate-limit failure처럼 candidate가 없음을 타입으로
+  확인할 수 있는 경우만 pause할 수 있다. timeout, unavailable, unknown
+  exception, invalid schema/evidence는 retryable로 추측하지 않는다. append
+  진입 뒤 모든 예외와 불신 receipt는 write outcome unknown이다.
+- completed는 load-only replay이며 paused, collecting, candidate-fenced,
+  blocked state 재진입은 provider/append 전에 닫혀야 한다. 별도 recovery
+  assessment 없이 paused 상태도 다시 실행하지 않는다.
 - in-memory adapter는 process-local reference임을 확인하고, Supabase verifier는
   private RLS job table, append-only event ledger, service-role-only RPC, 직접
   CRUD 차단, bounded strict response, zero-order-write를 검사한다.
