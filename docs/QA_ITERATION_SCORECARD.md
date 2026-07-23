@@ -2,7 +2,7 @@
 
 상태: `CURRENT / TREND-ONLY`
 
-평가 기준 SHA: `6f0d8f344380d820607b2b9700b320f30b7f5c58`
+평가 기준 SHA: `ec7ec98b0e007dc1a1cc619947932d933686324d`
 
 평가일: 2026-07-23 KST
 
@@ -40,18 +40,18 @@
 | 기능 완성도 | 15% | 74 | 11.10 |
 | 데이터·연구 무결성 | 10% | 95 | 9.50 |
 | 운영 가시성 | 15% | 74 | 11.10 |
-| Desktop 효율·정확성 | 10% | 83 | 8.30 |
+| Desktop 효율·정확성 | 10% | 93 | 9.30 |
 | 테스트·CI | 10% | 98 | 9.80 |
 | 문서·온보딩 | 10% | 97 | 9.70 |
 | 유지보수성 | 10% | 78 | 7.80 |
-| **가중 종합** | **100%** |  | **86.50** |
+| **가중 종합** | **100%** |  | **87.50** |
 
 산식:
 
 ```text
 96×0.20 + 74×0.15 + 95×0.10 + 74×0.15
-+ 83×0.10 + 98×0.10 + 97×0.10 + 78×0.10
-= 86.50
++ 93×0.10 + 98×0.10 + 97×0.10 + 78×0.10
+= 87.50
 ```
 
 ## 엄격 QA 체크리스트
@@ -60,7 +60,7 @@
 
 | ID | 요구사항 | 배점 | 획득 | 상태 | 근거 또는 완료 조건 |
 | --- | --- | ---: | ---: | --- | --- |
-| TS-1 | Production 주문 network 경로 격리와 안전 기본값 | 30 | 30 | PASS | `paper | contract_test`만 허용하고 broker 주문 URL은 로컬 qualification에서도 호출하지 않는다. |
+| TS-1 | Production 주문 network 경로 격리와 안전 기본값 | 30 | 30 | PASS | `paper \| contract_test`만 허용하고 broker 주문 URL은 로컬 qualification에서도 호출하지 않는다. |
 | TS-2 | 주문 전 risk·수량·현금·보유수량 gate | 25 | 25 | PASS | `RiskService`와 공용 whole-share 계산 계약 및 회귀 테스트가 존재한다. |
 | TS-3 | semantic reservation, lease/fencing, control epoch, 원장 결속 | 25 | 25 | PASS | V2 execution kernel과 DB verifier가 동시성·재시작·stale write를 검사한다. |
 | TS-4 | Toss/candle 전송·저장 경계의 fail-closed 오류와 비밀 비노출 | 16 | 16 | PASS | `fc06b3f`가 이 범위에 bounded JSON, 고정 오류 코드, exact canonical type을 추가했다. |
@@ -106,7 +106,7 @@
 | OP-10 | 로컬 복구·fault 계약 | 7 | 7 | PASS | fail-closed 복구 경로와 fault 테스트가 있다. |
 | OP-11 | restart-safe durable scheduler | 10 | 0 | MISSING | lease, retry budget, dead-letter, manual replay가 필요하다. |
 
-### Desktop 효율·정확성 — 83/100
+### Desktop 효율·정확성 — 93/100
 
 | ID | 요구사항 | 배점 | 획득 | 상태 | 근거 또는 완료 조건 |
 | --- | --- | ---: | ---: | --- | --- |
@@ -114,8 +114,8 @@
 | DT-2a | server-side role-bound mutation authorization | 5 | 5 | PASS | mutation은 UI 표시가 아니라 server permission에 결속된다. |
 | DT-2b | maker/checker와 platform-admin 권한 분리 | 5 | 5 | PASS | requester·reviewer 분리와 platform admin의 거래 승인 금지가 서버 계약으로 검증된다. |
 | DT-2c | stale/offline/freshness mutation guard | 5 | 5 | PASS | stale snapshot, offline session과 만료된 freshness에서 mutation을 차단한다. |
-| DT-2d | auditor-only audit-event projection | 5 | 0 | MISSING | current exact SHA의 snapshot SQL은 `viewer`에게 `view_audit`을 주지 않으면서도 private audit query를 실행하고 결과를 반환한다. |
-| DT-2e | auditor-only reconciliation projection | 5 | 0 | MISSING | current exact SHA의 snapshot SQL은 `viewer`에게 `view_reconciliation`을 주지 않으면서도 private reconciliation query를 실행하고 결과를 반환한다. |
+| DT-2d | auditor-only audit-event projection | 5 | 5 | PASS | `ec7ec98b`의 forward-only migration은 `view_audit`을 private SELECT 전에 검사한다. 6개 non-auditor role의 exact `[]`와 auditor의 exact current audit fixture가 direct PostgreSQL 및 실제 PostgREST에서 통과했다. |
+| DT-2e | auditor-only reconciliation projection | 5 | 5 | PASS | 같은 migration은 `view_reconciliation`을 독립적으로 검사한다. 6개 non-auditor role의 exact `[]`와 auditor의 exact break ID·run ID·evidence ref가 두 실행 경로에서 통과했다. |
 | DT-3 | session lifecycle, cache 격리, query-specific realtime | 20 | 20 | PASS | logout cache 제거와 좁은 invalidation 계약이 있다. |
 | DT-4 | component·render fixture | 10 | 10 | PASS | exact SHA의 `desktop:test`가 render와 mutation guard fixture를 통과했다. |
 | DT-5 | interaction·accessibility contract tests | 8 | 8 | PASS | dialog, role, offline, session interaction fixture가 통과했다. |
@@ -127,10 +127,10 @@
 
 | ID | 요구사항 | 배점 | 획득 | 상태 | 근거 또는 완료 조건 |
 | --- | --- | ---: | ---: | --- | --- |
-| TC-1 | Worker 전체 회귀 테스트 | 25 | 25 | PASS | exact candidate: `2216 passed, 2 skipped`. |
-| TC-2 | Ruff와 strict mypy | 20 | 20 | PASS | exact candidate의 전체 Ruff와 mypy 2.3.0이 420개 source file을 통과한다. persistence authority, provider read outcome, UUID와 상태 분기는 strict 경계를 직접 검사한다. |
-| TC-3 | migration·history·security contract tests | 15 | 15 | PASS | exact SHA의 Worker suite가 repository contract tests를 통과했다. |
-| TC-4 | disposable PostgreSQL 전체 migration apply | 5 | 5 | PASS | PostgreSQL 17 disposable DB에서 fresh·populated upgrade, 전체 migration, RLS/ACL, CAS/ABA, 동시성, revision headroom을 실행했다. |
+| TC-1 | Worker 전체 회귀 테스트 | 25 | 25 | PASS | exact candidate: `2222 passed, 2 skipped`. |
+| TC-2 | Ruff와 strict mypy | 20 | 20 | PASS | exact candidate의 전체 Ruff check와 mypy 2.3.0이 421개 source file을 통과한다. 새 계약 테스트는 focused format check도 통과한다. |
+| TC-3 | migration·history·security contract tests | 15 | 15 | PASS | exact SHA의 Worker suite, 6개 신규 static contract와 migration history guard가 통과했다. Safety-guard는 34개 중 31개 PASS, Windows symlink 권한 3개 skip이다. |
+| TC-4 | disposable PostgreSQL 전체 migration apply | 5 | 5 | PASS | `verify_g1_g2_migration.py`가 PostgreSQL 17 fresh·populated upgrade, 47개 migration, ACL/owner, direct role matrix와 실제 PostgREST를 `FINAL=PASS`로 실행했다. |
 | TC-5 | Desktop typecheck·lint·test·build | 15 | 15 | PASS | exact SHA의 clean worktree에서 네 명령이 모두 통과했다. |
 | TC-6 | 일반 concurrency·fault·restart 회귀 | 10 | 10 | PASS | execution·job·reader fault와 restart 회귀 테스트가 있다. |
 | TC-7 | candle unknown-write fault 검증 | 5 | 5 | PASS | exact candidate의 108개 focused test가 load/begin/read/fence/append/confirm/pause/block 전후 실패·취소, 실제 `Task.cancel()`, 정확한 1회 호출, non-executable replay, cause/context/traceback 비밀 비노출을 직접 검증한다. |
@@ -147,7 +147,7 @@
 | DO-4 | 설치·개발 명령 안내 | 10 | 10 | PASS | Worker/Desktop 환경과 명령이 문서화됐다. |
 | DO-5 | 문제 해결과 알려진 제한 | 7 | 7 | PASS | provider·배포·운영 제한과 해결 방향이 기록됐다. |
 | DO-6 | 현재 상태와 역사 문서의 명확한 탐색 | 3 | 0 | MISSING | 긴 계획과 archived scorecard 사이의 현재 요약 index가 필요하다. |
-| DO-7 | exact SHA 기반 재현 가능한 현행 점수표 | 5 | 5 | PASS | `d4b78ac`부터 고정 이진 항목·가중치·외부 제외 규칙을 보존하고, 이번 반복을 `6f0d8f3` exact SHA에서 다시 계산했다. |
+| DO-7 | exact SHA 기반 재현 가능한 현행 점수표 | 5 | 5 | PASS | `d4b78ac`부터 고정 이진 항목·가중치·외부 제외 규칙을 보존하고, 이번 반복을 `ec7ec98b` exact SHA에서 다시 계산했다. |
 
 ### 유지보수성 — 78/100
 
@@ -180,44 +180,51 @@ binary gate 증거로 평가하며, 현재 `G0/G1/G2 FAIL`을 바꾸지 않는�
 
 | 검증 | 결과 | 수준 |
 | --- | --- | --- |
-| `python -m pytest -q` | PASS — 2216 passed, 2 skipped | staged patch를 `757092b`에 적용한 detached candidate-isolated worktree; import root와 patch hash를 해당 worktree에서 확인 |
+| focused migration·docs contracts | PASS — 9 tests | reviewed staged candidate; permission guards, ACL/owner, verifier markers, checksum/preflight와 문서 순서 검사 |
+| `python -m pytest -q` | PASS — 2222 passed, 2 skipped | patch-id `193eecaf…`의 detached candidate-isolated worktree |
 | `python -m ruff check app` | PASS | candidate-isolated |
-| `python -m mypy --no-incremental app` | PASS — mypy 2.3.0, 420 source files | candidate-isolated |
-| `python -m ruff format --check <3 changed Python files>` | PASS | candidate-isolated; formatter 일치 |
-| DI-7a focused Worker tests | PASS — 110 | source 재검증, policy/result/final digest 위조, exact type, adjusted flag 비증거화, no-runtime wiring 회귀; 전체 candidate-isolated pytest에도 포함 |
-| provider-gap 관련 Worker tests | PASS — 194 | 새 research-only API gap prose가 Live provider-gap table/evidence 계약을 변경하지 않는지 별도 확인; dirty-working-tree |
-| Worker repository safety contract tests | PASS | candidate-isolated 전체 pytest에 포함 |
-| `python supabase/verify_pit_daily_candle_collection_job_store.py` | PASS — `FINAL=PASS` | 이전 exact SHA의 PostgreSQL 17 fresh·upgrade·concurrency 증거; `b4b99a42..6f0d8f3`에 migration 변경 없음 |
-| Desktop lint·contracts·e2e·build | PASS | GitHub Actions exact-SHA CI job `89141544179` |
-| Worker lint·typecheck·tests | PASS | GitHub Actions exact-SHA CI job `89141544184` |
-| repository safety·docs | PASS | GitHub Actions exact-SHA CI jobs `89141544190`, `89141544177` |
-| Tauri Rust check·test·build | PASS | GitHub Actions exact-SHA CI job `89141544154` |
-| migration apply·safety | PASS | GitHub Actions exact-SHA CI job `89141544253` |
-| current snapshot authorization probe | FAIL — `authorization_contract=VIOLATED` | scan-local `findings/desktop-snapshot-evidence-authorization-bypass/poc/check_snapshot_contract.py --repo-root .` 재실행; DT-2d·DT-2e 감점 |
-| `git diff-tree --root --no-commit-id --name-status -r 6f0d8f3` | PASS — planned 7 paths | post-commit audit; 사전·격리 candidate·실제 commit patch hash `3423f0a8…`와 patch-id `8951bcc1…` 일치 |
-| `git status --branch` | PASS — `develop...origin/develop` ahead/behind 0 | pushed exact commit |
-| GitHub Actions CI run `29987183049` | PASS | exact `6f0d8f3`; Worker, Desktop, Tauri, migration, repository safety와 docs job이 모두 성공 |
-| GitHub Actions security run `29987182963` | FAIL — dependency gate | exact `6f0d8f3`; gitleaks, common-pattern scan, 두 CodeQL job, lock-derived evidence, workflow guard는 PASS. dependency job 실패는 TC-9 감점과 일치 |
+| `python -m mypy --strict app` | PASS — mypy 2.3.0, 421 source files | candidate-isolated |
+| changed contract test Ruff format | PASS | candidate-isolated focused check |
+| migration safety guard tests | PASS — 34 run, 3 skipped | candidate-isolated; 31개 PASS, skip은 Windows symlink 권한 경로 |
+| migration history·repository safety | PASS | candidate-isolated; 기존 46개 migration 불변, 신규 1개만 허용, all scope 안전 검사 |
+| `python supabase/verify_g1_g2_migration.py` | PASS — `FINAL=PASS` | PostgreSQL 17 fresh·retained public/extensions·populated upgrade, 전체 47개 migration, actual PostgREST |
+| Desktop snapshot role matrix | PASS | direct PostgreSQL와 PostgREST에서 6개 non-auditor exact `[]`, auditor exact audit/break/run evidence, anon/service 거부 |
+| 독립 staged 보안·verifier·commit 감사 | PASS — P0–P3 0건 | 세 하위 에이전트가 같은 patch-id와 staged blobs를 독립 검토 |
+| `git diff-tree --root --no-commit-id --name-status -r ec7ec98b` | PASS — planned 9 paths | 사전·격리 candidate·실제 commit patch-id `193eecaf…` 일치 |
+| `git status --branch` | PASS — `develop...origin/develop` ahead/behind 0 | exact commit을 `origin/develop`에 push |
+| GitHub Actions CI run `29989968877` | PASS | exact `ec7ec98b`; Worker, Desktop, Tauri, migration, repository safety와 docs 6개 job 모두 성공 |
+| GitHub Actions migration-check run `29989968917` | PASS | exact `ec7ec98b`; full G1/G2 및 8개 PIT/collection verifier와 seed gate 성공 |
+| GitHub Actions security run `29989968894` | FAIL — dependency gate | exact `ec7ec98b`; gitleaks, common-pattern scan, 두 CodeQL job, lock-derived evidence, workflow guard는 PASS. `npm audit` 실패 lock blob은 이전 평가 SHA와 동일해 TC-9 감점과 일치 |
 
 실제 Toss/Supabase 네트워크는 호출하지 않았고 transport 검증은
-`MockTransport` 중심이다. 로컬에는 gitleaks가 없어 dedicated scan을 실행하지
-못했지만, staged 후보의 휴리스틱 패턴 검사에서는 의심 항목이 없었고 exact SHA의
+`MockTransport` 중심이다. 이번 snapshot 검증은 hosted Supabase 대신 disposable
+PostgreSQL과 실제 local PostgREST를 사용했다. 로컬에는 gitleaks가 없어 dedicated
+scan을 실행하지 못했지만 staged 휴리스틱에서 의심 항목이 없었고 exact SHA의
 GitHub gitleaks와 common-pattern scan은 PASS했다. 이는 secret 부재를 보장하지
-않는다. Codex Security scan `ab0ec850-95e7-4230-863d-14ba333d8965`는
-`07c6ec6`을 대상으로 했지만 snapshot authorization 관련 `0020`·`0022` blob은
-현재 exact SHA와 각각 `f18f5eeb…`, `03239ae2…`로 동일하다. 해당 finding은
-current source에서도 위 scan-local no-network probe로
-재현되어 DT-2d·DT-2e의 모순 증거로만 사용하며, 이 SHA의 보안 PASS 근거로 재사용하지 않는다.
+않는다. Repository-wide Ruff format check는 변경하지 않은 기존 231개 파일을
+재포맷 대상으로 보고했지만, 신규 Python 파일의 focused format과 전체 Ruff lint는
+통과했다.
+
+Codex Security scan `ab0ec850-95e7-4230-863d-14ba333d8965`의 historical probe는
+취약한 `0020` 함수 본문을 고정해 검사하므로 forward-only tail을 적용한 뒤의
+post-fix oracle로 사용할 수 없다. 이 SHA의 PASS 근거는 신규 migration을 포함한
+전체 replay와 direct PostgreSQL/PostgREST 역할 매트릭스다. 기존 함수와의 기계
+비교도 두 empty default와 두 독립 permission guard 이외의 drift가 없음을 확인했다.
 
 ## 다음 구현 순서
 
-1. `DT-2d`·`DT-2e`: Desktop snapshot에서 `view_audit`·`view_reconciliation` permission을
-   server-side query와 projection에 적용하고 viewer/auditor 회귀 테스트를 추가한다.
-2. `OP-5`: webhook destination에 HTTPS 정책과 request-visible 값만으로 위조할 수 없는
-   receiver acknowledgement 인증을 추가한다.
-3. `FC-7`·`OP-11`·`MA-7`: lease, retry budget, dead-letter, manual replay를 갖는
+1. `OP-5`: Outbox·legacy notifier·dead-man receiver에 공통 HTTPS-only URL 정책과
+   current/previous 32-byte key의 canonical HMAC ACK를 적용한다. 같은 item의
+   completion-crash cached ACK는 허용하되 cross-item·destination·payload replay는
+   거부한다. 인증 실패는 Outbox에서 기존 retry/dead-letter로 전환하고, legacy
+   notifier에서는 명시적 비성공으로 반환하며, dead-man에서는 episode를 미전달
+   상태로 유지해 재시도한다. Signed receiver ACK는 human ACK 또는 외부 immutable
+   archive 증거로 승격하지 않는다.
+2. `FC-7`·`OP-11`·`MA-7`: lease, retry budget, dead-letter, manual replay를 갖는
    restart-safe scheduler 조립 경계를 구현한다.
-4. `TS-5`: 미확정 쓰기를 durable receipt로만 판정하는 수동 복구 경계를 구현한다.
+3. `TS-5`: 미확정 쓰기를 durable receipt로만 판정하는 수동 복구 경계를 구현한다.
+4. `DO-6`: 현행 scorecard·미완료 gate·archived 계획을 연결하는 짧은 current-status
+   index를 추가한다.
 5. `DI-7` positive path와 `FC-5` registry/replay는 verified official corporate-action
    source contract와 independent receipt가 확보된 뒤 각각 별도 원자 커밋으로 진행한다.
 6. `FC-6`는 certified DQ와 dataset registry가 생긴 뒤 feature 입력을 연결한다.
