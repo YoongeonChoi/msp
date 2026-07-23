@@ -1181,6 +1181,17 @@ def test_gitleaks_ignore_accepts_only_exact_fingerprints(tmp_path: Path) -> None
     assert not any(".gitleaksignore" in finding for finding in findings)
 
 
+def test_repository_gitleaks_ignore_matches_approved_fingerprints() -> None:
+    module = _module()
+    entries = {
+        line
+        for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+        if line
+    }
+
+    assert entries == module.APPROVED_GITLEAKS_FINGERPRINTS
+
+
 @pytest.mark.parametrize(
     "unsafe_entry",
     (

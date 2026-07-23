@@ -142,6 +142,9 @@ APPROVED_GITLEAKS_FINGERPRINTS = frozenset(
         "8904120101ec6bec62b8585f3e3341f66930edcd:apps/worker/app/tests/unit/test_redaction.py:generic-api-key:5",
         "2c499a729405f68966a7aa1f8d7bcecd95d7b0ef:apps/desktop/playwright.config.ts:generic-api-key:19",
         "2c499a729405f68966a7aa1f8d7bcecd95d7b0ef:apps/desktop/tests/supabaseConfigSecurity.test.ts:generic-api-key:5",
+        "1dc8a627a16373b2728a0f6d16343013bc29c5bf:supabase/migration-checksums.v1.json:generic-api-key:15",
+        "1dc8a627a16373b2728a0f6d16343013bc29c5bf:supabase/migration-checksums.v1.json:generic-api-key:22",
+        "1dc8a627a16373b2728a0f6d16343013bc29c5bf:supabase/migration-checksums.v1.json:generic-api-key:23",
     }
 )
 
