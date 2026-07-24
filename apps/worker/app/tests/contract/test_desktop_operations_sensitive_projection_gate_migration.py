@@ -164,4 +164,4 @@ def test_checksum_manifest_pins_new_migration_without_rewriting_history() -> Non
     assert migrations["0022_operational_workflows.sql"] == (
         "a33a2881161024b67dbff0f6aa457302f419136d44102be359dab2a088065ae1"
     )
-    assert list(migrations)[-1] == MIGRATION.name
+    assert list(migrations) == sorted(migrations)

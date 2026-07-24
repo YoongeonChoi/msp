@@ -11,6 +11,7 @@ MIGRATION = ROOT / "supabase" / "migrations" / MIGRATION_NAME
 VERIFIER = ROOT / "supabase" / "verify_durable_operations_scheduler.py"
 MANIFEST = ROOT / "supabase" / "migration-checksums.v1.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "migration-check.yml"
+PREFLIGHT = ROOT / "supabase" / "preflight" / "pgcrypto_replay_preflight.sql"
 
 EXPECTED_JOBS = {
     "operations.commands",
@@ -285,6 +286,32 @@ def test_scheduler_verifier_is_triggered_for_pull_requests_and_pushes() -> None:
     assert workflow.count(f'      - "{verifier_path}"') == 2
     assert workflow.count(f'      - "{contract_path}"') == 2
     assert workflow.count("run: python supabase/verify_durable_operations_scheduler.py") == 1
+
+
+def test_pgcrypto_preflight_accepts_the_exact_scheduler_repository_tail() -> None:
+    preflight = _regular_file(PREFLIGHT)
+    version_match = re.search(
+        r"expected_versions constant text\[\] := array\[(.*?)\];",
+        preflight,
+        re.DOTALL,
+    )
+    name_match = re.search(
+        r"expected_names constant text\[\] := array\[(.*?)\];",
+        preflight,
+        re.DOTALL,
+    )
+    assert version_match is not None
+    assert name_match is not None
+
+    migration_parts = [
+        path.stem.split("_", maxsplit=1)
+        for path in sorted(MIGRATION.parent.glob("*.sql"))
+    ]
+    assert all(len(parts) == 2 for parts in migration_parts)
+    expected_versions = [parts[0] for parts in migration_parts]
+    expected_names = [parts[1] for parts in migration_parts]
+    assert re.findall(r"'([^']+)'", version_match.group(1)) == expected_versions
+    assert re.findall(r"'([^']+)'", name_match.group(1)) == expected_names
 
 
 def test_scheduler_migration_checksum_is_wired_after_final_freeze() -> None:
