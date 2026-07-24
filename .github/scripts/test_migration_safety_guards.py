@@ -277,6 +277,45 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertIn(source, output)
         self.assertIn(target, output)
 
+    def test_remote_accepts_unchanged_base_only_migration_from_first_parent(self) -> None:
+        base, _base_only_path = self._begin_base_advanced_candidate_merge()
+        head = self.fixture.commit("merge candidate after base advanced")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("new migrations: 1", output)
+
+    def test_remote_rejects_merge_time_modify_of_base_only_migration(self) -> None:
+        base, base_only_path = self._begin_base_advanced_candidate_merge()
+        self.fixture.write(base_only_path, "select 2;\n")
+        head = self.fixture.commit("merge modified base-only migration", base_only_path)
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(f"final tree changed committed migration: {base_only_path}", output)
+
+    def test_remote_rejects_head_delete_even_when_merge_restores_first_parent(self) -> None:
+        _root, base = self.fixture.timestamp_base()
+        protected_path = "supabase/migrations/20260719080000_base.sql"
+        self.fixture.git("switch", "-q", "-c", "topic", base)
+        self.fixture.git("rm", "-q", "--", protected_path)
+        self.fixture.commit("delete protected migration on topic")
+
+        self.fixture.git("switch", "-q", "-c", "integration", base)
+        self.fixture.git("merge", "--no-ff", "--no-commit", "topic")
+        self.fixture.write(protected_path)
+        head = self.fixture.commit("restore protected migration in merge", protected_path)
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} D: .*20260719080000_base\.sql",
+        )
+
     def _begin_second_parent_candidate_merge(self) -> tuple[str, str]:
         _root, base = self.fixture.timestamp_base()
         path = "supabase/migrations/20260719090000_candidate.sql"
@@ -288,6 +327,20 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.fixture.commit("advance integration branch", "integration.txt")
         self.fixture.git("merge", "--no-ff", "--no-commit", "topic")
         return base, path
+
+    def _begin_base_advanced_candidate_merge(self) -> tuple[str, str]:
+        _root, fork = self.fixture.timestamp_base()
+        candidate_path = "supabase/migrations/20260719100000_candidate.sql"
+        self.fixture.git("switch", "-q", "-c", "topic", fork)
+        self.fixture.write(candidate_path)
+        self.fixture.commit("add topic candidate migration", candidate_path)
+
+        base_only_path = "supabase/migrations/20260719090000_base_only.sql"
+        self.fixture.git("switch", "-q", "-c", "integration", fork)
+        self.fixture.write(base_only_path)
+        base = self.fixture.commit("advance base migrations", base_only_path)
+        self.fixture.git("merge", "--no-ff", "--no-commit", "topic")
+        return base, base_only_path
 
     def test_remote_rejects_modify_then_restore_of_protected_migration(self) -> None:
         _root, base = self.fixture.timestamp_base()

@@ -210,6 +210,23 @@ def _protected_violations(
     ]
 
 
+def _is_unchanged_trusted_first_parent_addition(
+    change: Change,
+    trusted_entries: dict[str, tuple[str, str, str]],
+    first_parent_entries: dict[str, tuple[str, str, str]],
+    commit_entries: dict[str, tuple[str, str, str]],
+) -> bool:
+    if change.status != "A" or len(change.paths) != 1:
+        return False
+    path = change.paths[0]
+    trusted_entry = trusted_entries.get(path)
+    return (
+        trusted_entry is not None
+        and first_parent_entries.get(path) == trusted_entry
+        and commit_entries.get(path) == trusted_entry
+    )
+
+
 def _invalid_additions(paths: set[str]) -> list[str]:
     return [
         f"new path is not a canonical migration filename: {path}"
@@ -562,20 +579,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
                 first_parent_entries = parent_entries[first_parent]
                 first_parent_paths = set(first_parent_entries)
+                commit_entries = _tree_entries(repo_root, commit)
                 for parent, entries in parent_entries.items():
                     parent_boundary = (
                         commit_boundary
                         if len(parents) == 1
                         else f"{commit_boundary} parent {parent[:12]}"
                     )
+                    parent_changes = _changes(repo_root, (parent, commit))
+                    if parent != first_parent:
+                        # A PR merge may carry a migration added only on its trusted
+                        # first parent into an older feature parent. It is not a
+                        # rewrite when the trusted, first-parent, and merge entries
+                        # are byte-for-byte identical.
+                        parent_changes = [
+                            change
+                            for change in parent_changes
+                            if not _is_unchanged_trusted_first_parent_addition(
+                                change,
+                                base_entries,
+                                first_parent_entries,
+                                commit_entries,
+                            )
+                        ]
                     violations.extend(
                         _protected_violations(
-                            _changes(repo_root, (parent, commit)),
+                            parent_changes,
                             protected | set(entries),
                             boundary=parent_boundary,
                         )
                     )
-                commit_entries = _tree_entries(repo_root, commit)
                 commit_new_paths = set(commit_entries) - protected
                 violations.extend(
                     _addition_violations(
