@@ -8,6 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[5]
 MIGRATION_NAME = "20260724210000_durable_operations_scheduler.sql"
 MIGRATION = ROOT / "supabase" / "migrations" / MIGRATION_NAME
+CONFLICT_FIX_MIGRATION_NAME = (
+    "20260724234500_durable_scheduler_conflict_target.sql"
+)
+CONFLICT_FIX_MIGRATION = (
+    ROOT / "supabase" / "migrations" / CONFLICT_FIX_MIGRATION_NAME
+)
 VERIFIER = ROOT / "supabase" / "verify_durable_operations_scheduler.py"
 G1_G2_VERIFIER = ROOT / "supabase" / "verify_g1_g2_migration.py"
 MANIFEST = ROOT / "supabase" / "migration-checksums.v1.json"
@@ -61,6 +67,7 @@ EXPECTED_VERIFICATION_MARKERS = {
     "single_trusted_owner_catalog",
     "zero_trading_order_side_effects",
     "populated_upgrade",
+    "conflict_target_drift_rollback",
     "disposable_container_cleanup",
 }
 
@@ -260,6 +267,37 @@ def test_scheduler_creation_races_and_catalog_owner_are_fail_closed() -> None:
     assert "role.rolsuper or role.rolbypassrls" in sql
 
 
+def test_scheduler_conflict_target_is_forward_patched_without_metadata_drift() -> None:
+    sql = _regular_file(CONFLICT_FIX_MIGRATION)
+    signature = (
+        "(text,text,bigint,text,text,text,integer,integer,integer,integer,"
+        "integer,integer,boolean)'::regprocedure"
+    )
+    assert f"ensure_scheduler_job_definition_impl{signature}" in sql
+    assert f"converge_scheduler_job_definition_impl{signature}" in sql
+    assert (
+        "'on conflict (account_id, job_key) do nothing'"
+    ) in sql
+    assert (
+        "'on conflict on constraint "
+        "scheduler_job_definitions_account_id_job_key_key do nothing'"
+    ) in sql
+    assert "pg_catalog.pg_get_constraintdef" in sql
+    assert "pg_catalog.pg_get_functiondef" in sql
+    assert "pg_catalog.replace" in sql
+    assert "legacy_occurrences <> 1" in sql
+    assert "legacy_occurrences <> 0" in sql
+    assert "constraint_occurrences <> 1" in sql
+    assert "execute patched_definition;" in sql
+    assert "durable_scheduler_conflict_patch_target_invalid" in sql
+    assert "durable_scheduler_conflict_patch_failed" in sql
+    assert "patched_owner is distinct from original_owner" in sql
+    assert "patched_security_definer is distinct from true" in sql
+    assert "patched_volatility is distinct from 'v'" in sql
+    assert "array['search_path=\"\"']::text[]" in sql
+    assert "#variable_conflict use_column" not in sql
+
+
 def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None:
     source = _regular_file(VERIFIER)
     assert 'POSTGRES_IMAGE = "postgres:17.6-alpine"' in source
@@ -268,6 +306,9 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
         assert f'"{marker}"' in source
     assert "apply_repository(fresh)" in source
     assert "verify_populated_upgrade(upgrade)" in source
+    assert "verify_conflict_target_drift_rollback(upgrade)" in source
+    assert '"23514"' in source
+    assert "durable_scheduler_conflict_patch_target_invalid" in source
     assert '["docker", "restart", container]' in source
     assert '["docker", "rm", "-f", "-v", container]' in source
     assert "domain_snapshot(fresh)" in source
@@ -326,10 +367,14 @@ def test_pgcrypto_preflight_accepts_the_exact_scheduler_repository_tail() -> Non
     assert re.findall(r"'([^']+)'", name_match.group(1)) == expected_names
 
 
-def test_scheduler_migration_checksum_is_wired_after_final_freeze() -> None:
-    migration = _regular_file(MIGRATION)
+def test_scheduler_migration_checksums_are_wired_after_final_freeze() -> None:
     manifest = json.loads(_regular_file(MANIFEST))
     assert manifest["algorithm"] == "sha256"
     assert manifest["canonicalization"] == "utf-8-lf"
-    expected = hashlib.sha256(migration.encode("utf-8")).hexdigest()
-    assert manifest["migrations"][MIGRATION_NAME] == expected
+    for migration_name, migration_path in (
+        (MIGRATION_NAME, MIGRATION),
+        (CONFLICT_FIX_MIGRATION_NAME, CONFLICT_FIX_MIGRATION),
+    ):
+        migration = _regular_file(migration_path)
+        expected = hashlib.sha256(migration.encode("utf-8")).hexdigest()
+        assert manifest["migrations"][migration_name] == expected

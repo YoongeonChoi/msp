@@ -41,6 +41,9 @@ from verify_pit_calendar_observation_store import domain_snapshot
 
 POSTGRES_IMAGE = "postgres:17.6-alpine"
 MIGRATION_NAME = "20260724210000_durable_operations_scheduler.sql"
+CONFLICT_FIX_MIGRATION_NAME = (
+    "20260724234500_durable_scheduler_conflict_target.sql"
+)
 CHECKSUM_MANIFEST = ROOT / "migration-checksums.v1.json"
 ACCOUNT_ID = "paper-primary"
 HOLDER_ID = "51515151-5151-4515-8515-515151515151"
@@ -78,6 +81,23 @@ TABLE_NAMES = (
     "scheduler_job_leases",
     "scheduler_replay_requests",
 )
+CONFLICT_PATCH_FUNCTIONS = (
+    (
+        "private.ensure_scheduler_job_definition_impl"
+        "(text,text,bigint,text,text,text,integer,integer,integer,integer,"
+        "integer,integer,boolean)"
+    ),
+    (
+        "private.converge_scheduler_job_definition_impl"
+        "(text,text,bigint,text,text,text,integer,integer,integer,integer,"
+        "integer,integer,boolean)"
+    ),
+)
+LEGACY_CONFLICT_FRAGMENT = "on conflict (account_id, job_key) do nothing"
+CONSTRAINT_CONFLICT_FRAGMENT = (
+    "on conflict on constraint "
+    "scheduler_job_definitions_account_id_job_key_key do nothing"
+)
 
 # Static contract tests pin these names so deleting a behavioral proof cannot
 # silently leave a green workflow behind.
@@ -113,6 +133,7 @@ VERIFICATION_MARKERS = frozenset(
         "single_trusted_owner_catalog",
         "zero_trading_order_side_effects",
         "populated_upgrade",
+        "conflict_target_drift_rollback",
         "disposable_container_cleanup",
     }
 )
@@ -817,21 +838,30 @@ def wait_for_run_deadline(container: str, run_id: str, column: str) -> None:
 
 
 def verify_checksum_wiring() -> None:
-    target = MIGRATIONS / MIGRATION_NAME
-    if not target.is_file() or target.is_symlink():
-        raise VerificationError("durable scheduler migration must be a regular file")
     try:
         manifest = json.loads(CHECKSUM_MANIFEST.read_text(encoding="utf-8"))
-        expected = manifest["migrations"][MIGRATION_NAME]
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         raise VerificationError("durable scheduler checksum is not wired") from error
-    canonical = target.read_text(encoding="utf-8").encode("utf-8")
-    actual = hashlib.sha256(canonical).hexdigest()
-    if expected != actual:
-        raise VerificationError(
-            f"durable scheduler checksum mismatch: expected={expected!r}, actual={actual}"
-        )
-    print("PASS durable scheduler migration checksum wiring")
+    for migration_name in (MIGRATION_NAME, CONFLICT_FIX_MIGRATION_NAME):
+        target = MIGRATIONS / migration_name
+        if not target.is_file() or target.is_symlink():
+            raise VerificationError(
+                f"durable scheduler migration must be a regular file: {migration_name}"
+            )
+        try:
+            expected = manifest["migrations"][migration_name]
+        except (KeyError, TypeError) as error:
+            raise VerificationError(
+                f"durable scheduler checksum is not wired: {migration_name}"
+            ) from error
+        canonical = target.read_text(encoding="utf-8").encode("utf-8")
+        actual = hashlib.sha256(canonical).hexdigest()
+        if expected != actual:
+            raise VerificationError(
+                "durable scheduler checksum mismatch: "
+                f"migration={migration_name}, expected={expected!r}, actual={actual}"
+            )
+    print("PASS durable scheduler migration and conflict fix checksum wiring")
 
 
 def open_scheduler_account_fixtures(container: str) -> None:
@@ -3545,14 +3575,253 @@ def verify_zero_side_effects(container: str, before: str) -> None:
     print("PASS zero_trading_order_side_effects")
 
 
+def scheduler_conflict_patch_snapshot(container: str) -> dict[str, Any]:
+    function_values = ",".join(
+        f"({sql_text(signature)},{sql_text(signature)}::regprocedure)"
+        for signature in CONFLICT_PATCH_FUNCTIONS
+    )
+    value = json.loads(
+        scalar(
+            container,
+            f"""
+with target_function(expected_identity, function_oid) as (
+  values {function_values}
+)
+select pg_catalog.jsonb_build_object(
+  'functions', (
+    select pg_catalog.jsonb_agg(
+      pg_catalog.jsonb_build_object(
+        'identity', target_function.expected_identity,
+        'catalog_identity', procedure.oid::regprocedure::text,
+        'oid', procedure.oid,
+        'owner', procedure.proowner,
+        'acl', procedure.proacl,
+        'security_definer', procedure.prosecdef,
+        'volatility', procedure.provolatile,
+        'config', procedure.proconfig,
+        'source_sha256', pg_catalog.encode(
+          extensions.digest(
+            pg_catalog.convert_to(
+              pg_catalog.pg_get_functiondef(procedure.oid),
+              'UTF8'
+            ),
+            'sha256'
+          ),
+          'hex'
+        ),
+        'legacy_occurrences', (
+          pg_catalog.length(pg_catalog.pg_get_functiondef(procedure.oid))
+          - pg_catalog.length(
+              pg_catalog.replace(
+                pg_catalog.pg_get_functiondef(procedure.oid),
+                {sql_text(LEGACY_CONFLICT_FRAGMENT)},
+                ''
+              )
+            )
+        ) / pg_catalog.length({sql_text(LEGACY_CONFLICT_FRAGMENT)}),
+        'constraint_occurrences', (
+          pg_catalog.length(pg_catalog.pg_get_functiondef(procedure.oid))
+          - pg_catalog.length(
+              pg_catalog.replace(
+                pg_catalog.pg_get_functiondef(procedure.oid),
+                {sql_text(CONSTRAINT_CONFLICT_FRAGMENT)},
+                ''
+              )
+            )
+        ) / pg_catalog.length({sql_text(CONSTRAINT_CONFLICT_FRAGMENT)})
+      )
+      order by target_function.expected_identity
+    )
+    from target_function
+    join pg_catalog.pg_proc as procedure
+      on procedure.oid = target_function.function_oid
+  ),
+  'constraint', (
+    select pg_catalog.jsonb_build_object(
+      'oid', constraint_record.oid,
+      'relation_oid', constraint_record.conrelid,
+      'name', constraint_record.conname,
+      'type', constraint_record.contype,
+      'definition', pg_catalog.pg_get_constraintdef(
+        constraint_record.oid,
+        false
+      )
+    )
+    from pg_catalog.pg_constraint as constraint_record
+    where constraint_record.conrelid =
+          'private.scheduler_job_definitions'::regclass
+      and constraint_record.conname =
+          'scheduler_job_definitions_account_id_job_key_key'
+  )
+)::text;
+""",
+        )
+    )
+    if type(value) is not dict:
+        raise VerificationError(f"conflict patch snapshot must be an object: {value!r}")
+    functions = value.get("functions")
+    constraint = value.get("constraint")
+    if (
+        not isinstance(functions, list)
+        or len(functions) != 2
+        or any(type(function) is not dict for function in functions)
+    ):
+        raise VerificationError(f"conflict patch functions are incomplete: {value!r}")
+    if not isinstance(constraint, dict):
+        raise VerificationError(f"conflict patch constraint is incomplete: {value!r}")
+    return value
+
+
+def conflict_patch_metadata(snapshot: dict[str, Any]) -> dict[str, Any]:
+    functions = snapshot["functions"]
+    if not isinstance(functions, list):
+        raise VerificationError("conflict patch metadata functions must be a list")
+    return {
+        "functions": [
+            {
+                key: value
+                for key, value in function.items()
+                if key
+                not in {
+                    "source_sha256",
+                    "legacy_occurrences",
+                    "constraint_occurrences",
+                }
+            }
+            for function in functions
+        ],
+        "constraint": snapshot["constraint"],
+    }
+
+
+def verify_conflict_patch_transition(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    if conflict_patch_metadata(before) != conflict_patch_metadata(after):
+        raise VerificationError("conflict patch changed function or constraint metadata")
+    before_functions = before["functions"]
+    after_functions = after["functions"]
+    if not isinstance(before_functions, list) or not isinstance(after_functions, list):
+        raise VerificationError("conflict patch transition functions must be lists")
+    for before_function, after_function in zip(
+        before_functions,
+        after_functions,
+        strict=True,
+    ):
+        if (
+            before_function["legacy_occurrences"] != 1
+            or before_function["constraint_occurrences"] != 0
+            or after_function["legacy_occurrences"] != 0
+            or after_function["constraint_occurrences"] != 1
+            or before_function["source_sha256"] == after_function["source_sha256"]
+        ):
+            raise VerificationError(
+                "conflict patch source transition mismatch: "
+                f"before={before_function!r}, after={after_function!r}"
+            )
+    print("PASS conflict target catalog transition and metadata preservation")
+
+
+def verify_conflict_target_drift_rollback(container: str) -> None:
+    baseline = scheduler_conflict_patch_snapshot(container)
+    drift_targets = ",".join(
+        f"{sql_text(signature)}::regprocedure"
+        for signature in CONFLICT_PATCH_FUNCTIONS
+    )
+    duplicate_target = sql_text(CONFLICT_PATCH_FUNCTIONS[1])
+    psql(
+        container,
+        f"""
+do $drift$
+declare
+  target_functions constant regprocedure[] := array[{drift_targets}];
+  duplicate_target constant regprocedure := {duplicate_target}::regprocedure;
+  target_function regprocedure;
+  function_definition text;
+  replacement_fragment text;
+  legacy_fragment constant text := {sql_text(LEGACY_CONFLICT_FRAGMENT)};
+  constraint_fragment constant text := {sql_text(CONSTRAINT_CONFLICT_FRAGMENT)};
+begin
+  foreach target_function in array target_functions loop
+    function_definition := pg_catalog.pg_get_functiondef(target_function);
+    if (
+      pg_catalog.length(function_definition)
+      - pg_catalog.length(
+          pg_catalog.replace(function_definition, constraint_fragment, '')
+        )
+    ) / pg_catalog.length(constraint_fragment) <> 1
+       or pg_catalog.strpos(function_definition, legacy_fragment) > 0 then
+      raise exception 'durable_scheduler_conflict_drift_fixture_invalid';
+    end if;
+    replacement_fragment := legacy_fragment;
+    if target_function = duplicate_target then
+      replacement_fragment := replacement_fragment
+        || E'\\n  /* '
+        || legacy_fragment
+        || ' */';
+    end if;
+    execute pg_catalog.replace(
+      function_definition,
+      constraint_fragment,
+      replacement_fragment
+    );
+  end loop;
+end;
+$drift$;
+""",
+    )
+    drifted = scheduler_conflict_patch_snapshot(container)
+    if conflict_patch_metadata(drifted) != conflict_patch_metadata(baseline):
+        raise VerificationError("drift fixture changed protected catalog metadata")
+    drifted_functions = drifted["functions"]
+    if not isinstance(drifted_functions, list):
+        raise VerificationError("conflict patch drift functions must be a list")
+    drift_receipts = {
+        function["identity"]: (
+            function["legacy_occurrences"],
+            function["constraint_occurrences"],
+        )
+        for function in drifted_functions
+    }
+    target_identity = CONFLICT_PATCH_FUNCTIONS[1]
+    expected_receipts = {
+        CONFLICT_PATCH_FUNCTIONS[0]: (1, 0),
+        target_identity: (2, 0),
+    }
+    if drift_receipts != expected_receipts:
+        raise VerificationError(
+            f"duplicate conflict drift fixture mismatch: {drift_receipts!r}"
+        )
+
+    fix_sql = (MIGRATIONS / CONFLICT_FIX_MIGRATION_NAME).read_text(encoding="utf-8")
+    expect_failure(
+        container,
+        "\\set VERBOSITY verbose\n" + fix_sql,
+        "23514",
+        "durable_scheduler_conflict_patch_target_invalid",
+    )
+    after_failure = scheduler_conflict_patch_snapshot(container)
+    if after_failure != drifted:
+        raise VerificationError(
+            "failed conflict patch did not roll back atomically: "
+            f"before={drifted!r}, after={after_failure!r}"
+        )
+    print("PASS conflict_target_drift_rollback")
+
+
 def verify_populated_upgrade(container: str) -> None:
     psql(container, bootstrap_sql())
     target = MIGRATIONS / MIGRATION_NAME
+    conflict_fix = MIGRATIONS / CONFLICT_FIX_MIGRATION_NAME
     migrations = sorted(MIGRATIONS.glob("*.sql"))
     try:
         target_index = migrations.index(target)
+        conflict_fix_index = migrations.index(conflict_fix)
     except ValueError as error:
         raise VerificationError("durable scheduler migration boundary is missing") from error
+    if conflict_fix_index <= target_index:
+        raise VerificationError("durable scheduler conflict fix boundary is invalid")
     for migration in migrations[:target_index]:
         psql(container, migration.read_text(encoding="utf-8"))
     psql(container, SEED.read_text(encoding="utf-8"))
@@ -3575,7 +3844,13 @@ def verify_populated_upgrade(container: str) -> None:
     )
 
     psql(container, target.read_text(encoding="utf-8"))
-    for migration in migrations[target_index + 1 :]:
+    for migration in migrations[target_index + 1 : conflict_fix_index]:
+        psql(container, migration.read_text(encoding="utf-8"))
+    before_conflict_fix = scheduler_conflict_patch_snapshot(container)
+    psql(container, conflict_fix.read_text(encoding="utf-8"))
+    after_conflict_fix = scheduler_conflict_patch_snapshot(container)
+    verify_conflict_patch_transition(before_conflict_fix, after_conflict_fix)
+    for migration in migrations[conflict_fix_index + 1 :]:
         psql(container, migration.read_text(encoding="utf-8"))
     spec = definition_spec(
         "operations.outbox",
@@ -3721,6 +3996,7 @@ def main() -> int:
         verify_security_contract(fresh)
         verify_zero_side_effects(fresh, before_domain)
         verify_populated_upgrade(upgrade)
+        verify_conflict_target_drift_rollback(upgrade)
     except (
         VerificationError,
         OSError,

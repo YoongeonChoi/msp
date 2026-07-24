@@ -49,6 +49,7 @@
     "20260719080000_kr_calendar_collection_job_inspection.sql": "0b107f26f1d9a79cbf1e6322363a43e4cc2d64412184997681f9fd8727ea16ef",
     "20260719090000_pit_daily_candle_collection_job_store.sql": "8b38903249641b1c584e2f9199e397a64811c3ca1db80b48dba2250906670dd5",
     "20260723162000_desktop_operations_sensitive_projection_gate.sql": "2e2609c5b350ea1f97936b18a38befd17cb2e77e2b7677dfd07a98ae9b1612a4",
-    "20260724210000_durable_operations_scheduler.sql": "f7ca9038419682d11c1c957349035fa0bdeea0e708eea8514ba6f9886d359dec"
+    "20260724210000_durable_operations_scheduler.sql": "f7ca9038419682d11c1c957349035fa0bdeea0e708eea8514ba6f9886d359dec",
+    "20260724234500_durable_scheduler_conflict_target.sql": "c939a7dcd47b278043a60f4f3e6a81847c0c763dcd8f0f6f0427a45e280ac1eb"
   }
 }

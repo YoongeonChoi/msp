@@ -129,7 +129,8 @@ guarantee. Any ambiguous state stops the release.
 46. `20260719090000_pit_daily_candle_collection_job_store.sql`
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
 48. `20260724210000_durable_operations_scheduler.sql`
-49. `seed.sql`
+49. `20260724234500_durable_scheduler_conflict_target.sql`
+50. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -262,6 +263,29 @@ The timestamp migrations extend that boundary in this order:
   a new child run; it never mutates the source dead letter, and the exact request
   ID can recover the creation receipt after Worker takeover. No scheduler RPC
   accepts caller time, module names, function names, or executable payloads.
+- `20260724234500_durable_scheduler_conflict_target.sql` is an append-only
+  compatibility correction for the two scheduler definition upsert routines.
+  The original `ensure` routine exposes `account_id` and `job_key` as PL/pgSQL
+  output variables, which makes its original column-list
+  `ON CONFLICT (account_id, job_key)` target ambiguous when PostgreSQL first
+  plans the INSERT. The `converge` routine does not expose those output names;
+  it is normalized in the same correction because it uses the matching upsert
+  shape. The migration resolves the already-validated unique constraint by name
+  and requires exactly one legacy fragment in each exact `regprocedure`. Its
+  transactional postconditions prove that owner is preserved and that the
+  security-definer flag, volatility, and empty search path remain canonical.
+  They do not claim to reject arbitrary unrelated source drift or an already-
+  drifted owner that still has replacement authority.
+
+  The disposable PostgreSQL verifier separately snapshots function OID, owner,
+  ACL, security metadata, source SHA-256, and constraint identity before and
+  after the populated upgrade. A mismatch fails the verification evidence; that
+  post-commit comparison does not automatically roll back an already committed
+  hosted migration. Its negative fixture changes the first function to one
+  legacy fragment and the second to two, requires SQLSTATE `23514`, and proves
+  that the first replacement is rolled back when the second function fails
+  inside the same migration transaction. This migration does not add an RPC,
+  table, grant, cadence job, or trading authority.
 
 ## Required project configuration
 

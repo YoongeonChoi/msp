@@ -33,7 +33,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719080000_kr_calendar_collection_job_inspection.sql`, followed by
 `20260719090000_pit_daily_candle_collection_job_store.sql`, followed by
 `20260723162000_desktop_operations_sensitive_projection_gate.sql`, followed by
-`20260724210000_durable_operations_scheduler.sql`.
+`20260724210000_durable_operations_scheduler.sql`, followed by
+`20260724234500_durable_scheduler_conflict_target.sql`.
 
 After the Desktop sensitive-projection migration, run the complete
 `python supabase/verify_g1_g2_migration.py` verifier without
@@ -45,8 +46,9 @@ permissions and the exact known audit/reconciliation fixture. `anon` and
 identifier-free reconciliation health state as auditor evidence; it remains
 part of minimum-status availability.
 
-After the durable operations scheduler migration, run its fresh-install and
-populated-upgrade verifier:
+After the durable operations scheduler and its conflict-target correction,
+run the fresh-install, populated-upgrade, catalog-preservation, and atomic
+rollback verifier:
 
 ```bash
 python supabase/verify_durable_operations_scheduler.py
@@ -83,6 +85,21 @@ PostgreSQL 17.6 containers and proves the following boundaries directly:
 - all four tables and 21 routines retain one non-runtime owner that directly has
   `rolsuper` or `rolbypassrls`; membership in another privileged role is not
   accepted as RLS-bypass evidence.
+- the two definition upsert routines move from exactly one legacy column-list
+  conflict target to exactly one named-constraint target without changing OID,
+  owner, ACL, security-definer status, volatility, empty search path, or the
+  unique constraint identity;
+- a duplicate legacy fragment returns SQLSTATE `23514` and the exact
+  `durable_scheduler_conflict_patch_target_invalid` receipt, and the complete
+  source/catalog snapshot remains unchanged after rollback, including the first
+  function that was temporarily replaced before the second function failed.
+
+The catalog-preservation comparison is evidence from a disposable database
+after the correction commits. In a hosted rollout, a mismatch blocks release
+and traffic restoration but does not itself undo an already committed
+migration. Automatic rollback is proved only for a guard that raises inside the
+correction migration's own transaction, including the duplicate-fragment case
+above.
 
 Do not start the normal scheduler by simply replacing definitions first. During
 a rolling release, an older definition may still own a leased or retry-wait run.
