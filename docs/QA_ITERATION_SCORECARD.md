@@ -11,6 +11,12 @@ merge parents: `621d4925b8196accc653030bad561e07caf4a39e`,
 
 통합 PR: [#17](https://github.com/YoongeonChoi/msp/pull/17)
 
+publication receipt authority:
+[#18](https://github.com/YoongeonChoi/msp/pull/18) — 이 안정적인 PR 기록의 exact
+head, push/PR check, merge commit과 post-merge `main` check가 이 보고서 게시의
+canonical receipt다. 보고서가 자기 자신의 아직 존재하지 않는 SHA와 run ID를
+미리 넣는 순환을 피하기 위해 publication receipt는 이 PR에 결속한다.
+
 평가일: 2026-07-24 KST
 
 이 문서는 위 exact source를 고정된 8개 영역·67개 이진 ID로 다시 평가한 현행
@@ -22,7 +28,8 @@ DO-7 현행 점수표 증거를 완결한다.
 
 publication 전 `02ba9be…` tree 안의 오래된 `미확정` 문구만 기계적으로 보면
 DO-7은 0점이고 임시 점수는 `88.40`이다. 이 보고서가 required gate를 통과해
-통합되면 DO-7을 포함한 공식 engineering 점수는 `88.90`이다. 이 경계를 숨기거나
+통합되고 PR #18의 exact publication head와 post-merge `main` gate가 모두
+성공하면 DO-7을 포함한 공식 engineering 점수는 `88.90`이다. 이 경계를 숨기거나
 보고서 존재를 미리 PASS로 계산하지 않는다.
 
 이 점수는 engineering 품질 추세이지 투자 성과, 수익 가능성, 보안 보증, 배포
