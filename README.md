@@ -387,7 +387,13 @@ QA는 “코드가 존재한다”가 아니라 **커밋된 exact SHA에서 요�
 QA_{total}=\sum_{k=1}^{8} Score_k\times Weight_k
 ```
 
-아래 표는 `0c6b5f6`에서 공개한 **과거 engineering 기준선**입니다. 그 뒤 cache 격리와 migration-history 방어가 수정됐으므로 최신 HEAD를 다시 평가하기 전에는 현재 점수로 사용할 수 없습니다. Live 준비도와도 무관합니다.
+아래 표는 PR #17을 통합한 exact source `02ba9be`의 평가를 이 README와
+scorecard publication commit이 required gate를 거쳐 `main`에 통합된 뒤 확정할
+**현행 engineering 점수**입니다. 그때 67개 ID 중 54개가 PASS, 13개가
+MISSING이며 `0c6b5f6`의 과거 기준선 `88.60`보다 `0.30`점 높습니다. publication
+전 `02ba9be` tree만 기계적으로 평가하면 DO-7이 빠진 `88.40`입니다. exact run
+ID, ID별 판정과 이 경계는 [QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)에
+고정합니다. 이 숫자는 Live 준비도와 무관합니다.
 
 | 평가축                  |   가중치 | 기록 점수 | 핵심 점검 내용                                                     | 남은 핵심 항목                                   |
 | ----------------------- | -------: | --------: | ------------------------------------------------------------------ | ------------------------------------------------ |
@@ -397,9 +403,9 @@ QA_{total}=\sum_{k=1}^{8} Score_k\times Weight_k
 | OP · 운영 가시성        |      15% |        80 | heartbeat, incident, reconciliation, outbox, receiver ACK          | 독립 dead-man, human ACK, durable scheduler      |
 | DT · Desktop 정확성     |      10% |        93 | strict schema, RBAC, maker/checker, cache, accessibility           | packaged visual smoke, signed artifact           |
 | TC · 테스트·CI          |      10% |       100 | Worker/Desktop/Rust/migration/security/dependency gate             | exact SHA마다 재검증                             |
-| DO · 문서·온보딩        |      10% |        97 | architecture, policy, runbook, API gap, setup                      | current-status 문서 hub                          |
+| DO · 문서·온보딩        |      10% |       100 | architecture, policy, runbook, API gap, setup, current QA hub      | exact SHA마다 재검증                             |
 | MA · 유지보수성         |      10% |        78 | ports/adapters, strict types, shared guards, wiring                | 대형 adapter/SQL 분해, scheduler 응집도          |
-| **가중 종합**           | **100%** | **88.60** | engineering trend only                                             | `G0/G1/G2`와 분리                                |
+| **가중 종합**           | **100%** | **88.90** | engineering trend only                                             | `G0/G1/G2`와 분리                                |
 
 실제 반복 개발에서 사용하는 핵심 확인 순서는 다음과 같습니다. 아래 checkbox는 새 exact SHA를 평가할 때마다 비우고 다시 실행하는 템플릿입니다.
 
