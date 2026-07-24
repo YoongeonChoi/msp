@@ -1639,7 +1639,7 @@ select concat_ws(
 from contract_object
 join pg_catalog.pg_roles as owner on owner.oid=contract_object.owner_oid;
 ''').stdout.strip()
-        if scheduler_owner_receipt != "25|1|supabase_admin|true|true":
+        if scheduler_owner_receipt != "25|1|supabase_admin|t|t":
             raise VerificationError(
                 "scheduler trusted-owner cleanup receipt mismatch: "
                 f"{scheduler_owner_receipt}"
