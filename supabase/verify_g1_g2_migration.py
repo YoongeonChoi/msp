@@ -1340,8 +1340,8 @@ def apply_repository(container: str, *, preinstall_pgcrypto: bool = False) -> No
     migration_user = "postgres"
     if preinstall_pgcrypto:
         psql(container, """
-create role supabase_admin nologin nosuperuser;
-create role migration_operator login nosuperuser inherit;
+create role supabase_admin nologin nosuperuser bypassrls;
+create role migration_operator login nosuperuser inherit bypassrls;
 grant supabase_admin to migration_operator;
 grant create on database postgres to supabase_admin;
 grant create on schema public to supabase_admin;
@@ -1360,13 +1360,14 @@ reset role;
         migration_user = preflight_user
         identity = psql(
             container,
-            "select current_user || ':' || rolsuper::text "
+            "select concat_ws('|',current_user,rolsuper,rolbypassrls) "
             "from pg_roles where rolname=current_user;",
             user=preflight_user,
         ).stdout.strip()
-        if identity != "migration_operator:false":
+        if identity != "migration_operator|false|true":
             raise VerificationError(
-                f"preflight role is not the expected non-superuser: {identity}"
+                "preflight role is not the expected temporary non-superuser "
+                f"BYPASSRLS owner: {identity}"
             )
         expect_failure(
             container,
@@ -1519,6 +1520,7 @@ $align_pgcrypto_member_owners$;
         psql(container, r'''
 alter publication supabase_realtime owner to postgres;
 reassign owned by migration_operator to supabase_admin;
+alter role migration_operator nobypassrls;
 revoke select, references on auth.users from migration_operator;
 revoke select, insert on supabase_migrations.schema_migrations
   from migration_operator;
@@ -1560,6 +1562,7 @@ select concat_ws('|',
   (select pg_get_userbyid(pubowner) from pg_publication
     where pubname='supabase_realtime'),
   pg_has_role('migration_operator','supabase_admin','MEMBER'),
+  (select rolbypassrls from pg_roles where rolname='migration_operator'),
   has_table_privilege(
     'migration_operator',
     'supabase_migrations.schema_migrations',
@@ -1570,14 +1573,80 @@ select concat_ws('|',
   has_schema_privilege('migration_operator','public','CREATE')
 );
 ''').stdout.strip()
-        if cleanup_receipt != "0|postgres|f|f|f|f|f":
+        if cleanup_receipt != "0|postgres|f|f|f|f|f|f":
             raise VerificationError(
                 "non-superuser replay capability cleanup receipt mismatch: "
                 f"{cleanup_receipt}"
             )
+        scheduler_owner_receipt = psql(container, r'''
+with contract_object(owner_oid) as (
+  select relation.relowner
+  from pg_catalog.pg_class as relation
+  join pg_catalog.pg_namespace as namespace
+    on namespace.oid=relation.relnamespace
+  where namespace.nspname='private'
+    and relation.relname in (
+      'scheduler_job_definitions',
+      'scheduler_job_runs',
+      'scheduler_job_leases',
+      'scheduler_replay_requests'
+    )
+  union all
+  select procedure.proowner
+  from pg_catalog.pg_proc as procedure
+  join pg_catalog.pg_namespace as namespace
+    on namespace.oid=procedure.pronamespace
+  where (
+      namespace.nspname='private'
+      and procedure.proname in (
+        'scheduler_definition_sha256_v1',
+        'require_scheduler_outer_lease_v1',
+        'scheduler_command_barrier_satisfied_v1',
+        'scheduler_definition_document_v1',
+        'scheduler_run_document_v1',
+        'guard_scheduler_job_definition_v1',
+        'guard_scheduler_job_run_v1',
+        'ensure_scheduler_job_definition_impl',
+        'converge_scheduler_job_definition_impl',
+        'claim_due_scheduler_job_impl',
+        'complete_scheduler_job_run_impl',
+        'fail_scheduler_job_run_impl',
+        'inspect_scheduler_dead_letter_impl',
+        'replay_scheduler_dead_letter_impl'
+      )
+    )
+    or (
+      namespace.nspname='worker_api'
+      and procedure.proname in (
+        'ensure_scheduler_job_definition',
+        'converge_scheduler_job_definition',
+        'claim_due_scheduler_job',
+        'complete_scheduler_job_run',
+        'fail_scheduler_job_run',
+        'inspect_scheduler_dead_letter',
+        'replay_scheduler_dead_letter'
+      )
+    )
+)
+select concat_ws(
+  '|',
+  count(*),
+  count(distinct contract_object.owner_oid),
+  min(owner.rolname),
+  bool_and(not owner.rolcanlogin),
+  bool_and(owner.rolsuper or owner.rolbypassrls)
+)
+from contract_object
+join pg_catalog.pg_roles as owner on owner.oid=contract_object.owner_oid;
+''').stdout.strip()
+        if scheduler_owner_receipt != "25|1|supabase_admin|true|true":
+            raise VerificationError(
+                "scheduler trusted-owner cleanup receipt mismatch: "
+                f"{scheduler_owner_receipt}"
+            )
         print(
             "PASS non-superuser replay reassigns created objects and revokes "
-            "temporary owner, auth, ledger, and publication capabilities"
+            "temporary BYPASSRLS owner, auth, ledger, and publication capabilities"
         )
 
 

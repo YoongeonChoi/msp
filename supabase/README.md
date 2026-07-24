@@ -28,6 +28,10 @@ PostgreSQL version, `migration-checksums.v1.json`, preflight SHA-256 및 실행 
 기본 경로를 사용해야 합니다. `psql`과 runner는 별도 session이므로 actual runner의
 `current_user`/`current_schemas(false)` 시작 receipt가 없거나 session override를
 배제할 수 없으면 실행을 중단합니다.
+`20260724210000`부터 forced-RLS scheduler 객체의 직접 owner는 runtime role이
+아니면서 `rolsuper` 또는 `rolbypassrls` 중 하나를 직접 가져야 합니다. role
+membership은 `BYPASSRLS`를 상속하지 않으므로 sanitized owner 속성 receipt가 없으면
+배포를 중단하며, hosted role을 즉석에서 승격해 우회하지 않습니다.
 자세한 판정·실행·postflight 절차는 `docs/SUPABASE_SETUP.md`를 따릅니다.
 
 SQL migration 순서:

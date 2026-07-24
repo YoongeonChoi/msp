@@ -27,8 +27,13 @@ Before any repository migration runner on PostgreSQL 17:
    both preflight and replay. Its persistent role/database default must resolve
    `public` as the first effective non-system schema. Client/session overrides,
    including `PGOPTIONS`, URI `options`, and runner-side `SET search_path`, are
-   prohibited. In that profile, immediately before the migration runner,
-   execute:
+   prohibited. The durable scheduler tail also requires that the role which
+   directly owns the new forced-RLS tables and security-definer routines has
+   `rolsuper=true` or `rolbypassrls=true`; role membership does not inherit
+   `BYPASSRLS`. Record a sanitized `current_user`, `rolsuper`, and
+   `rolbypassrls` receipt and stop if the direct owner contract is not met.
+   Do not grant this capability ad hoc during a hosted deployment. In that
+   approved profile, immediately before the migration runner, execute:
 
    ```bash
    psql -X -v ON_ERROR_STOP=1 \

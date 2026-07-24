@@ -79,7 +79,10 @@ PostgreSQL 17.6 containers and proves the following boundaries directly:
   a later valid outer lease; changing any bound source field is rejected;
 - forced RLS, zero table policies, zero runtime table grants, exact service-role
   RPC grants, empty function search paths, and zero order/trading side effects
-  remain true on fresh and populated upgrades.
+  remain true on fresh and populated upgrades;
+- all four tables and 21 routines retain one non-runtime owner that directly has
+  `rolsuper` or `rolbypassrls`; membership in another privileged role is not
+  accepted as RLS-bypass evidence.
 
 Do not start the normal scheduler by simply replacing definitions first. During
 a rolling release, an older definition may still own a leased or retry-wait run.

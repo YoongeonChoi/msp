@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[5]
 MIGRATION_NAME = "20260724210000_durable_operations_scheduler.sql"
 MIGRATION = ROOT / "supabase" / "migrations" / MIGRATION_NAME
 VERIFIER = ROOT / "supabase" / "verify_durable_operations_scheduler.py"
+G1_G2_VERIFIER = ROOT / "supabase" / "verify_g1_g2_migration.py"
 MANIFEST = ROOT / "supabase" / "migration-checksums.v1.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "migration-check.yml"
 PREFLIGHT = ROOT / "supabase" / "preflight" / "pgcrypto_replay_preflight.sql"
@@ -274,6 +275,17 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert "scheduler_run_lock_fixture" in source
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
+
+
+def test_populated_upgrade_fixture_models_and_revokes_trusted_owner_capability() -> None:
+    source = _regular_file(G1_G2_VERIFIER)
+
+    assert "create role supabase_admin nologin nosuperuser bypassrls;" in source
+    assert "create role migration_operator login nosuperuser inherit bypassrls;" in source
+    assert 'identity != "migration_operator|false|true"' in source
+    assert "alter role migration_operator nobypassrls;" in source
+    assert 'scheduler_owner_receipt != "25|1|supabase_admin|true|true"' in source
+    assert 'cleanup_receipt != "0|postgres|f|f|f|f|f|f"' in source
 
 
 def test_scheduler_verifier_is_triggered_for_pull_requests_and_pushes() -> None:
