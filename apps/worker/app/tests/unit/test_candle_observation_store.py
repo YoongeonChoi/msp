@@ -26,13 +26,13 @@ async def test_store_appends_first_observation_as_revision_one() -> None:
     receipt = await store.append_observation(candle)
 
     assert receipt.idempotency_key == candle.idempotency_key
-    assert receipt.canonical_observation_sha256 == (
-        candle.canonical_observation_sha256
-    )
+    assert receipt.canonical_observation_sha256 == (candle.canonical_observation_sha256)
     assert receipt.revision == 1
     assert receipt.inserted is True
     assert receipt.stored_observed_at == OBSERVED_AT
-    assert store.revisions_for(candle.idempotency_key)[0].candle is candle
+    stored = store.revisions_for(candle.idempotency_key)[0].candle
+    assert stored == candle
+    assert stored is not candle
 
 
 async def test_store_deduplicates_latest_exact_replay_and_keeps_first_time() -> None:
@@ -48,7 +48,8 @@ async def test_store_deduplicates_latest_exact_replay_and_keeps_first_time() -> 
     assert receipt.stored_observed_at == first.observed_at
     revisions = store.revisions_for(first.idempotency_key)
     assert revisions == (revisions[0],)
-    assert revisions[0].candle is first
+    assert revisions[0].candle == first
+    assert revisions[0].candle is not first
 
 
 async def test_store_rejects_exact_replay_with_regressed_observation_time() -> None:
@@ -59,17 +60,13 @@ async def test_store_rejects_exact_replay_with_regressed_observation_time() -> N
         CandleObservationStoreError,
         match="candle_observation_store_observation_time_regressed",
     ):
-        await store.append_observation(
-            _candle(observed_at=OBSERVED_AT - timedelta(seconds=1))
-        )
+        await store.append_observation(_candle(observed_at=OBSERVED_AT - timedelta(seconds=1)))
 
 
 async def test_store_rejects_stale_correction_after_later_exact_replay() -> None:
     store = InMemoryCandleObservationStore()
     original = _candle()
-    later_replay = _candle(
-        observed_at=OBSERVED_AT + timedelta(minutes=10)
-    )
+    later_replay = _candle(observed_at=OBSERVED_AT + timedelta(minutes=10))
     stale_correction = _candle(
         observed_at=OBSERVED_AT + timedelta(minutes=5),
         close_krw=72_100,
@@ -148,9 +145,7 @@ async def test_store_rejects_historical_hash_recurrence_as_ambiguous() -> None:
         CandleObservationStoreError,
         match="candle_observation_store_historical_hash_recurrence_ambiguous",
     ):
-        await store.append_observation(
-            _candle(observed_at=OBSERVED_AT + timedelta(minutes=10))
-        )
+        await store.append_observation(_candle(observed_at=OBSERVED_AT + timedelta(minutes=10)))
 
     assert len(store.revisions_for(original.idempotency_key)) == 2
 
@@ -180,9 +175,7 @@ async def test_store_rejects_changed_revision_without_increasing_time(
         CandleObservationStoreError,
         match=reason,
     ):
-        await store.append_observation(
-            _candle(observed_at=observed_at, close_krw=72_100)
-        )
+        await store.append_observation(_candle(observed_at=observed_at, close_krw=72_100))
 
     assert len(store.revisions_for(original.idempotency_key)) == 1
 

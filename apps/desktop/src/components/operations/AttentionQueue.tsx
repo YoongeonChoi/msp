@@ -108,11 +108,11 @@ export function buildAttentionItems({
       priority: 1,
       sortAt: 1,
       level: "critical",
-      severityLabel: access.signed_in ? "세션 만료" : "로그인 필요",
-      title: access.signed_in ? "세션이 만료되었습니다" : "운영 계정 로그인이 필요합니다",
+      severityLabel: access.signed_in ? "세션 만료" : "기기 연결 필요",
+      title: access.signed_in ? "운영 세션이 만료되었습니다" : "이 기기를 운영 계정에 연결해야 합니다",
       cause: "인증 상태와 휘발성 권한 정보를 다시 확인하기 전에는 변경 작업을 전송할 수 없습니다.",
       timing: "즉시 확인",
-      readOnlyReason: "다음 행동 · 계정·보안에서 다시 로그인하세요."
+      readOnlyReason: "다음 행동 · 계정·보안에서 이 기기를 다시 연결하세요."
     });
   } else if (access.assurance_level !== "aal2") {
     items.push({
@@ -764,10 +764,10 @@ function commonMutationBlockedReason(
     return "기기가 오프라인이라 권한 부여와 전송을 차단합니다.";
   }
   if (!snapshot.access.signed_in) {
-    return "로그인이 필요합니다.";
+    return "이 기기의 운영 계정 연결이 필요합니다.";
   }
   if (snapshot.access.session_state !== "active") {
-    return "세션이 만료되어 다시 로그인해야 합니다.";
+    return "운영 세션이 만료되어 이 기기를 다시 연결해야 합니다.";
   }
   if (snapshot.access.assurance_level !== "aal2") {
     return "2단계 인증이 필요합니다.";

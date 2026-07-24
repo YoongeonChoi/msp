@@ -6,9 +6,17 @@ Versioning:
 
 Branches:
 
-- `main`: production-ready baseline.
-- `develop`: optional integration branch.
-- Short-lived feature/fix/docs branches are preferred.
+- `main`: stable, production-ready integration baseline; no active development work is committed directly here.
+- `develop`: required development and integration branch and the source of completed `main` integrations.
+- Short-lived feature/fix/docs branches are optional and must branch from and merge back into `develop`.
+
+## Branch Integration
+
+1. Complete atomic commits and push them to `origin/develop`.
+2. Open a reviewed pull request from `develop` to `main`; run the push CI and migration gates against the exact `develop` head, then run the pre-release checklist plus all required security and PR gates against the corresponding merge candidate.
+3. Integrate with a fast-forward or merge commit so the long-lived branch ancestry is preserved; never squash or rebase `develop` into `main`.
+4. Verify that `origin/main` points to the approved integrated commit.
+5. Fast-forward `develop` to the integrated `main` commit, push the synchronized `origin/develop` without force, and remain on `develop` for subsequent work.
 
 ## Pre-Release Checklist
 
@@ -18,7 +26,21 @@ Branches:
 - Desktop lint/typecheck/build pass.
 - Desktop Playwright E2E and Tauri/Rust check, test, and build pass.
 - Migration check passes.
-- Fresh and retained-0015 migration application/invariant checks pass.
+- Every migration present in the PR base is byte/mode-identical in every
+  candidate commit and in the merge candidate; only a new migration may be
+  added. The canonical checksum inventory covers every migration.
+- Raw PG17, preinstalled-pgcrypto PG17, retained-0015 `public`, retained-0015
+  `extensions`, and retained-0023 migration application/invariant checks pass.
+- The approved pgcrypto preflight SHA-256 and final schema/owner/OID/ACL receipt
+  are bound to the exact release SHA. Hosted owner/ACL behavior has separate
+  staging evidence; local PostgreSQL owner behavior is not substituted for it.
+- One external single-deployment mutex covers the uninterrupted preflight,
+  replay, and postflight sequence. The preflight advisory lock alone is not a
+  replay lock.
+- Preflight and replay use the same approved role and immutable connection
+  profile with a persistent `public`-first default and no session override. The
+  actual replay connection records sanitized `current_user` and
+  `current_schemas(false)` values before SQL; absence or mismatch blocks release.
 - Repository safety check passes: no tracked non-example `.env`, no production secrets in workflows, Render auto deploy remains off.
 - Security workflow has no unresolved critical finding.
 - Secret scans have no unresolved finding.

@@ -20,4 +20,4 @@ CI and repository automation protect safety-critical trading paths.
 - `supabase/migrations/`
 - `render.yaml`
 - `.github/workflows/`
-
+- `.github/rulesets/`

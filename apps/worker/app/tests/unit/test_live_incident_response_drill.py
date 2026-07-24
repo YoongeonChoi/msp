@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import sys
 
@@ -17,7 +18,7 @@ async def test_live_incident_delivery_drill_uses_mock_webhook_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
+    _clear_alert_receiver_env(monkeypatch)
 
     exit_code = await main([])
 
@@ -33,7 +34,7 @@ async def test_live_incident_response_drill_refuses_mock_ack_transport(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
+    _clear_alert_receiver_env(monkeypatch)
 
     exit_code = await main(["--require-ack", "--drill-id", "incident-drill-mock"])
 
@@ -125,7 +126,7 @@ async def test_live_incident_response_drill_fails_without_operator_ack(
 async def test_live_incident_response_drill_rejects_unsafe_drill_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
+    _clear_alert_receiver_env(monkeypatch)
 
     async def ack_reader(drill_id: str, timeout_sec: float) -> bool:
         return False
@@ -142,7 +143,7 @@ async def test_live_incident_response_drill_rejects_unsafe_drill_id(
 async def test_run_incident_response_drill_refuses_ack_without_webhook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ALERT_WEBHOOK_URL", raising=False)
+    _clear_alert_receiver_env(monkeypatch)
 
     with pytest.raises(
         IncidentResponseDrillConfigurationError,
@@ -164,6 +165,16 @@ async def test_incident_drill_rejects_non_positive_or_non_finite_timeout(
 
 def _configure_fake_real_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALERT_WEBHOOK_URL", "https://alerts.example.test/incident")
+    monkeypatch.setenv(
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        "incident-drill-current",
+    )
+    monkeypatch.setenv(
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+        base64.b64encode(b"i" * 32).decode("ascii"),
+    )
+    monkeypatch.delenv("ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID", raising=False)
+    monkeypatch.delenv("ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64", raising=False)
 
     async def notify_engine_event(
         self: object,
@@ -185,3 +196,14 @@ def _configure_fake_real_transport(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.tools.run_live_incident_response_drill_once.WebhookAlertNotifier.aclose",
         aclose,
     )
+
+
+def _clear_alert_receiver_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "ALERT_WEBHOOK_URL",
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID",
+        "ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64",
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID",
+        "ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64",
+    ):
+        monkeypatch.delenv(name, raising=False)

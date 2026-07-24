@@ -50,17 +50,14 @@ class TossPointInTimeCandlePage:
 
 
 class TossMarketDataClient(Protocol):
-    async def get_prices(self, symbols: list[str]) -> list[TossPriceResponse]:
-        ...
+    async def get_prices(self, symbols: list[str]) -> list[TossPriceResponse]: ...
 
     async def get_kr_market_calendar(
         self,
         target_date: date | None = None,
-    ) -> TossKrMarketCalendarResponse:
-        ...
+    ) -> TossKrMarketCalendarResponse: ...
 
-    async def get_candles(self, query: TossCandleQuery) -> TossCandlePage:
-        ...
+    async def get_candles(self, query: TossCandleQuery) -> TossCandlePage: ...
 
 
 class TossMarketData:
@@ -115,6 +112,15 @@ class TossMarketData:
     ) -> TossPointInTimeCandlePage:
         _validate_daily_candle_query(query)
         raw_page = await self.toss.get_candles(query)
+        if type(raw_page) is not TossCandlePage:
+            raise ProviderSchemaError("toss", "toss_candle_page_invalid")
+        if type(raw_page.candles) is not list or any(
+            type(item) is not TossCandle for item in raw_page.candles
+        ):
+            raise ProviderSchemaError(
+                "toss",
+                "toss_candle_page_items_invalid",
+            )
         observed_at = _require_aware_timestamp(
             self.clock(),
             "toss_candle_observed_at_timezone_missing",
@@ -153,6 +159,26 @@ class TossMarketData:
         self,
         request: DailyCandleReadRequest,
     ) -> DailyCandleReadPage:
+        if type(request) is not DailyCandleReadRequest:
+            raise ProviderSchemaError(
+                "toss",
+                "toss_candle_read_request_invalid",
+            )
+        if (
+            type(request.symbol) is not str
+            or _KR_SYMBOL_RE.fullmatch(request.symbol) is None
+            or type(request.count) is not int
+            or not 1 <= request.count <= 200
+            or type(request.adjusted) is not bool
+        ):
+            raise ProviderSchemaError(
+                "toss",
+                "toss_candle_read_request_invalid",
+            )
+        _require_aware_timestamp(
+            request.before,
+            "toss_candle_before_timezone_missing",
+        )
         page = await self.get_daily_candles(
             TossCandleQuery(
                 symbol=request.symbol,
@@ -195,9 +221,7 @@ class TossMarketData:
             )
 
         today_regular = _regular_market_session(calendar.today.integrated)
-        next_regular = _regular_market_session(
-            calendar.next_business_day.integrated
-        )
+        next_regular = _regular_market_session(calendar.next_business_day.integrated)
         if next_regular is None:
             raise ProviderSchemaError(
                 "toss",
@@ -234,9 +258,7 @@ class TossMarketData:
                 next_regular_start_at=next_start,
                 next_regular_end_at=next_end,
                 observed_at=observed_at,
-                provider_contract_sha256=(
-                    TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256
-                ),
+                provider_contract_sha256=(TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256),
             )
         except PointInTimeCalendarError as exc:
             raise ProviderSchemaError("toss", f"toss_{exc.safe_message}") from exc
@@ -272,23 +294,21 @@ def _decimal_krw_to_int(value: Decimal) -> int:
     return int(value)
 
 
-def _validate_daily_candle_query(query: TossCandleQuery) -> None:
-    if not isinstance(query.symbol, str) or _KR_SYMBOL_RE.fullmatch(query.symbol) is None:
+def _validate_daily_candle_query(query: object) -> None:
+    if type(query) is not TossCandleQuery:
+        raise ProviderSchemaError("toss", "toss_candle_query_invalid")
+    if type(query.symbol) is not str or _KR_SYMBOL_RE.fullmatch(query.symbol) is None:
         raise ProviderSchemaError("toss", "toss_candle_symbol_invalid")
-    if query.interval != "1d":
+    if type(query.interval) is not str or query.interval != "1d":
         raise ProviderSchemaError("toss", "toss_candle_interval_must_be_1d")
-    if (
-        not isinstance(query.count, int)
-        or isinstance(query.count, bool)
-        or not 1 <= query.count <= 200
-    ):
+    if type(query.count) is not int or not 1 <= query.count <= 200:
         raise ProviderSchemaError("toss", "toss_candle_count_out_of_range")
     if query.before is not None:
         _require_aware_timestamp(
             query.before,
             "toss_candle_before_timezone_missing",
         )
-    if not isinstance(query.adjusted, bool):
+    if type(query.adjusted) is not bool:
         raise ProviderSchemaError("toss", "toss_candle_adjusted_must_be_boolean")
 
 
@@ -298,6 +318,18 @@ def _to_point_in_time_candle(
     query: TossCandleQuery,
     observed_at: datetime,
 ) -> PointInTimeCandleV1:
+    if type(candle) is not TossCandle or type(query) is not TossCandleQuery:
+        raise ProviderSchemaError("toss", "toss_candle_page_items_invalid")
+    if (
+        type(candle.timestamp) is not datetime
+        or type(candle.open_price) is not Decimal
+        or type(candle.high_price) is not Decimal
+        or type(candle.low_price) is not Decimal
+        or type(candle.close_price) is not Decimal
+        or type(candle.volume) is not Decimal
+        or type(candle.currency) is not str
+    ):
+        raise ProviderSchemaError("toss", "toss_candle_item_fields_invalid")
     return PointInTimeCandleV1.create(
         provider="toss",
         symbol=query.symbol,
@@ -342,6 +374,8 @@ def _validate_daily_candle_response(
     query: TossCandleQuery,
     next_before: datetime | None,
 ) -> None:
+    if type(candles) is not tuple or type(query) is not TossCandleQuery:
+        raise ProviderSchemaError("toss", "toss_candle_page_invalid")
     if len(candles) > query.count:
         raise ProviderSchemaError("toss", "toss_candle_page_exceeds_requested_count")
     if query.before is not None:
@@ -373,11 +407,7 @@ def _decimal_candle_value_to_int(
 
 
 def _require_aware_timestamp(value: object, reason: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise ProviderSchemaError("toss", reason)
     return value
 

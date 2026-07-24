@@ -28,6 +28,7 @@ maker/checker review.
 | RLS/GRANT misconfiguration | Elevation | dedicated schemas, explicit grants, negative role matrix, catalog assertions | policy bugs require independent review |
 | Audit alteration | Repudiation | append-only trigger, hash chain, external immutable receipt | privileged DB/platform compromise before archive |
 | Alert loss/duplication | Availability | transactional outbox, leases, retry/backoff, dead letter, receiver dedupe | third-party outage; dead-man escalation |
+| Forged or replayed receiver ACK | Spoofing/Tampering | HTTPS-only target, exact request/response identity HMAC, freshness, current/previous key rotation, fail-closed retry | shared-key receiver compromise; human ACK and immutable archive still require independent evidence |
 | Secret disclosure | Information disclosure | server-only secrets, redaction, no raw payloads, secret scanning | host/operator endpoint compromise |
 | Dependency/workflow compromise | Tampering | lockfiles, pinned Actions, audits, least permissions | upstream zero-day |
 | Prompt injection | Tampering | strict structured output and no execution authority | poor research recommendation only |

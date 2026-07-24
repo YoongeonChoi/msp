@@ -11,6 +11,8 @@ from app.application.ports.alert_outbox_port import (
 from app.domain.common.time import now_utc
 from app.domain.operations.models import OperationsInvariantError
 
+_SAFE_DESTINATION_ERROR_CODES = frozenset({"outbox_receiver_authentication_failed"})
+
 
 @dataclass(frozen=True, slots=True)
 class AlertOutboxDispatchResult:
@@ -115,4 +117,8 @@ class DispatchAlertOutbox:
 
 
 def _safe_delivery_error_code(exc: Exception) -> str:
+    if isinstance(exc, OperationsInvariantError) and len(exc.args) == 1:
+        code = exc.args[0]
+        if type(code) is str and code in _SAFE_DESTINATION_ERROR_CODES:
+            return f"destination_{code}"
     return f"destination_{type(exc).__name__.lower()}"[:120]

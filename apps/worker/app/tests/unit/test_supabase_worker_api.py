@@ -84,7 +84,7 @@ async def test_worker_api_claims_outbox_with_attempt_lease_token() -> None:
                     "aggregate_type": "incident",
                     "aggregate_id": aggregate_id,
                     "payload": {"summary_code": "paper_execution_failed"},
-                    "destination_type": "ops_webhook",
+                    "destination_type": "incident_alert",
                     "attempt_count": 1,
                     "lease_token": lease_token,
                     "lease_expires_at": (now + timedelta(seconds=30)).isoformat(),
@@ -833,9 +833,7 @@ async def test_worker_api_sends_accounting_with_fill_observation_atomically() ->
     ]
     assert payload["p_provider_order_id"] == observation.provider_order_id
     assert payload["p_provider_execution_id"] == observation.provider_execution_id
-    assert payload["p_provider_observation_sha256"] == (
-        observation.provider_observation_sha256
-    )
+    assert payload["p_provider_observation_sha256"] == (observation.provider_observation_sha256)
     assert observation.last_fill_settlement_date is not None
     assert payload["p_last_fill_settlement_date"] == (
         observation.last_fill_settlement_date.isoformat()
@@ -1417,14 +1415,16 @@ async def test_worker_api_acknowledges_exact_operation_claim_generation() -> Non
         seen_payloads.append(json.loads(request.content))
         return httpx.Response(
             200,
-            json=[{
-                "command_id": command_id,
-                "state": "applied",
-                "claimed_at": "2026-07-14T08:59:30+00:00",
-                "applied_at": now.isoformat(),
-                "post_control_epoch": 4,
-                "failure_code": None,
-            }],
+            json=[
+                {
+                    "command_id": command_id,
+                    "state": "applied",
+                    "claimed_at": "2026-07-14T08:59:30+00:00",
+                    "applied_at": now.isoformat(),
+                    "post_control_epoch": 4,
+                    "failure_code": None,
+                }
+            ],
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -1446,18 +1446,20 @@ async def test_worker_api_acknowledges_exact_operation_claim_generation() -> Non
         )
 
     assert receipt.state == "applied"
-    assert seen_payloads == [{
-        "p_command_id": command_id,
-        "p_phase": "applied",
-        "p_account_id": "paper-primary",
-        "p_holder_id": holder_id,
-        "p_release_sha": "a" * 40,
-        "p_fencing_token": 7,
-        "p_expected_revision": 4,
-        "p_now": now.isoformat(),
-        "p_result_summary": {"schema_version": 1, "claimed_revision": 4},
-        "p_failure_code": None,
-    }]
+    assert seen_payloads == [
+        {
+            "p_command_id": command_id,
+            "p_phase": "applied",
+            "p_account_id": "paper-primary",
+            "p_holder_id": holder_id,
+            "p_release_sha": "a" * 40,
+            "p_fencing_token": 7,
+            "p_expected_revision": 4,
+            "p_now": now.isoformat(),
+            "p_result_summary": {"schema_version": 1, "claimed_revision": 4},
+            "p_failure_code": None,
+        }
+    ]
 
 
 def _enabled_settings() -> Settings:

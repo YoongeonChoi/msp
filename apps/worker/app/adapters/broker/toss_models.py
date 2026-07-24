@@ -12,13 +12,13 @@ TossResult = TypeVar("TossResult")
 
 
 class TossApiResponse[TossResult](BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     result: TossResult
 
 
 class TossOAuthToken(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     access_token: str
     token_type: Literal["Bearer"]
@@ -26,7 +26,7 @@ class TossOAuthToken(BaseModel):
 
 
 class TossOAuthError(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     error: str
     error_description: str | None = None
@@ -34,7 +34,7 @@ class TossOAuthError(BaseModel):
 
 
 class TossApiErrorBody(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     request_id: str = Field(alias="requestId")
     code: str
@@ -42,7 +42,7 @@ class TossApiErrorBody(BaseModel):
 
 
 class TossApiErrorEnvelope(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     error: TossApiErrorBody
 
@@ -194,7 +194,7 @@ class TossKrMarketCalendarResponse(BaseModel):
 
 
 class TossCandle(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     timestamp: datetime
     open_price: Decimal = Field(alias="openPrice")
@@ -206,7 +206,7 @@ class TossCandle(BaseModel):
 
 
 class TossCandlePage(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     candles: list[TossCandle]
     next_before: datetime | None = Field(default=None, alias="nextBefore")

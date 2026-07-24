@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from app.application.ports.dead_man_monitor_port import (
@@ -22,6 +23,17 @@ class DeadManMonitorRunResult:
     source_available: bool
     evaluation: DeadManEvaluation
     alert_delivered: bool
+
+
+class DeadManAlertDeliveryError(RuntimeError):
+    """Retryable direct-channel failure with a fixed, non-sensitive message."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDeadManAlert:
+    event: Literal["unhealthy", "recovered"]
+    reason_codes: tuple[str, ...]
+    observed_at: datetime
 
 
 class RunDeadManMonitor:
@@ -50,6 +62,7 @@ class RunDeadManMonitor:
         # preserves it across monitor restarts and failover.
         self._active_episode_id: str | None = None
         self._last_unhealthy_reasons: tuple[str, ...] | None = None
+        self._pending_alert: _PendingDeadManAlert | None = None
 
     async def run_once(self) -> DeadManMonitorRunResult:
         requested_at = self._now()
@@ -69,32 +82,29 @@ class RunDeadManMonitor:
             source_available = False
 
         delivered = False
+        if self._pending_alert is not None:
+            await self._deliver_pending_alert()
+            delivered = True
         if not evaluation.healthy:
             if self._active_episode_id is None:
-                self._active_episode_id = _validated_episode_id(
-                    self.episode_id_factory()
+                self._active_episode_id = _validated_episode_id(self.episode_id_factory())
+            if evaluation.reason_codes != self._last_unhealthy_reasons:
+                self._pending_alert = _PendingDeadManAlert(
+                    event="unhealthy",
+                    reason_codes=evaluation.reason_codes,
+                    observed_at=evaluation.evaluated_at,
                 )
-            self._last_unhealthy_reasons = evaluation.reason_codes
-            await self.destination.deliver_dead_man_alert(
-                account_id=self.account_id,
-                episode_id=self._active_episode_id,
-                event="unhealthy",
-                reason_codes=evaluation.reason_codes,
-                observed_at=evaluation.evaluated_at,
-            )
-            delivered = True
+                await self._deliver_pending_alert()
+                delivered = True
         elif self._last_unhealthy_reasons is not None:
             if self._active_episode_id is None:
                 raise OperationsInvariantError("dead_man_episode_state_is_invalid")
-            await self.destination.deliver_dead_man_alert(
-                account_id=self.account_id,
-                episode_id=self._active_episode_id,
+            self._pending_alert = _PendingDeadManAlert(
                 event="recovered",
                 reason_codes=self._last_unhealthy_reasons,
                 observed_at=evaluation.evaluated_at,
             )
-            self._active_episode_id = None
-            self._last_unhealthy_reasons = None
+            await self._deliver_pending_alert()
             delivered = True
 
         return DeadManMonitorRunResult(
@@ -102,6 +112,28 @@ class RunDeadManMonitor:
             evaluation=evaluation,
             alert_delivered=delivered,
         )
+
+    async def _deliver_pending_alert(self) -> None:
+        pending = self._pending_alert
+        episode_id = self._active_episode_id
+        if pending is None or episode_id is None:
+            raise OperationsInvariantError("dead_man_episode_state_is_invalid")
+        try:
+            await self.destination.deliver_dead_man_alert(
+                account_id=self.account_id,
+                episode_id=episode_id,
+                event=pending.event,
+                reason_codes=pending.reason_codes,
+                observed_at=pending.observed_at,
+            )
+        except Exception:
+            raise DeadManAlertDeliveryError("dead_man_alert_delivery_failed") from None
+        if pending.event == "unhealthy":
+            self._last_unhealthy_reasons = pending.reason_codes
+        else:
+            self._active_episode_id = None
+            self._last_unhealthy_reasons = None
+        self._pending_alert = None
 
     def _now(self) -> datetime:
         value = self.clock()

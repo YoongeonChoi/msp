@@ -10,6 +10,7 @@ from app.domain.common.time import KST
 from app.domain.market_data.point_in_time_calendar import (
     PointInTimeCalendarError,
     PointInTimeKrDailySessionV1,
+    kr_daily_session_idempotency_key,
 )
 
 CONTRACT_SHA = "a" * 64
@@ -45,6 +46,16 @@ def test_session_contract_uses_stable_golden_digests() -> None:
 
     assert evidence.idempotency_key == (
         "dcc571036310de8eedf71c3ca96c93796ad503ae9899c0e8ff7c253ee69fd619"
+    )
+    assert evidence.idempotency_key == kr_daily_session_idempotency_key(
+        provider="toss",
+        market="KR",
+        session_date=SESSION_DATE,
+    )
+    assert evidence.idempotency_key != kr_daily_session_idempotency_key(
+        provider="toss",
+        market="KR",
+        session_date=NEXT_DATE,
     )
     assert evidence.canonical_evidence_sha256 == (
         "094ea1fd69c9aafb5d469c666de147ac6a378683751b4cb389d84e7cfb948d3f"

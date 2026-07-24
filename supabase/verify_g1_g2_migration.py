@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Disposable PostgreSQL/PostgREST verifier for the complete local migration set.
+"""Disposable PostgreSQL/PostgREST verifier for migration replay and upgrades.
 
 The verifier never connects to a hosted project. It creates isolated Docker
 containers, applies every migration and the non-secret development seed, runs
-catalog and behavioral assertions, then destroys its containers/network.
-"""
+catalog and behavioral assertions, then destroys its containers/network. It
+verifies raw and controlled non-superuser PG17 fresh installs plus populated
+public- and extensions-based 0015 cutoffs and a populated 0023 cutoff."""
 
 from __future__ import annotations
 
@@ -16,9 +17,11 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
+import tomllib
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -27,7 +30,11 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parent
 MIGRATIONS = ROOT / "migrations"
 SEED = ROOT / "seed.sql"
-POSTGRES_IMAGE = "postgres:16-alpine"
+CONFIG = ROOT / "config.toml"
+PGCRYPTO_PREFLIGHT = ROOT / "preflight" / "pgcrypto_replay_preflight.sql"
+PGCRYPTO_CONVERGENCE = "20260718165749_pgcrypto_schema_convergence.sql"
+REPOSITORY_SAFETY = ROOT.parent / ".github" / "scripts" / "repository_safety.py"
+POSTGRES_IMAGE = "postgres:17-alpine"
 POSTGREST_IMAGE = "postgrest/postgrest:v12.2.8"
 DB_PASSWORD = "g1-g2-disposable-only"
 JWT_SECRET = "g1-g2-disposable-jwt-secret-32-bytes-minimum"
@@ -41,6 +48,16 @@ VIEWER = "66666666-6666-4666-8666-666666666666"
 STRATEGY = "67676767-6767-4767-8767-676767676767"
 AUDITOR = "68686868-6868-4868-8868-686868686868"
 RELEASE_MANAGER = "69696969-6969-4969-8969-696969696969"
+NON_AUDITOR_HUMAN_ROLES = (
+    ("platform_admin", ADMIN_1),
+    ("operator", OPERATOR),
+    ("risk_approver", RISK),
+    ("strategy_reviewer", STRATEGY),
+    ("release_manager", RELEASE_MANAGER),
+    ("viewer", VIEWER),
+)
+SNAPSHOT_EVIDENCE_INTENT_ID = "87878787-8787-4787-8787-878787878787"
+SNAPSHOT_AUDIT_RESOURCE_ID = "94949494-9494-4949-8949-949494949494"
 LEGACY_USER = "77777777-7777-4777-8777-777777777778"
 EVIDENCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 CONTRACT_EVIDENCE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -74,11 +91,17 @@ def run(args: list[str], *, input_text: str | None = None, check: bool = True) -
     return result
 
 
-def psql(container: str, sql: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def psql(
+    container: str,
+    sql: str,
+    *,
+    check: bool = True,
+    user: str = "postgres",
+) -> subprocess.CompletedProcess[str]:
     return run(
         [
             "docker", "exec", "-i", container, "psql", "-X", "-q",
-            "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
+            "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1",
             "-At",
         ],
         input_text=sql,
@@ -103,8 +126,47 @@ def wait_for_postgres(container: str) -> None:
     raise VerificationError(f"PostgreSQL did not become ready: {container}")
 
 
-def expect_failure(container: str, sql: str, *fragments: str) -> None:
-    result = psql(container, sql, check=False)
+def verify_repository_inputs() -> None:
+    safety = run(
+        [
+            sys.executable,
+            str(REPOSITORY_SAFETY),
+            "migrations",
+            "--repo-root",
+            str(ROOT.parent),
+        ]
+    )
+    if safety.stdout.strip():
+        print(safety.stdout.strip())
+
+    try:
+        with CONFIG.open("rb") as config_file:
+            config = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise VerificationError(f"cannot read Supabase config: {error}") from error
+    db_config = config.get("db")
+    if not isinstance(db_config, dict):
+        raise VerificationError("Supabase config is missing the [db] table")
+    configured_major = db_config.get("major_version")
+    image_match = re.fullmatch(r"postgres:([0-9]+)(?:[-:].*)?", POSTGRES_IMAGE)
+    if image_match is None:
+        raise VerificationError(f"cannot determine PostgreSQL major from {POSTGRES_IMAGE}")
+    image_major = int(image_match.group(1))
+    if configured_major != image_major:
+        raise VerificationError(
+            "Supabase config and verifier PostgreSQL majors differ: "
+            f"config={configured_major!r}, image={image_major}"
+        )
+    print(f"PASS repository migration safety and PostgreSQL {image_major} contract")
+
+
+def expect_failure(
+    container: str,
+    sql: str,
+    *fragments: str,
+    user: str = "postgres",
+) -> None:
+    result = psql(container, sql, check=False, user=user)
     if result.returncode == 0:
         raise VerificationError("negative assertion unexpectedly succeeded")
     output = (result.stdout + "\n" + result.stderr).lower()
@@ -123,6 +185,12 @@ create role service_role nologin bypassrls;
 create role authenticator noinherit login password 'g1-g2-disposable-only';
 grant anon, authenticated, service_role to authenticator;
 create publication supabase_realtime;
+create schema supabase_migrations;
+create table supabase_migrations.schema_migrations (
+  version text not null primary key,
+  statements text[],
+  name text
+);
 create function auth.uid() returns uuid language sql stable as $$
   select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), '')::uuid,
@@ -145,28 +213,1383 @@ $$;
 """
 
 
-def apply_repository(container: str) -> None:
+def migration_files() -> list[Path]:
+    migrations = sorted(MIGRATIONS.glob("*.sql"))
+    if not migrations:
+        raise VerificationError("no repository migrations found")
+    return migrations
+
+
+def migration_position(migrations: list[Path], name: str) -> int:
+    positions = [index for index, migration in enumerate(migrations) if migration.name == name]
+    if len(positions) != 1:
+        raise VerificationError(f"migration boundary is not unique: {name}")
+    return positions[0]
+
+
+def migration_identity(migration: Path) -> tuple[str, str]:
+    match = re.fullmatch(r"([0-9]+)_([a-z0-9_]+)\.sql", migration.name)
+    if match is None:
+        raise VerificationError(f"invalid migration filename: {migration.name}")
+    return match.group(1), match.group(2)
+
+
+def migration_runner_guard_sql(user: str) -> str:
+    expected_user = user.replace("'", "''")
+    return f"""
+do $migration_runner_contract$
+begin
+  if current_user <> '{expected_user}' then
+    raise exception 'migration runner identity mismatch';
+  end if;
+  if (current_schemas(false))[1] is distinct from 'public' then
+    raise exception 'migration runner search_path must begin with public';
+  end if;
+end;
+$migration_runner_contract$;
+"""
+
+
+def apply_migration(
+    container: str,
+    migration: Path,
+    *,
+    user: str = "postgres",
+) -> None:
+    version, name = migration_identity(migration)
+    migration_sql = migration.read_text(encoding="utf-8")
+    psql(container, migration_runner_guard_sql(user) + migration_sql, user=user)
+    statement_base64 = base64.b64encode(migration_sql.encode("utf-8")).decode("ascii")
+    psql(
+        container,
+        migration_runner_guard_sql(user)
+        + "insert into supabase_migrations.schema_migrations(version,statements,name) "
+        f"values ('{version}',array[convert_from(decode('{statement_base64}',"
+        f"'base64'),'UTF8')]::text[],'{name}');",
+        user=user,
+    )
+    print(f"PASS migration {migration.name}")
+
+
+def apply_migration_range(
+    container: str,
+    migrations: list[Path],
+    *,
+    start: int = 0,
+    stop: int | None = None,
+    user: str = "postgres",
+) -> None:
+    for migration in migrations[start:stop]:
+        apply_migration(container, migration, user=user)
+
+
+def verify_migration_ledger_fixture(
+    container: str,
+    migrations: list[Path],
+) -> None:
+    actual = json.loads(psql(container, """
+select coalesce(jsonb_agg(
+  jsonb_build_object(
+    'version', version,
+    'name', name,
+    'statement_count', cardinality(statements),
+    'statement_sha256', encode(
+      extensions.digest(convert_to(statements[1], 'UTF8'), 'sha256'),
+      'hex'
+    )
+  ) order by version
+), '[]'::jsonb)
+from supabase_migrations.schema_migrations;
+""").stdout.strip())
+    expected = []
+    for migration in migrations:
+        version, name = migration_identity(migration)
+        expected.append({
+            "version": version,
+            "name": name,
+            "statement_count": 1,
+            "statement_sha256": hashlib.sha256(
+                migration.read_text(encoding="utf-8").encode("utf-8")
+            ).hexdigest(),
+        })
+    if actual != expected:
+        if len(actual) != len(expected):
+            detail = f"row_count expected={len(expected)}, actual={len(actual)}"
+        else:
+            mismatch = next(
+                (
+                    (expected_row, actual_row)
+                    for expected_row, actual_row in zip(expected, actual, strict=True)
+                    if expected_row != actual_row
+                ),
+                None,
+            )
+            detail = f"first_mismatch={mismatch}"
+        raise VerificationError(
+            "Supabase migration ledger fixture does not preserve repository inputs: "
+            + detail
+        )
+    print("PASS Supabase CLI-shaped migration ledger preserves repository inputs")
+
+
+def run_pgcrypto_preflight(container: str, *, user: str = "postgres") -> None:
+    psql(
+        container,
+        PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+        user=user,
+    )
+    print("PASS PG17 pgcrypto replay preflight")
+
+
+def pgcrypto_preflight_sql() -> str:
+    return PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8")
+
+
+def pgcrypto_post_relocation_failure_sql() -> str:
+    preflight = pgcrypto_preflight_sql()
+    marker = "  alter extension pgcrypto set schema public;\n"
+    if preflight.count(marker) != 1:
+        raise VerificationError(
+            "pgcrypto preflight relocation marker is missing or ambiguous"
+        )
+    return preflight.replace(
+        marker,
+        marker
+        + "  raise exception "
+        + "'verifier-injected failure after pgcrypto relocation';\n",
+    )
+
+
+def migration_ledger_snapshot(container: str) -> str:
+    return psql(container, r'''
+select coalesce(
+  jsonb_agg(to_jsonb(migration) order by migration.version),
+  '[]'::jsonb
+)::text
+from supabase_migrations.schema_migrations as migration;
+''').stdout.strip()
+
+
+def expect_pgcrypto_preflight_failure_unchanged(
+    container: str,
+    fixture_sql: str,
+    *fragments: str,
+    connection_user: str = "postgres",
+    preflight_sql: str | None = None,
+) -> None:
+    before = pgcrypto_convergence_snapshot(container)
+    ledger_before = migration_ledger_snapshot(container)
+    expect_failure(
+        container,
+        "begin;\n" + fixture_sql.rstrip() + "\n"
+        + (preflight_sql or pgcrypto_preflight_sql()),
+        *fragments,
+        user=connection_user,
+    )
+    after = pgcrypto_convergence_snapshot(container)
+    ledger_after = migration_ledger_snapshot(container)
+    if after != before or ledger_after != ledger_before:
+        raise VerificationError(
+            "rejected pgcrypto preflight did not preserve the exact pgcrypto "
+            "and migration-ledger state: "
+            f"before={before}, after={after}, "
+            f"ledger_before={ledger_before}, ledger_after={ledger_after}"
+        )
+
+
+def extension_schema(container: str) -> str:
+    return psql(container, """
+select coalesce((
+  select namespace.nspname
+  from pg_extension as extension
+  join pg_namespace as namespace on namespace.oid=extension.extnamespace
+  where extension.extname='pgcrypto'
+), '<absent>');
+""").stdout.strip()
+
+
+def verify_empty_pgcrypto_acl_guards(container: str) -> None:
+    cases = (
+        (
+            "direct public CREATE",
+            "grant create on schema public to authenticated;",
+        ),
+        (
+            "inherited public CREATE",
+            """
+create role supabase_admin nologin;
+create role preflight_inherited_create login inherit;
+grant create on schema public to supabase_admin;
+grant supabase_admin to preflight_inherited_create
+  with inherit true, set false;
+""",
+        ),
+        (
+            "NOINHERIT SET-role public CREATE",
+            """
+create role supabase_admin nologin;
+create role preflight_set_create login noinherit;
+grant create on schema public to supabase_admin;
+grant supabase_admin to preflight_set_create
+  with inherit false, set true;
+""",
+        ),
+    )
+    for label, fixture in cases:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture,
+            "untrusted role can create in schema public",
+        )
+        print(f"PASS empty PG17 preflight rejects {label}")
+
+
+def verify_empty_pgcrypto_runner_prerequisites(container: str) -> None:
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        r'''
+create role raw_operator login nosuperuser noinherit;
+grant usage on schema supabase_migrations to raw_operator;
+grant select on supabase_migrations.schema_migrations to raw_operator;
+set role raw_operator;
+''',
+        "preflight role cannot create required replay objects",
+    )
+    print(
+        "PASS empty PG17 preflight rejects ledger-only raw runner before mutation"
+    )
+
+    before = pgcrypto_convergence_snapshot(container)
+    ledger_before = migration_ledger_snapshot(container)
+    psql(container, r'''
+create role supabase_admin login nosuperuser noinherit;
+grant create on database postgres to supabase_admin;
+grant usage, create on schema public to supabase_admin;
+grant usage on schema supabase_migrations to supabase_admin;
+grant select on supabase_migrations.schema_migrations to supabase_admin;
+''')
+    benign_fixture_installed = False
+    try:
+        install_pgcrypto_benign_unicode_callers(container)
+        benign_fixture_installed = True
+        run_pgcrypto_preflight(container, user="supabase_admin")
+    finally:
+        if benign_fixture_installed:
+            remove_pgcrypto_benign_unicode_callers(container)
+        psql(container, r'''
+revoke select on supabase_migrations.schema_migrations
+  from supabase_admin;
+revoke usage on schema supabase_migrations from supabase_admin;
+revoke usage, create on schema public from supabase_admin;
+revoke create on database postgres from supabase_admin;
+drop role supabase_admin;
+''')
+    after = pgcrypto_convergence_snapshot(container)
+    ledger_after = migration_ledger_snapshot(container)
+    if after != before or ledger_after != ledger_before:
+        raise VerificationError(
+            "approved empty runner preflight changed extension or ledger state: "
+            f"before={before}, after={after}, "
+            f"ledger_before={ledger_before}, ledger_after={ledger_after}"
+        )
+    print(
+        "PASS empty PG17 preflight accepts approved supabase_admin runner and "
+        "inert U&/comment/dollar-quoted caller text"
+    )
+
+
+def verify_empty_pgcrypto_future_caller_guard(container: str) -> None:
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        r'''
+create schema preflight_empty_future_caller_probe;
+create function preflight_empty_future_caller_probe.public_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return pg_catalog.encode(
+    public.digest('empty-future-caller-probe','sha256'), 'hex'
+  );
+end;
+$function$;
+''',
+        "unsafe pgcrypto caller",
+        "preflight_empty_future_caller_probe.public_digest_caller()",
+    )
+    print(
+        "PASS empty PG17 preflight rejects future public.digest static caller"
+    )
+
+
+def pgcrypto_same_name_nonmember_fixture(
+    schema: str,
+    shape: str,
+    *,
+    member_name: str = "digest",
+    create_schema: bool,
+) -> str:
+    if schema not in ("public", "extensions"):
+        raise VerificationError(f"invalid pgcrypto collision schema: {schema}")
+    schema_sql = f"create schema {schema};\n" if create_schema else ""
+    member_shapes = {
+        "digest": {
+            "exact": (
+                "input text, algorithm text",
+                "bytea",
+                "pg_catalog.convert_to(input || algorithm, 'UTF8')",
+            ),
+            "default": (
+                "input text, algorithm text, compatibility text default ''",
+                "bytea",
+                "pg_catalog.convert_to("
+                "input || algorithm || compatibility, 'UTF8')",
+            ),
+            "variadic": (
+                "input text, variadic algorithms text[]",
+                "bytea",
+                "pg_catalog.convert_to("
+                "input || pg_catalog.array_to_string(algorithms, ','), 'UTF8')",
+            ),
+        },
+        "crypt": {
+            "exact": (
+                "input text, salt text",
+                "text",
+                "input || salt",
+            ),
+            "default": (
+                "input text, salt text, compatibility text default ''",
+                "text",
+                "input || salt || compatibility",
+            ),
+            "variadic": (
+                "input text, variadic salts text[]",
+                "text",
+                "input || pg_catalog.array_to_string(salts, ',')",
+            ),
+        },
+    }
+    if member_name not in member_shapes:
+        raise VerificationError(
+            f"invalid pgcrypto collision member name: {member_name}"
+        )
+    if shape not in member_shapes[member_name]:
+        raise VerificationError(f"invalid pgcrypto collision shape: {shape}")
+    signature, return_type, expression = member_shapes[member_name][shape]
+    return schema_sql + f"""
+create function {schema}.{member_name}({signature})
+returns {return_type}
+language sql
+immutable
+as $function$
+  select {expression};
+$function$;
+"""
+
+
+def verify_empty_pgcrypto_future_target_collisions(container: str) -> None:
+    cases = (
+        ("public", "exact", False),
+        ("public", "default", False),
+        ("public", "variadic", False),
+        ("extensions", "exact", True),
+        ("extensions", "default", True),
+        ("extensions", "variadic", True),
+    )
+    for schema, shape, create_schema in cases:
+        fixture = pgcrypto_same_name_nonmember_fixture(
+            schema,
+            shape,
+            create_schema=create_schema,
+        )
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture,
+            "pgcrypto target member name conflicts with",
+            f"{schema}.digest",
+        )
+        print(
+            f"PASS empty PG17 preflight rejects {schema} {shape} "
+            "digest nonmember"
+        )
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        r'''
+create function public.crypt(input text, salt text)
+returns text
+language sql
+immutable
+as $function$
+  select input || salt;
+$function$;
+''',
+        "pgcrypto target member name conflicts with",
+        "public.crypt",
+    )
+    print("PASS empty PG17 preflight rejects public crypt nonmember")
+
+
+def verify_pgcrypto_member_contract_guards(container: str) -> None:
+    cases = (
+        (
+            "untrusted pgcrypto member owner",
+            """
+create role preflight_untrusted_member_owner nologin;
+alter function extensions.digest(text,text)
+  owner to preflight_untrusted_member_owner;
+set role migration_operator;
+""",
+            "pgcrypto member has an untrusted owner",
+        ),
+        (
+            "added pgcrypto member",
+            """
+set role supabase_admin;
+create function extensions.pgcrypto_preflight_added_member()
+returns integer language sql immutable as 'select 1';
+alter extension pgcrypto add function
+  extensions.pgcrypto_preflight_added_member();
+reset role;
+set role migration_operator;
+""",
+            "pgcrypto 1.3 member catalog does not match the postgresql 17 contract",
+        ),
+        (
+            "missing pgcrypto member",
+            """
+set role supabase_admin;
+alter extension pgcrypto drop function extensions.hmac(text,text,text);
+reset role;
+set role migration_operator;
+""",
+            "pgcrypto target member name conflicts with",
+        ),
+        (
+            "altered pgcrypto member metadata",
+            """
+set role supabase_admin;
+alter function extensions.digest(text,text) cost 997;
+reset role;
+set role migration_operator;
+""",
+            "pgcrypto 1.3 member catalog does not match the postgresql 17 contract",
+        ),
+    )
+    for label, fixture, fragment in cases:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture,
+            fragment,
+        )
+        print(f"PASS preflight rejects {label}")
+
+
+def verify_pgcrypto_comment_caller_guards(container: str) -> None:
+    cases = (
+        (
+            "schema-qualified comment-separated caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.qualified_comment_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return encode(extensions./* verifier split */digest(
+    'qualified-comment-probe','sha256'
+  ),'hex');
+end;
+$function$;
+set role migration_operator;
+""",
+        ),
+        (
+            "quoted schema-qualified caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.quoted_static_caller()
+returns text
+language sql
+as $function$
+  select encode(
+    "extensions"."digest"('quoted-caller-probe','sha256'),
+    'hex'
+  );
+$function$;
+set role migration_operator;
+""",
+        ),
+        (
+            "nested-comment-separated caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.nested_comment_caller()
+returns text
+language sql
+as $function$
+  select encode(
+    extensions./* outer /* nested */ tail */digest(
+      'nested-comment-probe','sha256'
+    ),
+    'hex'
+  );
+$function$;
+set role migration_operator;
+""",
+        ),
+        (
+            "search-path comment-separated caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.search_path_comment_caller()
+returns text
+language plpgsql
+set search_path = extensions, pg_temp
+as $function$
+begin
+  return encode(digest/* verifier split */(
+    'search-path-comment-probe','sha256'
+  ),'hex');
+end;
+$function$;
+set role migration_operator;
+""",
+        ),
+        (
+            "string-literal line-comment marker before static caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.string_marker_static_caller()
+returns table(marker text, digest_value bytea)
+language sql
+as $function$
+  select '--'::text, extensions.digest('string-marker-probe','sha256');
+$function$;
+set role migration_operator;
+""",
+        ),
+        (
+            "standard-strings-off escaped quote before static caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.escaped_quote_static_caller()
+returns text
+language plpgsql
+set standard_conforming_strings = off
+set search_path = extensions, pg_temp
+as $function$
+begin
+  perform 'x\\'--still string';
+  return encode(digest('escaped-quote-probe','sha256'),'hex');
+end;
+$function$;
+select preflight_comment_probe.escaped_quote_static_caller();
+set role migration_operator;
+""",
+        ),
+        (
+            "standard-strings-on trailing backslash before static caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.trailing_backslash_static_caller()
+returns text
+language plpgsql
+set standard_conforming_strings = on
+set search_path = extensions, pg_temp
+as $function$
+begin
+  perform 'ends-with-backslash\\';
+  return encode(digest('trailing-backslash-probe','sha256'),'hex');
+end;
+$function$;
+select preflight_comment_probe.trailing_backslash_static_caller();
+set role migration_operator;
+""",
+        ),
+        (
+            "Unicode-escaped schema-qualified caller",
+            """
+create schema preflight_comment_probe;
+create function preflight_comment_probe.unicode_schema_static_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return encode(
+    U&"extens\\0069ons".digest('unicode-schema-probe','sha256'),
+    'hex'
+  );
+end;
+$function$;
+select preflight_comment_probe.unicode_schema_static_caller();
+set role migration_operator;
+""",
+        ),
+    )
+    for label, fixture in cases:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture,
+            "unsafe pgcrypto caller",
+        )
+        print(f"PASS preflight rejects {label}")
+
+
+def install_pgcrypto_benign_unicode_callers(container: str) -> None:
+    psql(container, r'''
+create schema preflight_unicode_benign_probe;
+create function preflight_unicode_benign_probe.string_literal_only()
+returns text
+language sql
+as $function$
+  select 'U&"extensions".digest is data, not executable SQL'::text;
+$function$;
+create function preflight_unicode_benign_probe.comment_only()
+returns integer
+language sql
+as $function$
+  -- U&"extensions".digest('comment-only','sha256')
+  select 1;
+$function$;
+create function preflight_unicode_benign_probe.nested_comment_only()
+returns integer
+language sql
+as $function$
+  /* outer extensions.digest( /* public.crypt( */ 'fake', 'bf') */
+  select 2;
+$function$;
+create function preflight_unicode_benign_probe.dollar_quoted_literal_only()
+returns text
+language plpgsql
+as $function$
+begin
+  return $payload$U&"extensions".digest is dollar-quoted data$payload$;
+end;
+$function$;
+select preflight_unicode_benign_probe.string_literal_only();
+select preflight_unicode_benign_probe.comment_only();
+select preflight_unicode_benign_probe.nested_comment_only();
+select preflight_unicode_benign_probe.dollar_quoted_literal_only();
+''')
+
+
+def remove_pgcrypto_benign_unicode_callers(container: str) -> None:
+    psql(container, "drop schema preflight_unicode_benign_probe cascade;")
+
+
+def verify_pgcrypto_catalog_search_path_guards(container: str) -> None:
+    function_fixture = """
+create schema preflight_catalog_probe;
+create function preflight_catalog_probe.unqualified_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return encode(digest('catalog-default-probe','sha256'),'hex');
+end;
+$function$;
+create role preflight_catalog_runtime login;
+grant usage on schema preflight_catalog_probe to preflight_catalog_runtime;
+"""
+    cases = (
+        (
+            "ALTER DATABASE setrole=0 default",
+            "alter database postgres set search_path = extensions, pg_temp;",
+        ),
+        (
+            "global ALTER ROLE default",
+            "alter role preflight_catalog_runtime "
+            "set search_path = extensions, pg_temp;",
+        ),
+        (
+            "quoted multi-entry role/database default",
+            "alter role preflight_catalog_runtime in database postgres "
+            "set search_path = \"$user\", public, \"extensions\", pg_temp;",
+        ),
+    )
+    for label, setting in cases:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            function_fixture + setting + "\nset role migration_operator;",
+            "unsafe pgcrypto caller",
+            "catalog_default",
+        )
+        print(f"PASS preflight rejects {label}")
+
+
+def require_public_first_search_path(
+    container: str,
+    *,
+    user: str,
+    label: str,
+) -> None:
+    receipt = json.loads(psql(
+        container,
+        "select jsonb_build_object("
+        "'current_user',current_user,"
+        "'schemas',current_schemas(false)"
+        ");",
+        user=user,
+    ).stdout.strip())
+    schemas = receipt.get("schemas")
+    if not isinstance(schemas, list) or not schemas or schemas[0] != "public":
+        raise VerificationError(
+            f"{label} is not public-first: receipt={receipt}"
+        )
+    print(
+        f"PASS {label} uses public-first default search_path as "
+        f"{receipt.get('current_user')}"
+    )
+
+
+def verify_migration_runner_override_guard(
+    container: str,
+    *,
+    user: str,
+) -> None:
+    before = pgcrypto_convergence_snapshot(container)
+    ledger_before = migration_ledger_snapshot(container)
+    expect_failure(
+        container,
+        "set search_path = extensions, pg_temp;\n"
+        + migration_runner_guard_sql(user),
+        "migration runner search_path must begin with public",
+        user=user,
+    )
+    expect_failure(
+        container,
+        migration_runner_guard_sql("unexpected_migration_runner"),
+        "migration runner identity mismatch",
+        user=user,
+    )
+    after = pgcrypto_convergence_snapshot(container)
+    ledger_after = migration_ledger_snapshot(container)
+    if after != before or ledger_after != ledger_before:
+        raise VerificationError(
+            "migration runner override rejection changed extension or ledger "
+            f"state: before={before}, after={after}, "
+            f"ledger_before={ledger_before}, ledger_after={ledger_after}"
+        )
+    print(
+        "PASS migration runner rejects identity mismatch and a public-free "
+        "per-session search_path before applying SQL"
+    )
+
+
+def verify_preconvergence_extensions_guards(container: str) -> None:
+    for schema in ("extensions", "public"):
+        shapes = (
+            ("default", "variadic")
+            if schema == "extensions"
+            else ("exact", "default", "variadic")
+        )
+        for shape in shapes:
+            fixture = pgcrypto_same_name_nonmember_fixture(
+                schema,
+                shape,
+                create_schema=False,
+            ) + "\nset role migration_operator;"
+            expect_pgcrypto_preflight_failure_unchanged(
+                container,
+                fixture,
+                "pgcrypto target member name conflicts with",
+                f"{schema}.digest",
+            )
+            print(
+                "PASS retained extensions preflight rejects "
+                f"{schema} {shape} digest nonmember"
+            )
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        r'''
+create role preflight_evil_extensions login;
+grant create on schema extensions to preflight_evil_extensions;
+set role migration_operator;
+''',
+        "untrusted role can CREATE in schema extensions",
+    )
+    print(
+        "PASS retained extensions preflight rejects future-target CREATE access"
+    )
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        "set role migration_operator;\n"
+        "set search_path = extensions, pg_temp;",
+        "preflight search_path must begin with public before pgcrypto relocation",
+    )
+    print(
+        "PASS retained extensions preflight rejects public-free runner search_path"
+    )
+    require_public_first_search_path(
+        container,
+        user="migration_operator",
+        label="retained extensions preflight connection",
+    )
+
+
+def verify_converged_pgcrypto_acl_guards(
+    container: str,
+    *,
+    preflight_user: str,
+) -> None:
+    trusted_creator_setup = """
+do $create_supabase_admin_if_missing$
+begin
+  if not exists (
+    select 1 from pg_roles where rolname='supabase_admin'
+  ) then
+    execute 'create role supabase_admin nologin';
+  end if;
+end;
+$create_supabase_admin_if_missing$;
+revoke create on schema public from supabase_admin;
+grant create on schema extensions to supabase_admin;
+"""
+    cases = (
+        (
+            "direct extensions CREATE",
+            "grant create on schema extensions to anon;",
+        ),
+        (
+            "inherited extensions CREATE",
+            trusted_creator_setup + """
+create role preflight_extensions_inherited login inherit;
+grant supabase_admin to preflight_extensions_inherited
+  with inherit true, set false;
+""",
+        ),
+        (
+            "NOINHERIT SET-role extensions CREATE",
+            trusted_creator_setup + """
+create role preflight_extensions_set login noinherit;
+grant supabase_admin to preflight_extensions_set
+  with inherit false, set true;
+""",
+        ),
+    )
+    assume_role = (
+        "\nset role migration_operator;"
+        if preflight_user == "migration_operator"
+        else ""
+    )
+    for label, fixture in cases:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture + assume_role,
+            "untrusted role can create in schema extensions",
+        )
+        print(f"PASS converged preflight rejects {label}")
+
+
+def verify_converged_pgcrypto_caller_guards(
+    container: str,
+    *,
+    preflight_user: str,
+) -> None:
+    assume_role = (
+        "\nset role migration_operator;"
+        if preflight_user == "migration_operator"
+        else ""
+    )
+    for member_name in ("digest", "crypt"):
+        for schema in ("extensions", "public"):
+            shapes = (
+                ("default", "variadic")
+                if schema == "extensions"
+                else ("exact", "default", "variadic")
+            )
+            for shape in shapes:
+                fixture = pgcrypto_same_name_nonmember_fixture(
+                    schema,
+                    shape,
+                    member_name=member_name,
+                    create_schema=False,
+                )
+                expect_pgcrypto_preflight_failure_unchanged(
+                    container,
+                    fixture + assume_role,
+                    "pgcrypto target member name conflicts with",
+                    f"{schema}.{member_name}",
+                )
+                print(
+                    "PASS converged preflight rejects "
+                    f"{schema} {shape} {member_name} nonmember"
+                )
+    expect_pgcrypto_preflight_failure_unchanged(
+        container,
+        r'''
+create schema preflight_final_caller_probe;
+create function preflight_final_caller_probe.public_qualified_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return pg_catalog.encode(
+    public.digest('final-public-qualified-probe','sha256'), 'hex'
+  );
+end;
+$function$;
+''' + assume_role,
+        "final application pgcrypto boundary is inconsistent",
+        "preflight_final_caller_probe.public_qualified_digest_caller()",
+    )
+    print(
+        "PASS converged preflight rejects custom-schema public.digest caller"
+    )
+    before = pgcrypto_convergence_snapshot(container)
+    ledger_before = migration_ledger_snapshot(container)
+    psql(container, r'''
+create schema preflight_final_benign_probe;
+create function preflight_final_benign_probe.digest(input text, algorithm text)
+returns text
+language sql
+immutable
+as $function$
+  select input || ':' || algorithm;
+$function$;
+create function preflight_final_benign_probe.explicit_custom_digest_caller()
+returns text
+language sql
+as $function$
+  select preflight_final_benign_probe.digest(
+    'explicit-custom-probe', 'not-pgcrypto'
+  );
+$function$;
+select preflight_final_benign_probe.explicit_custom_digest_caller();
+''')
+    try:
+        run_pgcrypto_preflight(container, user=preflight_user)
+    finally:
+        psql(container, "drop schema preflight_final_benign_probe cascade;")
+    after = pgcrypto_convergence_snapshot(container)
+    ledger_after = migration_ledger_snapshot(container)
+    if after != before or ledger_after != ledger_before:
+        raise VerificationError(
+            "benign custom digest caller preflight changed pgcrypto or ledger "
+            f"state: before={before}, after={after}, "
+            f"ledger_before={ledger_before}, ledger_after={ledger_after}"
+        )
+    print(
+        "PASS converged preflight accepts explicit non-pgcrypto custom digest caller"
+    )
+    before = pgcrypto_convergence_snapshot(container)
+    ledger_before = migration_ledger_snapshot(container)
+    install_pgcrypto_benign_unicode_callers(container)
+    try:
+        run_pgcrypto_preflight(container, user=preflight_user)
+    finally:
+        remove_pgcrypto_benign_unicode_callers(container)
+    after = pgcrypto_convergence_snapshot(container)
+    ledger_after = migration_ledger_snapshot(container)
+    if after != before or ledger_after != ledger_before:
+        raise VerificationError(
+            "final benign lexer fixture changed pgcrypto or migration-ledger "
+            f"state: before={before}, after={after}, "
+            f"ledger_before={ledger_before}, ledger_after={ledger_after}"
+        )
+    print(
+        "PASS converged preflight accepts inert literal, flat/nested comment, "
+        "dollar-quoted U&, digest, and crypt text"
+    )
+
+
+def verify_pgcrypto_preflight_guards(
+    container: str,
+    *,
+    preinstalled: bool,
+    user: str = "postgres",
+) -> None:
+    if preinstalled:
+        psql(container, """
+insert into supabase_migrations.schema_migrations(version,name)
+values
+  ('0001','schema'),
+  ('0015','paper_order_execution_details');
+""")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "migration history is not an exact repository prefix",
+            user=user,
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError("history-gap rejection changed pgcrypto schema")
+        psql(
+            container,
+            "delete from supabase_migrations.schema_migrations;",
+        )
+        public_acl_before = psql(
+            container,
+            "select coalesce(nspacl::text,'<default>') "
+            "from pg_namespace where nspname='public';",
+        ).stdout.strip()
+        psql(container, "grant create on schema public to authenticated;")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "untrusted role can create in schema public",
+            user=user,
+        )
+        psql(container, "revoke create on schema public from authenticated;")
+        public_acl_after = psql(
+            container,
+            "select coalesce(nspacl::text,'<default>') "
+            "from pg_namespace where nspname='public';",
+        ).stdout.strip()
+        if public_acl_after != public_acl_before:
+            raise VerificationError("public ACL probe did not restore its fixture")
+        if extension_schema(container) != "extensions":
+            raise VerificationError("public-ACL rejection changed pgcrypto schema")
+        psql(container, """
+create schema preflight_probe;
+create function preflight_probe.unsafe_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return encode(extensions.digest('unsafe-probe','sha256'),'hex');
+end;
+$function$;
+""")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "unsafe pgcrypto caller",
+            user=user,
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError("unsafe-caller rejection changed pgcrypto schema")
+        psql(container, "drop function preflight_probe.unsafe_digest_caller();")
+        psql(container, """
+create function preflight_probe.unsafe_search_path_digest_caller()
+returns text
+language plpgsql
+set search_path = extensions, pg_temp
+as $function$
+begin
+  return encode(digest('unsafe-search-path-probe','sha256'),'hex');
+end;
+$function$;
+""")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "unsafe pgcrypto caller",
+            user=user,
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError("search-path rejection changed pgcrypto schema")
+        psql(container, """
+create role preflight_runtime login;
+grant usage on schema preflight_probe to preflight_runtime;
+create function preflight_probe.unsafe_role_default_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return encode(digest('unsafe-role-default-probe','sha256'),'hex');
+end;
+$function$;
+alter role preflight_runtime in database postgres
+  set search_path = extensions, pg_temp;
+""")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "unsafe pgcrypto caller",
+            "catalog_default",
+            user=user,
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError("role-default rejection changed pgcrypto schema")
+        psql(container, """
+alter role preflight_runtime in database postgres reset search_path;
+revoke usage on schema preflight_probe from preflight_runtime;
+drop role preflight_runtime;
+""")
+        psql(container, "drop schema preflight_probe cascade;")
+        print(
+            "PASS pgcrypto preflight rejects ledger gaps, unsafe ACLs, qualified "
+            "callers, and function/role search-path callers"
+        )
+    else:
+        verify_empty_pgcrypto_acl_guards(container)
+        verify_empty_pgcrypto_future_caller_guard(container)
+        verify_empty_pgcrypto_future_target_collisions(container)
+        verify_empty_pgcrypto_runner_prerequisites(container)
+        psql(container, """
+insert into supabase_migrations.schema_migrations(version,name)
+values ('0001','schema');
+""")
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "pgcrypto is missing from a retained repository database",
+        )
+        psql(
+            container,
+            "delete from supabase_migrations.schema_migrations where version='0001';",
+        )
+        print("PASS pgcrypto preflight rejects a missing retained extension")
+
+
+def apply_repository(container: str, *, preinstall_pgcrypto: bool = False) -> None:
     psql(container, bootstrap_sql())
+    preflight_user = "postgres"
+    migration_user = "postgres"
+    if preinstall_pgcrypto:
+        psql(container, """
+create role supabase_admin nologin nosuperuser;
+create role migration_operator login nosuperuser inherit;
+grant supabase_admin to migration_operator;
+grant create on database postgres to supabase_admin;
+grant create on schema public to supabase_admin;
+grant usage on schema auth, supabase_migrations to migration_operator;
+grant select, references on auth.users to migration_operator;
+grant select on auth.users to supabase_admin;
+grant select, insert on supabase_migrations.schema_migrations
+  to migration_operator;
+alter publication supabase_realtime owner to migration_operator;
+create schema extensions authorization supabase_admin;
+set role supabase_admin;
+create extension pgcrypto with schema extensions;
+reset role;
+""")
+        preflight_user = "migration_operator"
+        migration_user = preflight_user
+        identity = psql(
+            container,
+            "select current_user || ':' || rolsuper::text "
+            "from pg_roles where rolname=current_user;",
+            user=preflight_user,
+        ).stdout.strip()
+        if identity != "migration_operator:false":
+            raise VerificationError(
+                f"preflight role is not the expected non-superuser: {identity}"
+            )
+        expect_failure(
+            container,
+            PGCRYPTO_PREFLIGHT.read_text(encoding="utf-8"),
+            "cannot act as every pgcrypto member owner",
+            user=preflight_user,
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError("member-owner rejection changed pgcrypto schema")
+        psql(container, """
+do $align_pgcrypto_member_owners$
+declare
+  member record;
+begin
+  for member in
+    select procedure.oid::regprocedure::text as identity
+    from pg_depend as dependency
+    join pg_proc as procedure
+      on dependency.classid='pg_proc'::regclass
+     and dependency.objid=procedure.oid
+    join pg_extension as extension
+      on dependency.refclassid='pg_extension'::regclass
+     and dependency.refobjid=extension.oid
+    where extension.extname='pgcrypto'
+      and dependency.deptype='e'
+    order by procedure.oid
+  loop
+    execute format(
+      'alter function %s owner to supabase_admin',
+      member.identity
+    );
+  end loop;
+end;
+$align_pgcrypto_member_owners$;
+""")
+        require_controlled_preinstalled_pgcrypto_fixture(
+            pgcrypto_convergence_snapshot(container)
+        )
+        print("PASS pgcrypto preflight rejects split extension/member ownership")
+        verify_pgcrypto_member_contract_guards(container)
+        verify_pgcrypto_comment_caller_guards(container)
+        verify_pgcrypto_catalog_search_path_guards(container)
+        verify_preconvergence_extensions_guards(container)
+    verify_pgcrypto_preflight_guards(
+        container,
+        preinstalled=preinstall_pgcrypto,
+        user=preflight_user,
+    )
+    before_preflight = (
+        pgcrypto_convergence_snapshot(container) if preinstall_pgcrypto else None
+    )
+    if preinstall_pgcrypto:
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            "set role migration_operator;",
+            "verifier-injected failure after pgcrypto relocation",
+            preflight_sql=pgcrypto_post_relocation_failure_sql(),
+        )
+        if extension_schema(container) != "extensions":
+            raise VerificationError(
+                "post-relocation failure did not restore pgcrypto to extensions"
+        )
+        print(
+            "PASS post-relocation failure preserves the tracked pgcrypto and "
+            "migration-ledger state"
+        )
+        install_pgcrypto_benign_unicode_callers(container)
+        require_public_first_search_path(
+            container,
+            user=migration_user,
+            label="retained extensions non-superuser replay preflight connection",
+        )
+
+    run_pgcrypto_preflight(container, user=migration_user)
+    if preinstall_pgcrypto:
+        remove_pgcrypto_benign_unicode_callers(container)
+        print(
+            "PASS preflight accepts inert caller text in literals, flat/nested "
+            "comments, and dollar-quoted data"
+        )
+        after_preflight = pgcrypto_convergence_snapshot(container)
+        if before_preflight is None or before_preflight.get("extension_schema") != "extensions":
+            raise VerificationError(f"invalid preinstalled pgcrypto state: {before_preflight}")
+        if after_preflight.get("extension_schema") != "public":
+            raise VerificationError(f"pgcrypto was not staged in public: {after_preflight}")
+        changed = changed_pgcrypto_stable_keys(before_preflight, after_preflight)
+        if changed:
+            raise VerificationError(
+                f"pgcrypto replay preflight changed stable catalog fields {changed}: "
+                f"before={before_preflight}, after={after_preflight}"
+            )
+        print(
+            "PASS non-superuser replay preflight uses the migration runner "
+            "identity and preserves OIDs/routine metadata"
+        )
+    elif extension_schema(container) != "<absent>":
+        raise VerificationError("empty-database preflight unexpectedly installed pgcrypto")
+
+    require_public_first_search_path(
+        container,
+        user=migration_user,
+        label=(
+            "retained extensions migration connection"
+            if preinstall_pgcrypto
+            else "empty PG17 migration connection"
+        ),
+    )
+    verify_migration_runner_override_guard(
+        container,
+        user=migration_user,
+    )
     convergence_before: dict[str, object] | None = None
-    for migration in sorted(MIGRATIONS.glob("*.sql")):
-        if migration.name == "20260718165749_pgcrypto_schema_convergence.sql":
+    migrations = migration_files()
+    for migration in migrations:
+        if migration.name == PGCRYPTO_CONVERGENCE:
             convergence_before = pgcrypto_convergence_snapshot(container)
-        psql(container, migration.read_text(encoding="utf-8"))
-        print(f"PASS migration {migration.name}")
-        if migration.name == "20260718165749_pgcrypto_schema_convergence.sql":
+        apply_migration(container, migration, user=migration_user)
+        if migration.name == PGCRYPTO_CONVERGENCE:
             verify_pgcrypto_transition(container, convergence_before)
     if convergence_before is None:
         raise VerificationError("pgcrypto convergence migration was not applied")
-    psql(container, SEED.read_text(encoding="utf-8"))
+    verify_migration_ledger_fixture(container, migrations)
+    psql(
+        container,
+        migration_runner_guard_sql(migration_user)
+        + SEED.read_text(encoding="utf-8"),
+        user=migration_user,
+    )
     print("PASS seed non-live defaults")
+    verify_converged_pgcrypto_acl_guards(
+        container,
+        preflight_user=migration_user,
+    )
+    verify_converged_pgcrypto_caller_guards(
+        container,
+        preflight_user=migration_user,
+    )
+    before_final_preflight = pgcrypto_convergence_snapshot(container)
+    run_pgcrypto_preflight(container, user=migration_user)
+    after_final_preflight = pgcrypto_convergence_snapshot(container)
+    if after_final_preflight != before_final_preflight:
+        raise VerificationError(
+            "final-state preflight was not idempotent: "
+            f"before={before_final_preflight}, after={after_final_preflight}"
+        )
+    print("PASS pgcrypto preflight is idempotent after convergence")
+    if preinstall_pgcrypto:
+        cleanup_before = pgcrypto_convergence_snapshot(container)
+        cleanup_ledger_before = migration_ledger_snapshot(container)
+        psql(container, r'''
+alter publication supabase_realtime owner to postgres;
+reassign owned by migration_operator to supabase_admin;
+revoke select, references on auth.users from migration_operator;
+revoke select, insert on supabase_migrations.schema_migrations
+  from migration_operator;
+revoke usage on schema auth, supabase_migrations from migration_operator;
+revoke supabase_admin from migration_operator;
+''')
+        cleanup_after = pgcrypto_convergence_snapshot(container)
+        cleanup_ledger_after = migration_ledger_snapshot(container)
+        cleanup_pgcrypto_keys = tuple(
+            key for key in PGCRYPTO_RELOCATION_STABLE_KEYS
+            if key not in ("routine_count", "routine_metadata_md5")
+        )
+        cleanup_changed = [
+            key for key in cleanup_pgcrypto_keys
+            if cleanup_before.get(key) != cleanup_after.get(key)
+        ]
+        if cleanup_changed or cleanup_ledger_after != cleanup_ledger_before:
+            raise VerificationError(
+                "non-superuser replay capability cleanup changed pgcrypto or "
+                "migration-ledger state: "
+                f"changed_pgcrypto_keys={cleanup_changed}, "
+                f"ledger_before={cleanup_ledger_before}, "
+                f"ledger_after={cleanup_ledger_after}"
+            )
+        cleanup_receipt = psql(container, r'''
+select concat_ws('|',
+  (
+    select count(*)
+    from (
+      select oid from pg_class where relowner='migration_operator'::regrole
+      union all
+      select oid from pg_proc where proowner='migration_operator'::regrole
+      union all
+      select oid from pg_namespace where nspowner='migration_operator'::regrole
+      union all
+      select oid from pg_type where typowner='migration_operator'::regrole
+    ) as owned_object
+  ),
+  (select pg_get_userbyid(pubowner) from pg_publication
+    where pubname='supabase_realtime'),
+  pg_has_role('migration_operator','supabase_admin','MEMBER'),
+  has_table_privilege(
+    'migration_operator',
+    'supabase_migrations.schema_migrations',
+    'INSERT'
+  ),
+  has_table_privilege('migration_operator','auth.users','SELECT'),
+  has_table_privilege('migration_operator','auth.users','REFERENCES'),
+  has_schema_privilege('migration_operator','public','CREATE')
+);
+''').stdout.strip()
+        if cleanup_receipt != "0|postgres|f|f|f|f|f":
+            raise VerificationError(
+                "non-superuser replay capability cleanup receipt mismatch: "
+                f"{cleanup_receipt}"
+            )
+        print(
+            "PASS non-superuser replay reassigns created objects and revokes "
+            "temporary owner, auth, ledger, and publication capabilities"
+        )
 
 
 def pgcrypto_convergence_snapshot(container: str) -> dict[str, object]:
     result = psql(container, r"""
 with extension_state as (
   select
+    e.oid as extension_oid,
     n.nspname as schema_name,
     pg_get_userbyid(e.extowner) as extension_owner,
+    e.extversion as extension_version,
+    e.extrelocatable as extension_relocatable,
     to_regprocedure(format('%I.digest(bytea,text)', n.nspname))::oid
       as digest_bytea_oid,
     to_regprocedure(format('%I.digest(text,text)', n.nspname))::oid
@@ -174,6 +1597,29 @@ with extension_state as (
   from pg_extension e
   join pg_namespace n on n.oid=e.extnamespace
   where e.extname='pgcrypto'
+), extension_member_dependencies as (
+  select
+    d.classid::regclass::text as class_name,
+    d.objid,
+    d.objsubid
+  from pg_depend d
+  join extension_state e on e.extension_oid=d.refobjid
+  where d.refclassid='pg_extension'::regclass
+    and d.deptype='e'
+), extension_member_routines as (
+  select
+    d.class_name,
+    d.objid,
+    d.objsubid,
+    p.proname,
+    pg_get_function_identity_arguments(p.oid) as identity_arguments,
+    pg_get_function_result(p.oid) as result_type,
+    l.lanname as language_name,
+    pg_get_userbyid(p.proowner) as owner_name,
+    to_jsonb(p) - 'pronamespace' as metadata
+  from extension_member_dependencies d
+  join pg_proc p on d.class_name='pg_proc' and p.oid=d.objid
+  join pg_language l on l.oid=p.prolang
 ), application_routines as (
   select
     p.oid,
@@ -186,10 +1632,56 @@ with extension_state as (
     and p.prokind in ('f','p')
 )
 select jsonb_build_object(
+  'extension_oid', (select extension_oid from extension_state),
   'extension_schema', (select schema_name from extension_state),
   'extension_owner', (select extension_owner from extension_state),
+  'extension_version', (select extension_version from extension_state),
+  'extension_relocatable', (select extension_relocatable from extension_state),
   'extensions_schema_owner', (
     select pg_get_userbyid(nspowner) from pg_namespace where nspname='extensions'
+  ),
+  'public_schema_owner', (
+    select pg_get_userbyid(nspowner) from pg_namespace where nspname='public'
+  ),
+  'public_schema_acl', (
+    select coalesce(nspacl::text,'<default>')
+    from pg_namespace where nspname='public'
+  ),
+  'extensions_schema_acl', (
+    select coalesce(nspacl::text,'<default>')
+    from pg_namespace where nspname='extensions'
+  ),
+  'member_dependency_count', (
+    select count(*) from extension_member_dependencies
+  ),
+  'member_dependency_state', (
+    select coalesce(jsonb_agg(
+      jsonb_build_object(
+        'class_name', class_name,
+        'objid', objid,
+        'objsubid', objsubid
+      ) order by class_name, objid, objsubid
+    ), '[]'::jsonb)
+    from extension_member_dependencies
+  ),
+  'member_routine_count', (
+    select count(*) from extension_member_routines
+  ),
+  'member_routine_state', (
+    select coalesce(jsonb_agg(
+      jsonb_build_object(
+        'class_name', class_name,
+        'objid', objid,
+        'objsubid', objsubid,
+        'name', proname,
+        'identity_arguments', identity_arguments,
+        'result', result_type,
+        'language', language_name,
+        'owner', owner_name,
+        'metadata', metadata
+      ) order by objid, objsubid
+    ), '[]'::jsonb)
+    from extension_member_routines
   ),
   'digest_bytea_oid', (select digest_bytea_oid from extension_state),
   'digest_text_oid', (select digest_text_oid from extension_state),
@@ -263,11 +1755,111 @@ select jsonb_build_object(
     return json.loads(result)
 
 
+PGCRYPTO17_MEMBER_CONTRACT_SHA256 = (
+    "1aee894d806ae9e1f5b2cf17533521fd9b0a851bea3dd1a8413c3ee71c9fce29"
+)
+
+
+def pgcrypto17_member_contract(snapshot: dict[str, object]) -> list[dict[str, object]]:
+    members = snapshot.get("member_routine_state")
+    if not isinstance(members, list):
+        raise VerificationError("pgcrypto member routine oracle is not a list")
+    contract: list[dict[str, object]] = []
+    metadata_keys = (
+        "prokind",
+        "provolatile",
+        "proparallel",
+        "prosecdef",
+        "proleakproof",
+        "proisstrict",
+        "proretset",
+        "pronargs",
+        "pronargdefaults",
+        "proargmodes",
+        "proargnames",
+        "proconfig",
+        "probin",
+        "prosrc",
+        "procost",
+        "prorows",
+        "prosupport",
+        "provariadic",
+        "prosqlbody",
+        "proargdefaults",
+        "protrftypes",
+    )
+    for member in members:
+        if not isinstance(member, dict):
+            raise VerificationError("pgcrypto member routine oracle has a non-object entry")
+        metadata = member.get("metadata")
+        if not isinstance(metadata, dict):
+            raise VerificationError("pgcrypto member routine metadata is not an object")
+        contract.append({
+            "name": member.get("name"),
+            "identity_arguments": member.get("identity_arguments"),
+            "result": member.get("result"),
+            "language": member.get("language"),
+            **{key: metadata.get(key) for key in metadata_keys},
+        })
+    return sorted(
+        contract,
+        key=lambda member: (
+            str(member.get("name")),
+            str(member.get("identity_arguments")),
+            str(member.get("result")),
+        ),
+    )
+
+
+def pgcrypto17_member_contract_sha256(snapshot: dict[str, object]) -> str:
+    canonical = json.dumps(
+        pgcrypto17_member_contract(snapshot),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def require_pgcrypto17_member_contract(snapshot: dict[str, object]) -> None:
+    actual = pgcrypto17_member_contract_sha256(snapshot)
+    if actual != PGCRYPTO17_MEMBER_CONTRACT_SHA256:
+        raise VerificationError(
+            "pgcrypto PostgreSQL 17 independent member oracle mismatch: "
+            f"expected={PGCRYPTO17_MEMBER_CONTRACT_SHA256}, actual={actual}"
+        )
+
+
 def require_pgcrypto_converged(snapshot: dict[str, object]) -> None:
+    member_dependencies = snapshot.get("member_dependency_state")
+    member_routines = snapshot.get("member_routine_state")
+    member_inventory_invalid = (
+        not isinstance(member_dependencies, list)
+        or not isinstance(member_routines, list)
+        or len(member_dependencies) != 36
+        or len(member_routines) != 36
+        or any(
+            not isinstance(member, dict)
+            or member.get("class_name") != "pg_proc"
+            for member in member_dependencies
+        )
+        or any(
+            not isinstance(member, dict)
+            or member.get("class_name") != "pg_proc"
+            or member.get("owner") not in ("postgres", "supabase_admin")
+            or not isinstance(member.get("metadata"), dict)
+            for member in member_routines
+        )
+    )
     if (
         snapshot.get("extension_schema") != "extensions"
         or snapshot.get("extension_owner") not in ("postgres", "supabase_admin")
+        or snapshot.get("extension_version") != "1.3"
+        or snapshot.get("extension_relocatable") is not True
         or snapshot.get("extensions_schema_owner") not in ("postgres", "supabase_admin")
+        or snapshot.get("member_dependency_count") != 36
+        or snapshot.get("member_routine_count") != 36
+        or member_inventory_invalid
         or snapshot.get("digest_bytea_oid") is None
         or snapshot.get("digest_text_oid") is None
         or snapshot.get("public_bytea_absent") is not True
@@ -278,30 +1870,106 @@ def require_pgcrypto_converged(snapshot: dict[str, object]) -> None:
         or snapshot.get("unsafe_digest_caller_count") != 0
     ):
         raise VerificationError(f"pgcrypto convergence mismatch: {snapshot}")
+    require_pgcrypto17_member_contract(snapshot)
+
+
+def require_controlled_preinstalled_pgcrypto_fixture(
+    snapshot: dict[str, object],
+) -> None:
+    members = snapshot.get("member_routine_state")
+    if (
+        snapshot.get("extension_schema") != "extensions"
+        or snapshot.get("extension_owner") != "supabase_admin"
+        or snapshot.get("extension_version") != "1.3"
+        or snapshot.get("extension_relocatable") is not True
+        or snapshot.get("extensions_schema_owner") != "supabase_admin"
+        or snapshot.get("member_dependency_count") != 36
+        or snapshot.get("member_routine_count") != 36
+        or not isinstance(members, list)
+        or len(members) != 36
+        or any(
+            not isinstance(member, dict)
+            or member.get("owner") != "supabase_admin"
+            or not isinstance(member.get("metadata"), dict)
+            for member in members
+        )
+    ):
+        raise VerificationError(
+            f"controlled preinstalled pgcrypto fixture mismatch: {snapshot}"
+        )
+    require_pgcrypto17_member_contract(snapshot)
+
+
+PGCRYPTO_RELOCATION_STABLE_KEYS = (
+    "extension_oid",
+    "extension_owner",
+    "extension_version",
+    "extension_relocatable",
+    "public_schema_owner",
+    "extensions_schema_owner",
+    "public_schema_acl",
+    "extensions_schema_acl",
+    "member_dependency_count",
+    "member_dependency_state",
+    "member_routine_count",
+    "member_routine_state",
+    "digest_bytea_oid",
+    "digest_text_oid",
+    "digest_metadata_md5",
+    "routine_count",
+    "routine_metadata_md5",
+)
+
+
+def changed_pgcrypto_stable_keys(
+    before: dict[str, object],
+    after: dict[str, object],
+    *,
+    include_schema_state: bool = True,
+) -> list[str]:
+    keys = PGCRYPTO_RELOCATION_STABLE_KEYS
+    if not include_schema_state:
+        keys = tuple(
+            key for key in keys
+            if key not in (
+                "public_schema_owner",
+                "extensions_schema_owner",
+                "public_schema_acl",
+                "extensions_schema_acl",
+            )
+        )
+    return [
+        key for key in keys
+        if before.get(key) != after.get(key)
+    ]
 
 
 def verify_pgcrypto_transition(
     container: str,
     before: dict[str, object] | None,
 ) -> None:
-    if before is None or before.get("extension_schema") not in ("public", "extensions"):
+    if before is None or before.get("extension_schema") != "public":
         raise VerificationError(f"invalid pre-convergence pgcrypto state: {before}")
+    require_pgcrypto17_member_contract(before)
     after = pgcrypto_convergence_snapshot(container)
     require_pgcrypto_converged(after)
-    stable_keys = (
-        "digest_bytea_oid",
-        "digest_text_oid",
-        "digest_metadata_md5",
-        "routine_count",
-        "routine_metadata_md5",
+    changed = changed_pgcrypto_stable_keys(
+        before,
+        after,
+        include_schema_state=False,
     )
-    changed = [key for key in stable_keys if before.get(key) != after.get(key)]
     if changed:
         raise VerificationError(
             f"pgcrypto transition changed stable catalog fields {changed}: "
             f"before={before}, after={after}"
         )
     print("PASS pgcrypto forward convergence preserves OIDs and routine metadata")
+
+
+def verify_controlled_non_superuser_preinstalled_replay(container: str) -> None:
+    apply_repository(container, preinstall_pgcrypto=True)
+    require_pgcrypto_converged(pgcrypto_convergence_snapshot(container))
+    print("PASS controlled non-superuser preinstalled pgcrypto replay")
 
 
 def verify_pgcrypto_convergence_idempotency(container: str) -> None:
@@ -323,13 +1991,158 @@ select encode(extensions.digest('pgcrypto-convergence-verifier','sha256'),'hex')
     print("PASS pgcrypto convergence is idempotent and digest output is stable")
 
 
-def verify_populated_0015_upgrade(container: str) -> None:
+def verify_retained_public_future_target_collision(container: str) -> None:
+    cases = (
+        ("public", "default", False),
+        ("public", "variadic", False),
+        ("extensions", "exact", True),
+        ("extensions", "default", True),
+        ("extensions", "variadic", True),
+    )
+    for schema, shape, create_schema in cases:
+        fixture = pgcrypto_same_name_nonmember_fixture(
+            schema,
+            shape,
+            create_schema=create_schema,
+        )
+        expect_pgcrypto_preflight_failure_unchanged(
+            container,
+            fixture,
+            "pgcrypto target member name conflicts with",
+            f"{schema}.digest",
+        )
+        print(
+            "PASS retained public preflight rejects "
+            f"{schema} {shape} digest nonmember"
+        )
+
+
+def verify_retained_pgcrypto_preflight(
+    container: str,
+    *,
+    expected_before: str,
+) -> None:
+    before = pgcrypto_convergence_snapshot(container)
+    if before.get("extension_schema") != expected_before:
+        raise VerificationError(
+            f"retained pgcrypto schema mismatch: expected={expected_before}, before={before}"
+        )
+    if expected_before == "public":
+        verify_retained_public_future_target_collision(container)
+        caller_cases = (
+            (
+                "already-broken extensions search-path caller",
+                """
+create schema preflight_public_probe;
+create function preflight_public_probe.broken_search_path_digest_caller()
+returns text
+language plpgsql
+set search_path = extensions, pg_temp
+as $function$
+begin
+  return encode(digest('public-state-probe','sha256'),'hex');
+end;
+$function$;
+""",
+            ),
+            (
+                "working public-qualified caller outside patched schemas",
+                """
+create schema preflight_public_probe;
+create function preflight_public_probe.public_qualified_digest_caller()
+returns text
+language sql
+as $function$
+  select pg_catalog.encode(
+    public.digest('retained-public-qualified','sha256'),
+    'hex'
+  );
+$function$;
+select preflight_public_probe.public_qualified_digest_caller();
+""",
+            ),
+            (
+                "working default-public unqualified caller outside patched schemas",
+                """
+create schema preflight_public_probe;
+create function preflight_public_probe.default_public_digest_caller()
+returns text
+language plpgsql
+as $function$
+begin
+  return pg_catalog.encode(
+    digest('retained-default-public','sha256'),
+    'hex'
+  );
+end;
+$function$;
+select preflight_public_probe.default_public_digest_caller();
+""",
+            ),
+        )
+        for label, fixture in caller_cases:
+            expect_pgcrypto_preflight_failure_unchanged(
+                container,
+                fixture,
+                "unsafe pgcrypto caller",
+            )
+            print(f"PASS retained public pgcrypto rejects {label}")
+    else:
+        for schema in ("extensions", "public"):
+            shapes = (
+                ("default", "variadic")
+                if schema == "extensions"
+                else ("exact", "default", "variadic")
+            )
+            for shape in shapes:
+                fixture = pgcrypto_same_name_nonmember_fixture(
+                    schema,
+                    shape,
+                    create_schema=False,
+                )
+                expect_pgcrypto_preflight_failure_unchanged(
+                    container,
+                    fixture,
+                    "pgcrypto target member name conflicts with",
+                    f"{schema}.digest",
+                )
+                print(
+                    "PASS retained extensions upgrade rejects "
+                    f"{schema} {shape} digest nonmember"
+                )
+    run_pgcrypto_preflight(container)
+    after = pgcrypto_convergence_snapshot(container)
+    if after.get("extension_schema") != "public":
+        raise VerificationError(f"retained pgcrypto was not staged in public: {after}")
+    changed = changed_pgcrypto_stable_keys(before, after)
+    if changed:
+        raise VerificationError(
+            f"retained pgcrypto preflight changed stable catalog fields {changed}: "
+            f"before={before}, after={after}"
+        )
+    print(
+        f"PASS retained {expected_before} pgcrypto state stages safely in public"
+    )
+
+
+def verify_populated_0015_upgrade(
+    container: str,
+    *,
+    legacy_pgcrypto_schema: str,
+) -> None:
+    if legacy_pgcrypto_schema not in ("public", "extensions"):
+        raise VerificationError(
+            f"unsupported retained pgcrypto schema: {legacy_pgcrypto_schema}"
+        )
     psql(container, bootstrap_sql())
-    migrations = sorted(MIGRATIONS.glob("*.sql"))
-    for migration in migrations:
-        if migration.name > "0015_paper_order_execution_details.sql":
-            break
-        psql(container, migration.read_text(encoding="utf-8"))
+    if legacy_pgcrypto_schema == "extensions":
+        psql(container, """
+create schema extensions;
+create extension pgcrypto with schema extensions;
+""")
+    migrations = migration_files()
+    cutoff = migration_position(migrations, "0015_paper_order_execution_details.sql")
+    apply_migration_range(container, migrations, stop=cutoff + 1)
     psql(container, SEED.read_text(encoding="utf-8"))
     psql(container, f"""
 insert into auth.users (id,email) values ('{LEGACY_USER}','legacy@example.invalid');
@@ -350,10 +2163,11 @@ insert into public.orders (
 ) select id,'005930','buy','paper','paper',100000,'legacy-order-001',1,100000
 from decision;
 """)
-    for migration in migrations:
-        if migration.name <= "0015_paper_order_execution_details.sql":
-            continue
-        psql(container, migration.read_text(encoding="utf-8"))
+    verify_retained_pgcrypto_preflight(
+        container,
+        expected_before=legacy_pgcrypto_schema,
+    )
+    apply_migration_range(container, migrations, start=cutoff + 1)
     result = psql(container, f"""
 select concat_ws('|',
   (select count(*) from public.orders where idempotency_key='legacy-order-001'),
@@ -376,16 +2190,96 @@ select concat_ws('|',
 """).stdout.strip()
     if result != "1|1|0|0|2|0|1|0|0":
         raise VerificationError(f"populated 0015 upgrade isolation mismatch: {result}")
-    print("PASS populated 0015 upgrade: legacy frozen, no accounting aggregation")
+    require_pgcrypto_converged(pgcrypto_convergence_snapshot(container))
+    before_final_preflight = pgcrypto_convergence_snapshot(container)
+    run_pgcrypto_preflight(container)
+    if pgcrypto_convergence_snapshot(container) != before_final_preflight:
+        raise VerificationError("retained 0015 final preflight was not idempotent")
+    print(
+        "PASS populated 0015 upgrade "
+        f"({legacy_pgcrypto_schema}): legacy frozen, no accounting aggregation"
+    )
+
+
+def require_operational_upgrade_converged(
+    container: str,
+    *,
+    valid_account: str,
+    valid_qualification: str,
+    upgrade_intent: str,
+    phase: str,
+) -> None:
+    result = psql(container, f"""
+select concat_ws('|',
+  (select execution_enabled from private.execution_controls
+    where account_id='paper-primary'),
+  (select updated_reason_code from private.execution_controls
+    where account_id='paper-primary'),
+  (select execution_enabled from private.execution_controls
+    where account_id='{valid_account}'),
+  (select updated_reason_code from private.execution_controls
+    where account_id='{valid_account}'),
+  (select control.expires_at=qualification.valid_until
+    from private.execution_controls as control
+    join private.qualifications as qualification
+      on qualification.id='{valid_qualification}'
+    where control.account_id='{valid_account}'),
+  (select execution_enabled from private.execution_controls
+    where account_id='contract-test-primary'),
+  (select updated_reason_code from private.execution_controls
+    where account_id='contract-test-primary'),
+  (select state from private.execution_reconciliation_state
+    where intent_id='{upgrade_intent}'),
+  (select claim_release_sha is null and claim_fencing_token is null
+    from private.execution_reconciliation_state
+    where intent_id='{upgrade_intent}'),
+  (select status from private.delivery_outbox
+    where dedupe_key='upgrade-tokenless-retry'),
+  (select lease_token is null from private.delivery_outbox
+    where dedupe_key='upgrade-tokenless-retry'),
+  (select status from private.delivery_outbox
+    where dedupe_key='upgrade-final-crash'),
+  (select count(*) from private.incidents
+    where incident_type='delivery_dead_letter'
+      and correlation_id='33333333-3333-4333-8333-333333333334'),
+  (select available_at <= clock_timestamp() from private.delivery_outbox
+    where dedupe_key='upgrade-future-clock')
+);
+""").stdout.strip()
+    if phase == "after 0024":
+        expected = (
+            "f|operational_upgrade_qualification_invalid|"
+            "t|operational_upgrade_qualification_revalidated|t|"
+            "f|unresolved_reconciliation_break|pending|t|pending|t|"
+            "dead_letter|1|t"
+        )
+    elif phase == "after complete tail":
+        expected = (
+            "f|operational_upgrade_qualification_invalid|"
+            "f|qualification_v1_required|t|"
+            "f|unresolved_reconciliation_break|pending|t|pending|t|"
+            "dead_letter|1|t"
+        )
+    else:
+        raise VerificationError(f"unknown operational upgrade phase: {phase}")
+    if result != expected:
+        raise VerificationError(
+            f"populated 0023 operational upgrade mismatch ({phase}): {result}"
+        )
+    print(f"PASS populated 0023 operational invariants ({phase})")
 
 
 def verify_populated_0023_operational_upgrade(container: str) -> None:
     psql(container, bootstrap_sql())
-    migrations = sorted(MIGRATIONS.glob("*.sql"))
-    for migration in migrations:
-        if migration.name >= "0024_operational_upgrade_convergence.sql":
-            break
-        psql(container, migration.read_text(encoding="utf-8"))
+    migrations = migration_files()
+    cutoff = migration_position(migrations, "0023_operational_safety_closure.sql")
+    convergence = migration_position(
+        migrations,
+        "0024_operational_upgrade_convergence.sql",
+    )
+    if convergence != cutoff + 1:
+        raise VerificationError("0023/0024 operational migration boundary is not adjacent")
+    apply_migration_range(container, migrations, stop=cutoff + 1)
     psql(container, SEED.read_text(encoding="utf-8"))
     psql(container, fixture_sql())
     valid_account = "paper-upgrade-valid"
@@ -577,57 +2471,33 @@ insert into private.delivery_outbox (
   clock_timestamp()+interval '30 days',null,null,0,3);
 """)
 
-    migration = MIGRATIONS / "0024_operational_upgrade_convergence.sql"
-    psql(container, migration.read_text(encoding="utf-8"))
-    result = psql(container, f"""
-select concat_ws('|',
-  (select execution_enabled from private.execution_controls
-    where account_id='paper-primary'),
-  (select updated_reason_code from private.execution_controls
-    where account_id='paper-primary'),
-  (select execution_enabled from private.execution_controls
-    where account_id='{valid_account}'),
-  (select updated_reason_code from private.execution_controls
-    where account_id='{valid_account}'),
-  (select control.expires_at=qualification.valid_until
-    from private.execution_controls as control
-    join private.qualifications as qualification
-      on qualification.id='{valid_qualification}'
-    where control.account_id='{valid_account}'),
-  (select execution_enabled from private.execution_controls
-    where account_id='contract-test-primary'),
-  (select updated_reason_code from private.execution_controls
-    where account_id='contract-test-primary'),
-  (select state from private.execution_reconciliation_state
-    where intent_id='{upgrade_intent}'),
-  (select claim_release_sha is null and claim_fencing_token is null
-    from private.execution_reconciliation_state
-    where intent_id='{upgrade_intent}'),
-  (select status from private.delivery_outbox
-    where dedupe_key='upgrade-tokenless-retry'),
-  (select lease_token is null from private.delivery_outbox
-    where dedupe_key='upgrade-tokenless-retry'),
-  (select status from private.delivery_outbox
-    where dedupe_key='upgrade-final-crash'),
-  (select count(*) from private.incidents
-    where incident_type='delivery_dead_letter'
-      and correlation_id='33333333-3333-4333-8333-333333333334'),
-  (select available_at <= clock_timestamp() from private.delivery_outbox
-    where dedupe_key='upgrade-future-clock')
-);
-""").stdout.strip()
-    expected = (
-        "f|operational_upgrade_qualification_invalid|"
-        "t|operational_upgrade_qualification_revalidated|t|"
-        "f|unresolved_reconciliation_break|pending|t|pending|t|"
-        "dead_letter|1|t"
+    verify_retained_pgcrypto_preflight(container, expected_before="public")
+    apply_migration(container, migrations[convergence])
+    require_operational_upgrade_converged(
+        container,
+        valid_account=valid_account,
+        valid_qualification=valid_qualification,
+        upgrade_intent=upgrade_intent,
+        phase="after 0024",
     )
-    if result != expected:
-        raise VerificationError(f"populated 0023 operational upgrade mismatch: {result}")
     print(
         "PASS populated 0023->0024 upgrade: controls, claims and caller-clock "
         "delivery rows converge fail closed"
     )
+    apply_migration_range(container, migrations, start=convergence + 1)
+    require_operational_upgrade_converged(
+        container,
+        valid_account=valid_account,
+        valid_qualification=valid_qualification,
+        upgrade_intent=upgrade_intent,
+        phase="after complete tail",
+    )
+    require_pgcrypto_converged(pgcrypto_convergence_snapshot(container))
+    before_final_preflight = pgcrypto_convergence_snapshot(container)
+    run_pgcrypto_preflight(container)
+    if pgcrypto_convergence_snapshot(container) != before_final_preflight:
+        raise VerificationError("retained 0023 final preflight was not idempotent")
+    print("PASS populated 0023 upgrade remains compatible with the complete migration tail")
 
 
 def fixture_sql() -> str:
@@ -2312,7 +4182,7 @@ select
     )::text,
     'UTF8'
   ),'sha256'),'hex')
-from generate_series(0,3) as offsets(offset_value);
+from generate_series(-1,3) as offsets(offset_value);
 insert into private.paper_execution_model_registry (
   environment,model_version,tick_size_evidence_sha256,
   volume_model_evidence_sha256,corporate_action_evidence_sha256,
@@ -2321,7 +4191,7 @@ insert into private.paper_execution_model_registry (
 ) values (
   'paper','dedupe-model','{tick_hash}','{volume_hash}',
   '{corporate_action_hash}','{calendar_id}','approved','{EVIDENCE}',
-  '{ADMIN_1}','{ADMIN_2}',clock_timestamp()-interval '1 day',
+  '{ADMIN_1}','{ADMIN_2}',clock_timestamp()-interval '2 days',
   clock_timestamp()+interval '1 day'
 );
 insert into private.paper_execution_policies (
@@ -2338,7 +4208,7 @@ insert into private.paper_execution_policies (
     'tick_size_evidence_sha256','{tick_hash}',
     'volume_model_evidence_sha256','{volume_hash}'
   ),'{EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
-  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+  clock_timestamp()-interval '2 days',clock_timestamp()+interval '1 day'
 );
 insert into private.execution_cost_schedules (
   account_id,schedule_version,schedule_sha256,buy_commission_rate,
@@ -2347,7 +4217,7 @@ insert into private.execution_cost_schedules (
 ) values (
   'paper-primary','dedupe-cost','{cost_schedule_hash}',0.001,0.001,0.002,0,
   'approved','{EVIDENCE}','{ADMIN_1}','{ADMIN_2}',
-  clock_timestamp()-interval '1 day',clock_timestamp()+interval '1 day'
+  clock_timestamp()-interval '2 days',clock_timestamp()+interval '1 day'
 );
 alter table private.execution_controls
   disable trigger guard_execution_control_qualification_freshness_v1;
@@ -4960,11 +6830,49 @@ insert into private.position_projection (
   account_id,symbol,quantity,average_cost_krw,projection_version
 ) values ('paper-primary','005930',10,8000,1);
 """)
-    raw = psql(
-        container,
-        jwt_claim_sql(VIEWER) + "select api.get_desktop_operations_snapshot_v1();",
-    ).stdout.strip().splitlines()[-1]
-    snapshot = json.loads(raw)
+    snapshot_audit_id = psql(container, f"""
+select private.write_audit_event(
+  'system',null,'snapshot_verifier',null,null,null,
+  'incident_resolved','incident','{SNAPSHOT_AUDIT_RESOURCE_ID}',
+  '{SNAPSHOT_AUDIT_RESOURCE_ID}',null,
+  'snapshot_auditor_positive_control',null,array[]::text[],null,null,null
+);
+""").stdout.strip()
+    if not snapshot_audit_id:
+        raise VerificationError("snapshot audit positive-control fixture is missing")
+    expected_reconciliation = psql(container, f"""
+select concat_ws('|', break_row.id, break_row.run_id)
+from private.order_events as event
+join private.reconciliation_breaks as break_row
+  on event.event_summary->>'reconciliation_break_id' = break_row.id::text
+where event.intent_id='{SNAPSHOT_EVIDENCE_INTENT_ID}'
+  and event.event_type='manual_check_quarantined'
+order by event.occurred_at desc, event.id desc
+limit 1;
+""").stdout.strip()
+    if "|" not in expected_reconciliation:
+        raise VerificationError("snapshot evidence fixture break is missing")
+    expected_break_id, expected_run_id = expected_reconciliation.split("|", 1)
+    non_auditor_snapshots: dict[str, dict[str, object]] = {}
+    for role_name, user_id in NON_AUDITOR_HUMAN_ROLES:
+        role_raw = psql(
+            container,
+            jwt_claim_sql(user_id)
+            + "select api.get_desktop_operations_snapshot_v1();",
+        ).stdout.strip().splitlines()[-1]
+        role_snapshot = json.loads(role_raw)
+        if role_snapshot.get("audit_events") != []:
+            raise VerificationError(
+                f"{role_name} snapshot leaked audit events: "
+                f"{role_snapshot.get('audit_events')}"
+            )
+        if role_snapshot.get("reconciliation_cases") != []:
+            raise VerificationError(
+                f"{role_name} snapshot leaked reconciliation cases: "
+                f"{role_snapshot.get('reconciliation_cases')}"
+            )
+        non_auditor_snapshots[role_name] = role_snapshot
+    snapshot = non_auditor_snapshots["viewer"]
     position = snapshot["positions"][0]
     if any(position[key] is not None for key in (
         "market_price_krw", "market_value_krw", "unrealized_pnl_krw",
@@ -4976,7 +6884,59 @@ insert into private.position_projection (
         raise VerificationError("snapshot fabricated client Realtime connectivity")
     if "access_changes" not in snapshot:
         raise VerificationError("snapshot omitted access changes")
-    print("PASS snapshot null valuation, causal safety and fail-closed Realtime")
+
+    auditor_raw = psql(
+        container,
+        jwt_claim_sql(AUDITOR) + "select api.get_desktop_operations_snapshot_v1();",
+    ).stdout.strip().splitlines()[-1]
+    auditor_snapshot = json.loads(auditor_raw)
+    auditor_permissions = auditor_snapshot.get("access", {}).get("permissions")
+    if not isinstance(auditor_permissions, list) \
+            or "view_audit" not in auditor_permissions:
+        raise VerificationError("auditor snapshot omitted view_audit permission")
+    if "view_reconciliation" not in auditor_permissions:
+        raise VerificationError(
+            "auditor snapshot omitted view_reconciliation permission"
+        )
+    audit_evidence = next(
+        (
+            item
+            for item in auditor_snapshot.get("audit_events", [])
+            if item.get("audit_id") == snapshot_audit_id
+            and item.get("resource_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+            and item.get("resource_type") == "incident"
+            and item.get("action") == "incident_resolved"
+            and item.get("reason_code") == "snapshot_auditor_positive_control"
+            and item.get("outcome") == "success"
+            and item.get("correlation_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        ),
+        None,
+    )
+    if audit_evidence is None:
+        raise VerificationError("auditor snapshot omitted known audit evidence")
+    reconciliation_evidence = next(
+        (
+            item
+            for item in auditor_snapshot.get("reconciliation_cases", [])
+            if item.get("case_id") == expected_break_id
+            and item.get("order_id") == SNAPSHOT_EVIDENCE_INTENT_ID
+            and item.get("environment") == "paper"
+            and item.get("status") == "investigating"
+            and item.get("reason_code") == "ambiguous_order_state"
+            and item.get("resolution_code") is None
+            and item.get("evidence_refs")
+            == [f"reconciliation-run:{expected_run_id}"]
+        ),
+        None,
+    )
+    if reconciliation_evidence is None:
+        raise VerificationError(
+            "auditor snapshot omitted known reconciliation evidence"
+        )
+    print(
+        "PASS snapshot non-auditor evidence denial, auditor exact evidence "
+        "projection, null valuation, causal safety and fail-closed Realtime"
+    )
 
 
 def verify_arithmetic() -> None:
@@ -5019,6 +6979,32 @@ def http_post(url: str, token: str | None, *, profile: str = "api", body: dict |
         return error.code, error.read().decode()
 
 
+def require_postgrest_schema_denial(
+    status: int,
+    body: str,
+    *,
+    schema: str,
+    label: str,
+) -> None:
+    expected = {
+        "code": "42501",
+        "details": None,
+        "hint": None,
+        "message": f"permission denied for schema {schema}",
+    }
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise VerificationError(
+            f"{label} returned a non-JSON denial body: status={status}, body={body}"
+        ) from error
+    if status != 401 or payload != expected:
+        raise VerificationError(
+            f"{label} denial contract mismatch: status={status}, "
+            f"body={payload}, expected_status=401, expected_body={expected}"
+        )
+
+
 def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
     run([
         "docker", "run", "-d", "--name", postgrest, "--network", network,
@@ -5048,7 +7034,12 @@ def verify_postgrest(pg: str, network: str, postgrest: str) -> None:
         raise VerificationError(
             "PostgREST did not become ready:\n" + logs.stdout + logs.stderr
         )
-    auth = jwt_token("authenticated", VIEWER)
+    non_auditor_tokens = tuple(
+        (role_name, jwt_token("authenticated", user_id))
+        for role_name, user_id in NON_AUDITOR_HUMAN_ROLES
+    )
+    auth = dict(non_auditor_tokens)["viewer"]
+    auditor = jwt_token("authenticated", AUDITOR)
     operator = jwt_token("authenticated", OPERATOR)
     service_holder = "00000000-0000-4000-8000-000000000099"
     service = jwt_token("service_role", service_holder)
@@ -5060,9 +7051,100 @@ select fencing_token from worker_api.acquire_worker_lease(
 );
 """,
     ).stdout.strip().splitlines()[-1]
-    status, _ = http_post(f"{root}/rpc/get_desktop_operations_snapshot_v1", auth)
+    for endpoint in (
+        "get_desktop_operations_snapshot_v1",
+        "get_unknown_resolution_cases_v2",
+    ):
+        status, body = http_post(f"{root}/rpc/{endpoint}", None)
+        require_postgrest_schema_denial(
+            status,
+            body,
+            schema="api",
+            label=f"anonymous {endpoint}",
+        )
+    for role_name, role_token in non_auditor_tokens:
+        status, body = http_post(
+            f"{root}/rpc/get_desktop_operations_snapshot_v1", role_token
+        )
+        if status != 200:
+            raise VerificationError(
+                f"{role_name} snapshot failed through PostgREST: {status}"
+            )
+        role_snapshot = json.loads(body)
+        if role_snapshot.get("audit_events") != [] \
+                or role_snapshot.get("reconciliation_cases") != []:
+            raise VerificationError(
+                f"{role_name} PostgREST snapshot leaked auditor evidence: "
+                f"{role_snapshot}"
+            )
+    status, body = http_post(
+        f"{root}/rpc/get_desktop_operations_snapshot_v1", auditor
+    )
     if status != 200:
-        raise VerificationError(f"authenticated snapshot failed through PostgREST: {status}")
+        raise VerificationError(
+            f"auditor snapshot failed through PostgREST: {status}"
+        )
+    auditor_snapshot = json.loads(body)
+    auditor_permissions = auditor_snapshot.get("access", {}).get("permissions")
+    if not isinstance(auditor_permissions, list):
+        raise VerificationError(
+            "auditor PostgREST snapshot permissions have invalid type"
+        )
+    if not all(
+        permission in auditor_permissions
+        for permission in ("view_audit", "view_reconciliation")
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted evidence permissions"
+        )
+    expected_audit_id = psql(pg, f"""
+select id
+from private.audit_events
+where resource_id='{SNAPSHOT_AUDIT_RESOURCE_ID}'
+  and reason_code='snapshot_auditor_positive_control'
+order by occurred_at desc, id desc
+limit 1;
+""").stdout.strip()
+    expected_reconciliation = psql(pg, f"""
+select concat_ws('|', break_row.id, break_row.run_id)
+from private.order_events as event
+join private.reconciliation_breaks as break_row
+  on event.event_summary->>'reconciliation_break_id' = break_row.id::text
+where event.intent_id='{SNAPSHOT_EVIDENCE_INTENT_ID}'
+  and event.event_type='manual_check_quarantined'
+order by event.occurred_at desc, event.id desc
+limit 1;
+""").stdout.strip()
+    if not expected_audit_id or "|" not in expected_reconciliation:
+        raise VerificationError("PostgREST snapshot evidence fixture is missing")
+    expected_break_id, expected_run_id = expected_reconciliation.split("|", 1)
+    if not any(
+        item.get("audit_id") == expected_audit_id
+        and item.get("resource_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        and item.get("resource_type") == "incident"
+        and item.get("action") == "incident_resolved"
+        and item.get("reason_code") == "snapshot_auditor_positive_control"
+        and item.get("outcome") == "success"
+        and item.get("correlation_id") == SNAPSHOT_AUDIT_RESOURCE_ID
+        for item in auditor_snapshot.get("audit_events", [])
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted known audit evidence"
+        )
+    if not any(
+        item.get("case_id") == expected_break_id
+        and item.get("order_id") == SNAPSHOT_EVIDENCE_INTENT_ID
+        and item.get("environment") == "paper"
+        and item.get("status") == "investigating"
+        and item.get("reason_code") == "ambiguous_order_state"
+        and item.get("resolution_code") is None
+        and item.get("evidence_refs")
+        == [f"reconciliation-run:{expected_run_id}"]
+        for item in auditor_snapshot.get("reconciliation_cases", [])
+    ):
+        raise VerificationError(
+            "auditor PostgREST snapshot omitted known reconciliation evidence"
+        )
     status, body = http_post(
         f"{root}/rpc/get_unknown_resolution_cases_v2", operator
     )
@@ -5090,23 +7172,35 @@ select fencing_token from worker_api.acquire_worker_lease(
         raise VerificationError(
             f"viewer unknown V2 projection was not empty through PostgREST: {status}"
         )
+    worker_body = {
+        "p_account_id": "paper-primary",
+        "p_holder_id": service_holder,
+        "p_release_sha": RELEASE_SHA,
+        "p_fencing_token": int(service_fencing_token),
+        "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "p_limit": 1,
+    }
+    status, body = http_post(
+        f"{root}/rpc/claim_operation_command_batch",
+        None,
+        profile="worker_api",
+        body=worker_body,
+    )
+    require_postgrest_schema_denial(
+        status,
+        body,
+        schema="worker_api",
+        label="anonymous claim_operation_command_batch",
+    )
     status, _ = http_post(
         f"{root}/rpc/claim_operation_command_batch", auth, profile="worker_api",
-        body={"p_account_id": "paper-primary", "p_holder_id": service_holder,
-              "p_release_sha": RELEASE_SHA,
-              "p_fencing_token": int(service_fencing_token),
-              "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "p_limit": 1},
+        body=worker_body,
     )
     if status not in (401, 403, 404):
         raise VerificationError(f"authenticated worker RPC unexpectedly allowed: {status}")
     status, _ = http_post(
         f"{root}/rpc/claim_operation_command_batch", service, profile="worker_api",
-        body={"p_account_id": "paper-primary", "p_holder_id": service_holder,
-              "p_release_sha": RELEASE_SHA,
-              "p_fencing_token": int(service_fencing_token),
-              "p_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "p_limit": 1},
+        body=worker_body,
     )
     if status != 200:
         raise VerificationError(f"service worker RPC failed through PostgREST: {status}")
@@ -5132,15 +7226,22 @@ select idempotent from worker_api.release_worker_lease(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-postgrest", action="store_true", help="local parser debugging only")
+    parser.add_argument(
+        "--skip-postgrest",
+        action="store_true",
+        help="local parser debugging only; returns partial status 2",
+    )
     args = parser.parse_args()
     suffix = uuid4().hex[:10]
     pg = f"msp-g1g2-pg-{suffix}"
-    upgrade_pg = f"msp-g1g2-upgrade-{suffix}"
+    preinstalled_pg = f"msp-g1g2-preinstalled-{suffix}"
+    upgrade_public_pg = f"msp-g1g2-upgrade-public-{suffix}"
+    upgrade_extensions_pg = f"msp-g1g2-upgrade-extensions-{suffix}"
     operational_upgrade_pg = f"msp-g1g2-operational-upgrade-{suffix}"
     postgrest = f"msp-g1g2-rest-{suffix}"
     network = f"msp-g1g2-net-{suffix}"
     try:
+        verify_repository_inputs()
         run(["docker", "info"])
         run(["docker", "network", "create", network])
         run([
@@ -5175,11 +7276,30 @@ def main() -> int:
         verify_manual_reconciliation_atomicity(pg)
         verify_arithmetic()
         run([
-            "docker", "run", "-d", "--name", upgrade_pg, "--network", network,
+            "docker", "run", "-d", "--name", preinstalled_pg, "--network", network,
             "-e", f"POSTGRES_PASSWORD={DB_PASSWORD}", POSTGRES_IMAGE,
         ])
-        wait_for_postgres(upgrade_pg)
-        verify_populated_0015_upgrade(upgrade_pg)
+        wait_for_postgres(preinstalled_pg)
+        verify_controlled_non_superuser_preinstalled_replay(preinstalled_pg)
+        run([
+            "docker", "run", "-d", "--name", upgrade_public_pg, "--network", network,
+            "-e", f"POSTGRES_PASSWORD={DB_PASSWORD}", POSTGRES_IMAGE,
+        ])
+        wait_for_postgres(upgrade_public_pg)
+        verify_populated_0015_upgrade(
+            upgrade_public_pg,
+            legacy_pgcrypto_schema="public",
+        )
+        run([
+            "docker", "run", "-d", "--name", upgrade_extensions_pg,
+            "--network", network,
+            "-e", f"POSTGRES_PASSWORD={DB_PASSWORD}", POSTGRES_IMAGE,
+        ])
+        wait_for_postgres(upgrade_extensions_pg)
+        verify_populated_0015_upgrade(
+            upgrade_extensions_pg,
+            legacy_pgcrypto_schema="extensions",
+        )
         run([
             "docker", "run", "-d", "--name", operational_upgrade_pg,
             "--network", network,
@@ -5191,6 +7311,8 @@ def main() -> int:
             verify_postgrest(pg, network, postgrest)
         else:
             print("WARN PostgREST integration skipped by explicit flag")
+            print("FINAL=PARTIAL postgrest_not_verified")
+            return 2
         print("FINAL=PASS g1_g2_migration_verifier")
         return 0
     except (VerificationError, OSError, json.JSONDecodeError) as error:
@@ -5199,7 +7321,9 @@ def main() -> int:
     finally:
         run(["docker", "rm", "-f", postgrest], check=False)
         run(["docker", "rm", "-f", operational_upgrade_pg], check=False)
-        run(["docker", "rm", "-f", upgrade_pg], check=False)
+        run(["docker", "rm", "-f", upgrade_extensions_pg], check=False)
+        run(["docker", "rm", "-f", upgrade_public_pg], check=False)
+        run(["docker", "rm", "-f", preinstalled_pg], check=False)
         run(["docker", "rm", "-f", pg], check=False)
         run(["docker", "network", "rm", network], check=False)
 

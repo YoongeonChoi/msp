@@ -10,6 +10,16 @@
 
 ## DB Migration Changed? yes/no
 
+## Historical Migration Changed? must be no
+
+## DB Preflight Changed? yes/no
+
+## Migration Checksum Inventory Verified? yes/no
+
+## New Migration Appends After Base Tail As Regular 100644 Blob? yes/no/N/A
+
+## Fresh/Retained Migration Evidence
+
 ## Security Impact
 
 ## Tests Run

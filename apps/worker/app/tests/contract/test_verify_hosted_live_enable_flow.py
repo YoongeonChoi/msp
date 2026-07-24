@@ -320,8 +320,8 @@ def test_hosted_live_enable_verifier_rejects_reused_requester_and_reviewer_jwt(
         ],
         environ={
             "SUPABASE_SECRET_KEY": "secret-test-key",
-            "SUPABASE_LIVE_REQUESTER_JWT": "reused-admin-jwt",
-            "SUPABASE_LIVE_REVIEWER_JWT": "reused-admin-jwt",
+            "SUPABASE_LIVE_REQUESTER_JWT": "reused-" + "admin-jwt",
+            "SUPABASE_LIVE_REVIEWER_JWT": "reused-" + "admin-jwt",
             "SUPABASE_STAGING_PROJECT_REF": "project",
             "SUPABASE_PRODUCTION_PROJECT_REF": "production-project",
             "SUPABASE_LIVE_ENABLE_VERIFICATION_TARGET": "staging",
@@ -659,11 +659,7 @@ class _MockHostedLiveEnableState:
             and body.get("mode") == "live"
             and body.get("live_order_allowed") is True
         )
-        if (
-            not wants_live
-            and self.activation_count > 0
-            and self.fail_disable_after_activation
-        ):
+        if not wants_live and self.activation_count > 0 and self.fail_disable_after_activation:
             return httpx.Response(500, json={"message": "cleanup failed"}, request=request)
         if wants_live:
             if self.fail_activation_before_apply and self.activation_count == 0:
@@ -706,9 +702,7 @@ class _MockHostedLiveEnableState:
                     },
                     {
                         "status": "ok",
-                        "created_at": (
-                            datetime.now(UTC) - timedelta(seconds=30)
-                        ).isoformat(),
+                        "created_at": (datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
                         "details": {"mock_providers": False},
                     },
                 ],

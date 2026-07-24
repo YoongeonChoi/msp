@@ -91,7 +91,7 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 | --- | --- | --- | --- |
 | 안전 경계 | `PARTIAL` | `RiskService`, worker-only broker path, idempotency, manual-check, deployment lock 존재 | atomic reservation, kill epoch, lease/fencing, fill ledger |
 | Paper 회계 | `BLOCKED` | Paper account가 cycle마다 1천만원으로 초기화 | persistent balanced ledger와 restart reconciliation |
-| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, in-memory append-only revision 기준, provider hash에 묶인 PIT 거래일·세션 매핑과 timing-only 결합 gate만 있고 durable persistence·quarantine·feature 연결은 없으며 production score 일부는 상수·unknown | point-in-time raw data, lineage, DQ gate, certified backtest |
+| 데이터·연구 | `BLOCKED` | strict PIT candle 단일-page read, DB-backed append-only candle/calendar content revision·observation occurrence·ambiguity quarantine, 개장·휴장일을 받는 독립 Worker-only calendar observation store와 bounded calendar as-of range reader, 한 날짜를 1회 fetch/append하는 명시적 calendar collection use case, 수동 호출당 한 날짜만 진행하는 default-disabled CAS/fencing range-job 계약, 비내구성 in-memory reference와 service-role-only durable Supabase job/attempt store, exact assessment에 결합된 default-disabled one-shot runtime, 두 exact source occurrence에 대한 timing binding, bounded Worker-only durable candle as-of reader, single-candle request의 durable attempt/candidate fence와 exact occurrence confirm, begin→read→fence→append→confirm을 강제하는 default-disabled 단일 candle application runner, retained research/calendar 산출물의 공통 calendar lineage 필드를 교차 결합하면서 외부 completeness·authenticity·finality 증거 부재를 고정하는 negative-only 로컬 assessment, 그리고 동일 canonical source를 재구성해 10개 structural/timing/lineage check를 versioned policy/result SHA로 결합하면서 corporate-action 미평가와 full-DQ/downstream 차단을 고정하는 로컬 DQ assessment가 있다. positive research/full-DQ certification, verified corporate-action source, candle runtime/scheduler 선택·unknown-write reconciliation·자동 수집/feature/backtest 연결은 없고 production score 일부는 상수·unknown이다. | point-in-time raw data, lineage, DQ gate, certified backtest |
 | Live feature evidence | `BLOCKED` | sector 미주입, PER/PBR 없음, news risk unknown, liquidity/volatility evidence 없음 | 검증된 source로만 전체 evidence 생성 |
 | Control UX | `PARTIAL` | 안전 큐·승인 UX·audit summary는 존재 | command/ACK state machine, stale/offline guard, strict schema |
 | IAM·감사 | `BLOCKED` | 사실상 단일 admin, service role 전권, 감사 삭제/변조 방지 미완성 | 역할분리, MFA/step-up, append-only audit, WORM export |
@@ -109,15 +109,113 @@ gate 판정이 아니다. 현재 통과 여부는 `G0_OPERATING_BOUNDARY.md`,
 - `apps/worker/app/application/services/data_collection_service.py`는 명시적인
   단일-page PIT candle read만 수행한다. persistence, pagination, scheduler,
   completed-bar 인증, feature 연결은 아직 없다.
-- candle observation storage port와 in-memory reference adapter는 exact replay,
-  correction revision, ambiguous historical-hash recurrence를 구분하지만 durable
-  database persistence나 collection wiring을 제공하지 않는다.
+- candle observation storage port의 in-memory reference adapter와 명시적 Supabase
+  Worker adapter는 exact replay와 strictly-later correction revision을 구분한다.
+  Supabase RPC는 canonical key/hash를 DB에서 재계산하고 accepted revision과
+  시각 역행·same-clock conflict·historical-hash recurrence quarantine을 durable
+  append-only row로 보존한다. 별도 timing RPC는 calendar content와 candle/calendar
+  observation occurrence를 분리해 보존하고 exact occurrence에서 availability와
+  timing hash를 재계산한다. 동일 content의 후속 관측도 content revision을 늘리지
+  않고 occurrence로 남긴다. 별도 Worker-only durable as-of reader는 현재 보존된
+  exact occurrence lineage를 bounded snapshot으로 재구성하지만 collection/runtime
+  wiring, completeness 또는 feature readiness는 제공하지 않는다.
+- 별도 daily-candle collection job store는 manual `count=1`/no-pagination
+  요청의 exact spec SHA와 attempt/holder/fence, canonical candidate를 기록하는
+  durable 상태 계약이다. 별도 default-disabled application runner는 두 durable
+  store가 같은 non-secret persistence authority에 결합됐는지 먼저 확인하고,
+  provider read 전에 begin하며 append 전에 candidate를 fence한다. 현재
+  provider/append port는 job fence를 받지 않으므로 이 경계 밖의 out-of-band 호출을
+  막지는 못한다.
+  Supabase confirm은 append receipt를 exact occurrence/content revision에 다시
+  결합하며, 기록된 job state에는 response loss·cancellation 뒤 TTL takeover나
+  blind restart 전이가 없다. in-memory reference, Worker-only durable store,
+  그리고 명시적 one-shot runner는 있으나 runtime/scheduler에는 연결되지 않았다.
 - Toss KR market calendar는 요청 날짜·전/후 영업일 순서·KST 정규 세션을 검증해
   strict PIT 세션 증거로 매핑하지만 persistence나 completed-bar 인증은 제공하지
-  않는다.
+  않는다. 별도 Worker-only calendar observation store는 개장·휴장 증거 모두를
+  기존 append-only calendar content/occurrence ledger에 저장하고 exact replay,
+  later unchanged occurrence, strictly-later correction을 구분한다. source-clock
+  regression, same-clock conflict, historical hash recurrence는 durable quarantine으로
+  남긴다. 명시적 single-date application use case는 정확히 한 번 source를 읽고
+  한 번 append하며 read-window와 durable receipt binding을 재검증하지만 runtime,
+  scheduler, 자동 range backfill에는 연결되지 않았고 전체 거래일 completeness를
+  인증하지 않는다. 수동 range-job use case는 default disabled이고 호출당 정확히
+  다음 날짜 하나만 진행한다. begin 전에 revision·attempt·holder·target fence를
+  기록하고 known pre-write failure만 다음 수동 호출에 재시도 가능하게 하며,
+  unknown·취소·응답 유실은 자동 회수하지 않는다. in-memory adapter는 lock/CAS
+  reference이고, 별도 Supabase adapter는 private job snapshot과 append-only attempt
+  ledger를 service-role-only RPC로 보존한다. 재접속 복원·동시 begin·stale CAS·blocked
+  무인 takeover 금지·terminal manifest·ACL/RLS를 disposable PostgreSQL에서 검증하지만
+  main runtime, unresolved-write manual recovery 또는 scheduler 연결은 제공하지 않는다. 별도
+  read-only recovery assessment service는 inspector를 한 번만 읽어 missing/ready/
+  paused_retryable/paused_unrecognized/collecting/blocked_unknown/completed를 보수적으로 분류하고 다음 검토
+  방향을 표시하지만 mutation·retry·manual execution·manual recovery·Live 권한은 모두
+  부여하지 않는다. 별도의 default-disabled one-shot command만 exact spec SHA와
+  operator-reviewed state/state-reason/revision/count/next-date를 assessment와 실행 load에 다시
+  결합해 missing/ready 또는 exact `collection_failed_before_write` reason으로 별도
+  확인된 paused_retryable의 다음 날짜 하나를 진행한다. paused_unrecognized/
+  collecting/blocked_unknown/completed, assessment drift, stale revision은 provider read
+  전에 차단하고 자동 retry나 TTL takeover를 만들지 않는다. scheduler·hosted 연결과
+  unresolved-write recovery는 아직 없다. 기존 timing RPC의 monotonic source-stream guard도 유지되어,
+  calendar head가 전진한 뒤 과거 occurrence를 새 timing 요청으로 backfill하는 경로는
+  fail closed이며 별도 계약이 필요하다.
+- 별도 Worker-only calendar as-of reader는 한 provider의 `KR` 개장·휴장
+  occurrence를 최대 366일, page size `25..100`, raw candidate 1,000건으로 제한해
+  읽는다. exact immutable occurrence/revision lineage와 15분 MVCC snapshot/manifest를
+  사용하고 `observed_at <= as_of`만 semantic cutoff로 인정한다. `received_at`은
+  lineage이며 과거 DB visibility를 복원하지 못한다. 전체 as-of-eligible retained
+  timeline의 quarantine, hash/lineage corruption, cursor 또는 manifest drift는
+  부분 결과 없이 fail closed한다. 같은 migration은 calendar identity/evidence hash의
+  날짜를 명시적 `YYYY-MM-DD`로 수렴해 session `DateStyle` 의존을 제거한다. Worker
+  adapter는 identity response encoding만 허용하고 non-terminal short page·과도한
+  continuation·4 MiB 초과 RPC 응답을 거부하며 parser 예외에 upstream payload를
+  연결하지 않는다. 이 reader도
+  collection/runtime/scheduler/timing backfill/DQ/
+  dataset/research/feature/backtest/strategy/order/Desktop에 연결되지 않았다.
 - daily candle timing gate는 동일 영업일의 candle과 calendar를 결합하고 두 source가
   다음 영업일 정규장 시작 이후 다시 관측됐는지만 증명한다. provider finality,
-  corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다.
+  corporate action, 전체 DQ 통과 또는 feature readiness를 증명하지 않는다. 명시적
+  Supabase adapter는 이 결과를 exact source content revision과 observation
+  occurrence에 결합하지만 collection이나 feature 경로에는 아직 연결되지 않았다.
+- daily candle as-of selector는 모든 candle/timing source를 재검증·교차 결합하고
+  `evidence_available_at`으로 조회 시점 적격성을, `candle.observed_at`으로 correction
+  순서를 판단한다. `20260719030000`의 Worker-only reader는 exact provider/`KR`/symbol/
+  `1d`/`adjusted`, 최대 366일, page size `25..100`, raw candidate 1,000건 경계에서
+  15분 TTL MVCC snapshot과 전체 manifest로 모든 페이지를 고정한다. Worker adapter는
+  전 페이지를 검증·버퍼한 뒤 기존 selector를 정확히 한 번 호출하며 부분 결과를
+  노출하지 않는다. 동일 시각 충돌·historical hash recurrence·daily identity drift,
+  unresolved timeline ambiguity, binding 손상, manifest drift는 fail closed이다.
+  `as_of`는 현재 보존된 evidence의 `evidence_available_at` 컷오프이며
+  `received_at <= as_of`나 과거 DB commit visibility를 뜻하지 않는다. 이 reader는
+  completeness, provider/calendar finality, corporate-action, DQ 또는 feature readiness를
+  증명하지 않는다.
+- `apps/worker/app/application/services/daily_candle_research_slice.py`는 reader가
+  완성한 snapshot을 한 번에 받아 exact 양끝 session, retained next-business
+  date와 다음 정규장 시각, source scope와 `selected_as_of`, content/occurrence
+  lineage uniqueness, slice 전체의 uniform candle/calendar contract pin, 기존
+  selector 결과를 다시 검증한다. transport와 분리된 logical-scope 및 selected
+  data-lineage fingerprint도 계산하지만 coverage는
+  `retained_open_session_chain_only`이고 `full_research_certified=false`이다.
+  이는 실제 KRX 전체 이력 completeness, provider authenticity/finality,
+  corporate action, 전체 DQ, persisted dataset registry, feature/backtest replay,
+  전략 승격 또는 주문 사용 승인을 증명하지 않는다.
+- `apps/worker/app/application/services/daily_candle_research_certification.py`는
+  위 research slice와 retained calendar date-range coverage를 각각 원래 gate로
+  재구성한 뒤 scope, `selected_as_of`, calendar contract, open-session set와 양쪽에
+  공통으로 보존된 calendar revision·occurrence lineage 필드를 교차 결합한다. candle
+  reader에 없는 calendar revision 원본 `observed_at`은 limitation으로 남긴다. manifest는 로컬
+  retained 검증과 네 외부 증거 부재 사유를 함께 고정한다. 이 V1은 외부 evidence
+  URL/SHA/boolean을 입력받지 않고 모든 completeness·authenticity·finality·full research·
+  promotion claim을 false로 유지하며 downstream require gate는 항상 거부한다.
+  trusted external verifier가 없으므로 positive certification은 여전히 미구현이다.
+- `apps/worker/app/application/services/daily_candle_corporate_action_dq_assessment.py`는
+  동일 source의 detached canonical 사본을 보존하고 serialize·validate·require 때마다
+  원래 gate와 cross-source assessment를 재생성한다. 고정된 10개 local structural/timing/
+  lineage check와 exact source SHA를 versioned policy/result/final manifest에 결합하지만,
+  `adjusted` flag나 opaque SHA를 corporate-action 증거로 취급하지 않는다. 따라서 local
+  checks만 true이고 corporate-action coverage·adjustment, full DQ, dataset/feature/
+  backtest/strategy/order 사용은 false이며 require gate는 항상 거부한다. positive path는
+  official source contract와 독립 verifier를 먼저 검증해야 한다.
 - 로컬 `InMemoryExecutionKernelV2`는 예약이 없는 정지 상태 Paper account snapshot을
   명시적으로 복원할 수 있지만 durable snapshot source, 원장 이력·미체결 intent
   복원, lease·fencing 연속성, runtime 시작 경로 연결은 제공하지 않는다.
@@ -507,6 +605,20 @@ position이 동일하다. 같은 manifest는 같은 feature/backtest 결과를 �
 - [x] `E1 Execution Safety Kernel` schema와 migration 로컬 구현
 - [x] `E2 Paper Accounting` 로컬 구현과 격리 검증
 - [ ] `E3 Point-in-Time Data Plane` 구현
+- [x] `E3` occurrence-backed bounded durable as-of reader 로컬 구현
+- [x] `E3` single-candle request attempt/CAS fence와 durable occurrence-confirm 계약 로컬 구현
+- [x] `E3` default-disabled durable single-candle source→fence→append→confirm application boundary와 direct fault 계약 로컬 구현
+- [x] `E3` retained-open-session research-slice gate와 canonical scope/data-lineage fingerprint 로컬 구현
+- [x] `E3` 개장·휴장 독립 calendar observation store와 durable ambiguity quarantine 로컬 구현
+- [x] `E3` 개장·휴장 bounded durable calendar as-of range reader 로컬 구현
+- [x] `E3` 단일 날짜 calendar source→observation store collection use case 로컬 구현
+- [x] `E3` default-disabled 수동 calendar range-job CAS/fencing 계약과 in-memory reference adapter 로컬 구현
+- [x] `E3` service-role-only durable Supabase range-job snapshot·attempt ledger와 CAS verifier 로컬 구현
+- [x] `E3` 단일 inspector read 기반의 read-only range-job recovery assessment 로컬 구현
+- [x] `E3` exact assessment·operator confirmation 기반의 default-disabled one-shot range-job runtime 로컬 구현
+- [x] `E3` retained calendar date-range coverage gate와 canonical scope/data-lineage fingerprint 로컬 구현
+- [x] `E3` research/calendar 공통 calendar-lineage 결합과 외부 completeness·authenticity·finality 증거 부재를 강제하는 negative-only 로컬 assessment
+- [ ] `E3` main runtime/scheduler·자동 range collection과 feature 연결, unknown-write recovery, dataset registry, certified feature/backtest replay와 completeness·finality·corporate-action·DQ 인증
 - [x] `E5 Safety Operations Foundation` 저장소 구현
 - [ ] `E5` 외부 alert/archive, 독립 dead-man, HA/DR 운영 증거
 - [ ] `G1`, `G2` 독립 심사

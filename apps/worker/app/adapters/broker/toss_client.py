@@ -13,7 +13,6 @@ from pydantic import BaseModel, ValidationError
 from app.adapters.broker.toss_auth import TOSS_OPENAPI_BASE_URL, TossAuth
 from app.adapters.broker.toss_models import (
     TossAccount,
-    TossApiErrorEnvelope,
     TossApiResponse,
     TossBuyingPowerResponse,
     TossCandlePage,
@@ -43,8 +42,13 @@ from app.domain.common.errors import (
 )
 from app.domain.portfolio.entities import Position
 from app.domain.trading.entities import AccountState
+from app.infrastructure.bounded_json import (
+    BoundedJsonError,
+    bounded_json_response,
+)
 
 ParsedModel = TypeVar("ParsedModel", bound=BaseModel)
+TOSS_READ_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +214,7 @@ class TossClient:
         return envelope.result
 
     async def get_candles(self, query: TossCandleQuery) -> TossCandlePage:
+        _validate_candle_query(query)
         params: dict[str, str | int | bool] = {
             "symbol": query.symbol,
             "interval": query.interval,
@@ -263,26 +268,61 @@ class TossClient:
         request: TossGetRequest,
         model_type: type[ParsedModel],
     ) -> ParsedModel:
+        result: ParsedModel | None = None
+        transport_failure: str | None = None
         try:
-            response = await self.client.get(
+            async with self.client.stream(
+                "GET",
                 f"{self.base_url}{request.path}",
                 params=request.params,
                 headers=await self._headers(request.account_seq),
-            )
-            _raise_for_toss_status(response)
-            return model_type.model_validate_json(response.text)
-        except httpx.TimeoutException as exc:
-            raise ProviderTimeoutError("toss", "toss_read_timeout") from exc
-        except httpx.HTTPStatusError as exc:
-            raise _provider_error_from_response(exc.response) from exc
-        except httpx.RequestError as exc:
-            raise ProviderUnavailableError("toss", "toss_read_request_failed") from exc
-        except ValidationError as exc:
-            raise ProviderSchemaError("toss", "toss_read_schema_invalid") from exc
+            ) as response:
+                payload: object = None
+                body_invalid = False
+                try:
+                    payload = await bounded_json_response(
+                        response,
+                        max_bytes=TOSS_READ_MAX_RESPONSE_BYTES,
+                    )
+                except BoundedJsonError:
+                    body_invalid = True
+                if body_invalid:
+                    if response.is_error:
+                        raise _provider_error_from_status(response.status_code)
+                    raise ProviderSchemaError(
+                        "toss",
+                        "toss_read_schema_invalid",
+                    )
+                if response.is_error:
+                    raise _provider_error_from_status(response.status_code)
+                validation_failed = False
+                try:
+                    result = model_type.model_validate(payload)
+                except ValidationError:
+                    validation_failed = True
+                if validation_failed:
+                    raise ProviderSchemaError(
+                        "toss",
+                        "toss_read_schema_invalid",
+                    )
+        except httpx.TimeoutException:
+            transport_failure = "timeout"
+        except httpx.RequestError:
+            transport_failure = "request"
+        if transport_failure == "timeout":
+            raise ProviderTimeoutError("toss", "toss_read_timeout")
+        if transport_failure == "request":
+            raise ProviderUnavailableError("toss", "toss_read_request_failed")
+        if result is None:
+            raise ProviderSchemaError("toss", "toss_read_schema_invalid")
+        return result
 
     async def _headers(self, account_seq: int | None = None) -> dict[str, str]:
         token = await self.auth.access_token()
-        headers = {"authorization": f"Bearer {token}"}
+        headers = {
+            "accept-encoding": "identity",
+            "authorization": f"Bearer {token}",
+        }
         if account_seq is not None:
             headers["X-Tossinvest-Account"] = str(account_seq)
         return headers
@@ -308,14 +348,9 @@ class TossClient:
         return self._cached_account_seq
 
 
-def _raise_for_toss_status(response: httpx.Response) -> None:
-    if response.is_error:
-        response.raise_for_status()
-
-
-def _provider_error_from_response(response: httpx.Response) -> ProviderError:
-    safe_code = _safe_error_code(response)
-    match response.status_code:
+def _provider_error_from_status(status_code: int) -> ProviderError:
+    safe_code = f"toss_http_{status_code}"
+    match status_code:
         case 400 | 401 | 403:
             return ProviderAuthError("toss", safe_code)
         case 429:
@@ -326,18 +361,31 @@ def _provider_error_from_response(response: httpx.Response) -> ProviderError:
             return ProviderUnknownError("toss", safe_code)
 
 
-def _safe_error_code(response: httpx.Response) -> str:
-    try:
-        error_envelope = TossApiErrorEnvelope.model_validate_json(response.text)
-    except ValidationError:
-        return f"toss_http_{response.status_code}"
-    return f"toss_{error_envelope.error.code}"
-
-
 def _kr_symbol(value: str) -> str | None:
     if re.fullmatch(r"[0-9]{6}", value):
         return value
     return None
+
+
+def _validate_candle_query(value: object) -> None:
+    if type(value) is not TossCandleQuery:
+        raise ProviderSchemaError("toss", "toss_candle_query_invalid")
+    if (
+        type(value.symbol) is not str
+        or _kr_symbol(value.symbol) is None
+        or type(value.interval) is not str
+        or value.interval not in {"1m", "1d"}
+        or type(value.count) is not int
+        or not 1 <= value.count <= 200
+        or type(value.adjusted) is not bool
+    ):
+        raise ProviderSchemaError("toss", "toss_candle_query_invalid")
+    if value.before is not None and (
+        type(value.before) is not datetime
+        or value.before.tzinfo is None
+        or value.before.utcoffset() is None
+    ):
+        raise ProviderSchemaError("toss", "toss_candle_query_invalid")
 
 
 def _decimal_krw_to_int(value: Decimal) -> int:

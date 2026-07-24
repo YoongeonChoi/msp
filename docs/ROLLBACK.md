@@ -41,6 +41,20 @@ where id = 'singleton';
 
 ## Database recovery
 
+- If the PG17 pgcrypto preflight transaction fails, do not start migrations; it
+  rolls back its relocation. Preserve the sanitized error and catalog receipt
+  for review.
+- If preflight succeeds but no migration has applied, keep the project isolated
+  and use only an approved inverse operation or recreate disposable staging.
+  Do not improvise an extension move.
+- If a separate runner session violates the approved identity or `public`-first
+  path after preflight has staged pgcrypto in `public`, stop the runner and keep
+  the external deployment mutex held while evidence is captured. Treat this as
+  a failed migration boundary; do not move the extension manually.
+- After any migration applies, do not move pgcrypto back manually. Keep Paper
+  disabled and use a reviewed forward fix or recreate isolated staging.
+- Treat preflight execution during active traffic or against an ambiguous
+  migration ledger as an incident. Do not auto-repair migration history.
 - Prefer an additive migration or compensating journal entry.
 - Never reverse an applied migration by dropping V2 ledger or audit objects in
   the operating database.

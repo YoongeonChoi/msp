@@ -1,11 +1,33 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { AppLayout } from "./components/Layout";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore
+} from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AppLayout, type DeviceConnectionState } from "./components/Layout";
+import { AuthRequiredState } from "./components/AuthRequiredState";
 import { parsePageKey } from "./lib/navigation";
 import type { PageKey } from "./lib/navigation";
 import { OperationsSnapshotProvider, useOperationsSnapshot } from "./lib/operationsSnapshotContext";
-import { resetQueryCacheAfterSignOut, shouldPurgeAuthSession } from "./lib/authSessionCache";
-import { supabase } from "./lib/supabaseClient";
+import {
+  evaluateAuthSessionBoundary,
+  resetQueryCacheAfterSignOut,
+  resetQueryCacheAfterPrincipalChange
+} from "./lib/authSessionCache";
+import { clearPersistedSupabaseSession, supabase } from "./lib/supabaseClient";
+import {
+  blockDeviceConnectionCleanup,
+  fetchAuthRole,
+  getDeviceConnectionGuardSnapshot,
+  isSupabaseReady,
+  subscribeDeviceConnectionGuard,
+  shouldDiscardPendingDeviceConnection
+} from "./lib/authData";
+import { authRoleQueryKey } from "./lib/authQueryKey";
 import { ControlPage } from "./pages/ControlPage";
 import { LoadingState } from "./components/ui";
 import { LazySurfaceBoundary } from "./components/LazySurfaceBoundary";
@@ -17,19 +39,64 @@ function App() {
   const queryClient = useQueryClient();
   const [page, setPageState] = useState<PageKey>(() => initialPage());
   const [sessionBoundaryKey, setSessionBoundaryKey] = useState(0);
+  const [sessionGuarded, setSessionGuarded] = useState(false);
+  const [authPrincipalId, setAuthPrincipalId] = useState<string | null>(null);
+  const authPrincipalIdRef = useRef<string | null>(null);
   const sessionLostRef = useRef(false);
+  const supabaseReady = isSupabaseReady();
+  const deviceConnectionGuard = useSyncExternalStore(
+    subscribeDeviceConnectionGuard,
+    getDeviceConnectionGuardSnapshot,
+    getDeviceConnectionGuardSnapshot
+  );
+  const authRole = useQuery({
+    queryKey: authRoleQueryKey,
+    queryFn: fetchAuthRole,
+    enabled: supabaseReady,
+    retry: false
+  });
+  const connectionState: DeviceConnectionState = !supabaseReady
+    ? "setup-required"
+    : deviceConnectionGuard.shouldDiscardAuthenticatedSession
+      ? deviceConnectionGuard.cleanupError === null
+        ? "checking"
+        : "error"
+      : authRole.isLoading
+        ? "checking"
+        : authRole.error
+          ? "error"
+          : authRole.data?.signedIn === true && sessionGuarded
+            ? "error"
+            : authRole.data?.signedIn === true
+              ? "connected"
+              : "disconnected";
+  const operationsEnabled = connectionState === "connected";
 
   const purgeSession = useCallback(() => {
+    setSessionGuarded(true);
+    setAuthPrincipalId(null);
+    authPrincipalIdRef.current = null;
     if (sessionLostRef.current) {
       return;
     }
     sessionLostRef.current = true;
+    try {
+      supabase?.auth.stopAutoRefresh();
+    } catch {
+      // Query and mutation state still fail closed below.
+    }
+    try {
+      clearPersistedSupabaseSession();
+    } catch (error) {
+      blockDeviceConnectionCleanup(error);
+    }
     resetQueryCacheAfterSignOut(queryClient);
     setSessionBoundaryKey((current) => current + 1);
   }, [queryClient]);
 
   const markSessionActive = useCallback(() => {
     sessionLostRef.current = false;
+    setSessionGuarded(false);
   }, []);
 
   useEffect(() => {
@@ -37,13 +104,27 @@ function App() {
       return;
     }
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (shouldPurgeAuthSession(event, session)) {
+      const boundary = evaluateAuthSessionBoundary(authPrincipalIdRef.current, event, session);
+      authPrincipalIdRef.current = boundary.nextPrincipalId;
+      setAuthPrincipalId(boundary.nextPrincipalId);
+      if (session !== null && shouldDiscardPendingDeviceConnection()) {
         purgeSession();
         return;
       }
+      if (boundary.shouldPurgeSession) {
+        purgeSession();
+        return;
+      }
+      if (boundary.principalChanged) {
+        resetQueryCacheAfterPrincipalChange(queryClient);
+        setSessionBoundaryKey((current) => current + 1);
+      }
       markSessionActive();
-      if (event === "SIGNED_IN") {
-        void queryClient.invalidateQueries();
+      if (boundary.shouldRefreshQueries) {
+        void queryClient.invalidateQueries({
+          queryKey: authRoleQueryKey,
+          exact: true
+        });
       }
     });
     return () => subscription.unsubscribe();
@@ -67,6 +148,21 @@ function App() {
     });
   }, []);
 
+  useEffect(() => {
+    if (page !== "control" || connectionState === "checking" || connectionState === "connected") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("page", "settings");
+    window.history.replaceState(
+      { page: "settings" },
+      "",
+      `${url.pathname}${url.search}${url.hash}`
+    );
+    setPageState("settings");
+  }, [connectionState, page]);
+
   const preloadPage = useCallback((nextPage: PageKey) => {
     if (nextPage === "settings") {
       void importSettingsPage();
@@ -74,10 +170,25 @@ function App() {
   }, []);
 
   return (
-    <OperationsSnapshotProvider key={sessionBoundaryKey}>
+    <OperationsSnapshotProvider
+      key={sessionBoundaryKey}
+      enabled={operationsEnabled}
+      principalId={authPrincipalId}
+    >
       <SessionExpiryGuard onSessionActive={markSessionActive} onSessionLost={purgeSession} />
-      <AppLayout page={page} setPage={setPage} preloadPage={preloadPage}>
-        {page === "control" ? <ControlPage /> : null}
+      <AppLayout
+        page={page}
+        setPage={setPage}
+        preloadPage={preloadPage}
+        connectionState={connectionState}
+      >
+        {page === "control" && connectionState === "connected" ? <ControlPage /> : null}
+        {page === "control" && connectionState === "checking" ? (
+          <LoadingState label="저장된 기기 연결을 확인하는 중" />
+        ) : null}
+        {page === "control" && connectionState !== "connected" && connectionState !== "checking" ? (
+          <AuthRequiredState surface="운영 제어" />
+        ) : null}
         {page === "settings" ? (
           <LazySurfaceBoundary
             key="settings"

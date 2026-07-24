@@ -7,7 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from app.adapters.broker.contract_test_broker import ContractTestBroker
+from app.adapters.broker.contract_test_broker import (
+    ContractStatusOutcome,
+    ContractTestBroker,
+)
 from app.adapters.broker.toss_mock import TossMock
 from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernelV2
 from app.adapters.persistence.sql_repository import InMemoryRepository
@@ -707,6 +710,33 @@ async def test_contract_broker_progresses_open_partial_duplicate_to_terminal() -
     assert filled.raw_summary["cumulative_quantity"] == request.quantity
     assert broker.place_order_calls == 2
     assert broker.get_order_status_calls == 4
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status", "mismatched_identity"),
+    [
+        ("rejected", "rejected", False),
+        ("mismatched_identity", "sent", True),
+    ],
+)
+async def test_contract_broker_maps_terminal_and_identity_statuses_explicitly(
+    outcome: ContractStatusOutcome,
+    expected_status: str,
+    mismatched_identity: bool,
+) -> None:
+    broker = ContractTestBroker(["sent"], status_outcomes=[outcome])
+    created = await broker.place_order(_broker_request())
+    assert created.provider_order_id is not None
+
+    result = await broker.get_order_status(created.provider_order_id)
+
+    assert result.status == expected_status
+    expected_order_id = (
+        f"mismatch-{created.provider_order_id}"
+        if mismatched_identity
+        else created.provider_order_id
+    )
+    assert result.provider_order_id == expected_order_id
 
 
 async def test_contract_broker_cancel_lifecycle_is_idempotent() -> None:

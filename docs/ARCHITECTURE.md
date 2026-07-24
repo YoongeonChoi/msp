@@ -8,7 +8,8 @@ microservices.
 
 - `trading-worker`: bounded cycle, risk evaluation, intent reservation, Paper execution,
   reconciliation
-- `alert-dispatcher`: transactional outbox claim, retry, delivery receipt, dead letter
+- `alert-dispatcher`: transactional outbox claim, retry, authenticated receiver receipt,
+  dead letter
 - `warm-standby`: acquires the trading lease only after the previous lease expires
 - `external-monitor`: observes heartbeat, lease, outbox age and incident ACK from a separate
   failure domain
@@ -16,6 +17,12 @@ microservices.
 
 Only one trading-worker may hold the active lease. Horizontal execution is forbidden until
 the database fencing tests pass.
+
+Every Worker or dead-man webhook crosses an untrusted network boundary. The shared transport
+accepts only HTTPS and completes delivery only after the configured receiver proves a
+canonical HMAC ACK over the exact request, response, target, status, timestamp, and event
+identity. Main Worker and dead-man keys use separate environment namespaces. This transport
+proof is not human incident acknowledgement or independent immutable archive evidence.
 
 ## Database boundaries
 

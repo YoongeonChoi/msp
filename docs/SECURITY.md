@@ -70,6 +70,32 @@ production order endpoint or order-capable credential. The local
 `contract_test` simulator performs create/status/cancel qualification without
 network access and must never be described as an official sandbox.
 
+Toss authentication responses are identity-encoded and limited to 64 KiB;
+read responses are identity-encoded and limited to 4 MiB. The candle envelope,
+page, and item schemas reject unknown fields. Toss and candle-store JSON reject
+duplicate keys at every nesting level. The Worker-only candle append RPC also
+requires identity encoding and a response no larger than 64 KiB. Transport,
+schema, and canonicalization failures expose only fixed safe error codes, not
+provider bodies, tokens, credentials, or exception chains.
+
+The daily-candle collection job RPCs are service-role-only and expose no table
+CRUD. Private job rows use RLS, while attempt transitions are append-only. Begin
+binds the exact spec, revision, attempt, and holder while atomically assigning a
+fence; every later mutation also rebinds that fence. The default-disabled
+`RunDailyCandleCollectionJobOnce` boundary requires durable stores with the same
+non-secret service-origin/profile fingerprint, calls begin before provider I/O,
+and confirms a candidate fence before its single append. The public execution
+boundary also removes provider/store details and cancellation messages from
+escaping exception chains.
+It is not wired into a runtime, scheduler, command, Desktop, feature, strategy,
+or order path. The store cannot stop out-of-band I/O because the current provider
+and append ports do not carry the job fence.
+After a caller records those transitions, the job state has no TTL takeover or
+automatic restart for an in-flight, candidate-fenced, or unknown attempt.
+Completion is allowed only after PostgreSQL rechecks the exact observation
+occurrence and immutable content revision. A client-reported `inserted` flag is
+telemetry, not proof of durable identity.
+
 Provider contract artifacts record source URL, retrieval time, and SHA-256.
 Unknown or mismatched contracts block execution. OpenAI output has no direct or
 indirect trade execution authority and may create only reviewable research
@@ -81,9 +107,14 @@ candidates.
   and untracked.
 - Render owns Worker secrets. Desktop may contain only
   `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
-- Supabase secret/service keys and all provider secrets are Worker-only.
+- Supabase secret/service keys and all provider secrets are Worker-only. Store
+  authority fingerprints bind only a canonical origin and public adapter profile;
+  credentials are never fingerprint inputs.
 - Webhook secrets, account numbers, authorization headers, session tokens, and
   provider raw payloads are excluded from audit and outbox payloads.
+- Receiver ACK HMAC keys are server-only canonical base64 values decoding to exactly
+  32 bytes. Main Worker and dead-man current/previous key rings use separate secret
+  namespaces and are never available to the Desktop.
 - Logs, verifier errors, and CI scan output redact values and identify only the
   affected file or field class.
 
@@ -98,6 +129,18 @@ dedupe, and dead-letter handling. Consumers must deduplicate. Critical events
 create incidents and require human ACK within five minutes; the audit trail must
 distinguish delivery, human ACK, mitigation, and two-person closure.
 
+Webhook delivery succeeds only after an HTTPS receiver returns one unambiguous
+HMAC-SHA256 ACK bound to the exact serialized URL, request and response hashes,
+HTTP status, context, event identity, key ID, and timestamp. Redirects, unsigned or
+duplicate headers, unknown keys, stale first-attempt ACKs, and body/identity replay
+fail closed. A completion-write retry may reuse the exact cached ACK under a
+still-configured key: the current key, or the previous key during rotation
+overlap. Retired and unknown keys fail closed, and changing the item,
+destination, URL, or payload invalidates the ACK.
+This shared-key transport proof authenticates the configured receiver only. It is
+not a human ACK, non-repudiation proof, or evidence that an external immutable
+archive actually retained the event. Those hosted gates remain separate.
+
 ## CI and supply-chain controls
 
 GitHub Actions use `contents: read` by default. CodeQL may receive
@@ -111,6 +154,16 @@ Required checks cover Python/TypeScript lint, typecheck, tests and builds,
 Tauri/Rust checks, migration application, RLS/GRANT assertions, secret scanning,
 dependency review, CodeQL, and production-order network denial. Scanners report
 only masked findings and never print suspected secret values.
+
+The security workflow also verifies a deterministic lock-derived dependency
+inventory for npm, the Worker production lock, the pinned Python audit-tool
+closure, and Cargo. A separate unsigned CI receipt binds the canonical inventory
+digest and each regular-file Git blob to the exact checked-out commit. The job
+installs no project dependency package, persists no checkout credential, and
+references no application/deployment secret or OIDC, deploy, or order permission.
+This is a tamper/staleness control, not a standard SBOM, signature, artifact
+attestation, runtime inventory, or deployment authorization. Package-manager
+semantic compatibility remains enforced by the separate install/locked gates.
 
 ## Residual operational conditions
 

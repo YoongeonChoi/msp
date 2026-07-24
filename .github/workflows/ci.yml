@@ -97,9 +97,22 @@ jobs:
   migrations:
     name: migration apply and safety checks
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Test migration safety guards
+        run: >-
+          python -m unittest discover -s .github/scripts
+          -p 'test_migration_safety_guards.py' -v
+      - name: Block historical migration rewrites
+        env:
+          BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_REVISION: ${{ github.sha }}
+        run: >-
+          python .github/scripts/migration_history_guard.py
+          --base "$BASE_REVISION" --head "$HEAD_REVISION"
       - name: Check migration order and safety
         shell: bash
         run: |

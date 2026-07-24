@@ -224,7 +224,7 @@ function AccessChangePanelContent({
       setSubjectUserId("");
       setEvidenceId("");
       setNotice("권한 변경 요청이 접수되었습니다. 다른 플랫폼 관리자의 독립 검토 전에는 적용되지 않습니다.");
-      await queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey, exact: true });
+      await queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey });
     }
   });
 
@@ -284,7 +284,7 @@ function AccessChangePanelContent({
           : "권한 변경 거절 영수증이 확인되었습니다."
       );
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey, exact: true }),
+        queryClient.invalidateQueries({ queryKey: operationsSnapshotQueryKey }),
         queryClient.invalidateQueries({ queryKey: ["auth_role"] })
       ]);
     }
@@ -683,7 +683,7 @@ function accessMutationBlockedReason(
     return "기기가 오프라인이라 권한 요청을 전송할 수 없습니다.";
   }
   if (!snapshot.access.signed_in || snapshot.access.session_state !== "active") {
-    return "로그인 세션이 만료되었거나 확인되지 않았습니다.";
+    return "운영 세션이 만료되었거나 확인되지 않았습니다.";
   }
   if (snapshot.access.assurance_level !== "aal2") {
     return "2단계 인증을 완료한 뒤 다시 시도해 주세요.";

@@ -40,7 +40,7 @@ export function buildSafetyRailModel(
   if (snapshot === null) {
     return {
       items: [
-        item("live", "LIVE 잠금", "잠금 유지", "환경 확인 불가", "safe"),
+        item("live", "LIVE 잠금", "확인 불가", "환경·잠금 상태 확인 불가", "warning"),
         item("execution", "주문 생성", "확인 불가", "운영 상태 대기", "neutral"),
         item("overall", "전체 운영", isOnline ? "확인 불가" : "기기 오프라인", "최신 상태 없음", isOnline ? "warning" : "danger"),
         item("worker", "Worker", "확인 불가", "상태 신호 · 배포 버전 확인 불가", "warning"),
@@ -160,7 +160,7 @@ function evaluateTradingCommandGate(
     return { allowed: false, reason: "기기 오프라인" };
   }
   if (!access.signed_in) {
-    return { allowed: false, reason: "로그인 필요" };
+    return { allowed: false, reason: "기기 연결 필요" };
   }
   if (access.session_state !== "active" || health.overall_state === "session_expired") {
     return { allowed: false, reason: "세션 만료" };
@@ -280,7 +280,7 @@ function criticalAlerts(
     snapshot.access.session_state === "expired" ||
     snapshot.runtime_health.overall_state === "session_expired"
   ) {
-    messages.push("세션이 만료되었습니다. 다시 로그인해야 합니다.");
+    messages.push("운영 세션이 만료되었습니다. 이 기기를 다시 연결해야 합니다.");
   }
   if (
     snapshot.runtime_health.overall_state === "contract_error" ||

@@ -33,7 +33,7 @@ export function MfaSecurityPanel({ dataApi = mfaDataApi }: { readonly dataApi?: 
     return (
       <Panel>
         <SectionTitle title="운영 사용자 TOTP" />
-        <p className="text-sm text-amber-900">먼저 운영 계정으로 로그인하세요. 로그인만으로는 운영 변경 권한이 생기지 않습니다.</p>
+        <p className="text-sm text-amber-900">먼저 이 기기를 운영 계정에 연결하세요. 기기 연결만으로는 운영 변경 권한이 생기지 않습니다.</p>
       </Panel>
     );
   }

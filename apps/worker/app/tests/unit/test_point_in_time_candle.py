@@ -12,6 +12,26 @@ from app.domain.market_data.point_in_time import (
 )
 
 
+class AlwaysEqualText(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class PointInTimeCandleSubclass(PointInTimeCandleV1):
+    pass
+
+
+class CandleListSubclass(list[PointInTimeCandleV1]):
+    pass
+
+
+class CandleTupleSubclass(tuple[PointInTimeCandleV1, ...]):
+    pass
+
+
 def test_point_in_time_candle_round_trips_canonical_payload() -> None:
     candle = _candle()
 
@@ -31,10 +51,7 @@ def test_point_in_time_candle_hash_is_timezone_independent() -> None:
         observed_at=datetime(2026, 3, 25, 0, 0, 5, tzinfo=kst),
     )
 
-    assert (
-        kst_candle.canonical_observation_sha256
-        == utc_candle.canonical_observation_sha256
-    )
+    assert kst_candle.canonical_observation_sha256 == utc_candle.canonical_observation_sha256
     assert kst_candle.idempotency_key == utc_candle.idempotency_key
 
 
@@ -88,6 +105,10 @@ def test_point_in_time_candle_rejects_invalid_contract_identity() -> None:
         "point_in_time_candle_provider_contract_sha256_must_be_sha256_hex",
         lambda: _candle(provider_contract_sha256="A" * 64),
     )
+    _assert_rejected(
+        "point_in_time_candle_provider_is_invalid",
+        lambda: _candle(provider=AlwaysEqualText("toss")),
+    )
 
 
 def test_point_in_time_candle_rejects_time_invariants() -> None:
@@ -97,9 +118,7 @@ def test_point_in_time_candle_rejects_time_invariants() -> None:
     )
     _assert_rejected(
         "point_in_time_candle_observed_before_provider_event",
-        lambda: _candle(
-            observed_at=datetime(2026, 3, 24, 14, 59, 59, tzinfo=UTC)
-        ),
+        lambda: _candle(observed_at=datetime(2026, 3, 24, 14, 59, 59, tzinfo=UTC)),
     )
 
 
@@ -162,10 +181,7 @@ def test_point_in_time_candle_identity_includes_adjustment_mode() -> None:
     unadjusted = _candle(adjusted=False)
 
     assert adjusted.idempotency_key != unadjusted.idempotency_key
-    assert (
-        adjusted.canonical_observation_sha256
-        != unadjusted.canonical_observation_sha256
-    )
+    assert adjusted.canonical_observation_sha256 != unadjusted.canonical_observation_sha256
 
 
 def test_point_in_time_candle_identity_includes_provider() -> None:
@@ -173,17 +189,12 @@ def test_point_in_time_candle_identity_includes_provider() -> None:
     alternate = _candle(provider="alternate")
 
     assert toss.idempotency_key != alternate.idempotency_key
-    assert (
-        toss.canonical_observation_sha256
-        != alternate.canonical_observation_sha256
-    )
+    assert toss.canonical_observation_sha256 != alternate.canonical_observation_sha256
 
 
 def test_point_in_time_candle_detects_idempotency_conflict() -> None:
     original = _candle()
-    later_exact_replay = _candle(
-        observed_at=datetime(2026, 3, 24, 15, 5, tzinfo=UTC)
-    )
+    later_exact_replay = _candle(observed_at=datetime(2026, 3, 24, 15, 5, tzinfo=UTC))
     conflicting_replay = _candle(close_krw=72_100, high_krw=72_100)
     different_identity = _candle(
         provider_event_at=datetime(2026, 3, 25, 15, 0, tzinfo=UTC),
@@ -203,9 +214,7 @@ def test_point_in_time_candle_detects_idempotency_conflict() -> None:
 
 def test_point_in_time_candle_page_rejects_duplicate_identity() -> None:
     candle = _candle()
-    later_replay = _candle(
-        observed_at=datetime(2026, 3, 24, 15, 10, tzinfo=UTC)
-    )
+    later_replay = _candle(observed_at=datetime(2026, 3, 24, 15, 10, tzinfo=UTC))
 
     assert validate_point_in_time_candle_page([candle]) == (candle,)
     _assert_rejected(
@@ -216,6 +225,16 @@ def test_point_in_time_candle_page_rejects_duplicate_identity() -> None:
         "point_in_time_candle_page_item_is_invalid",
         lambda: validate_point_in_time_candle_page([object()]),
     )
+
+
+def test_point_in_time_candle_page_rejects_container_and_item_subclasses() -> None:
+    candle = _candle()
+    subclass = _candle_subclass(candle)
+
+    assert validate_point_in_time_candle_page((candle,)) == (candle,)
+    _assert_any_rejected(lambda: validate_point_in_time_candle_page(CandleListSubclass([candle])))
+    _assert_any_rejected(lambda: validate_point_in_time_candle_page(CandleTupleSubclass((candle,))))
+    _assert_any_rejected(lambda: validate_point_in_time_candle_page([subclass]))
 
 
 def _candle(
@@ -260,3 +279,34 @@ def _assert_rejected(expected: str, operation: Callable[[], object]) -> None:
         assert exc.safe_message == expected
     else:
         raise AssertionError(f"expected PointInTimeDataError: {expected}")
+
+
+def _assert_any_rejected(operation: Callable[[], object]) -> None:
+    try:
+        operation()
+    except PointInTimeDataError:
+        return
+    raise AssertionError("expected PointInTimeDataError")
+
+
+def _candle_subclass(
+    candle: PointInTimeCandleV1,
+) -> PointInTimeCandleSubclass:
+    return PointInTimeCandleSubclass(
+        provider=candle.provider,
+        symbol=candle.symbol,
+        market=candle.market,
+        interval=candle.interval,
+        adjusted=candle.adjusted,
+        provider_event_at=candle.provider_event_at,
+        observed_at=candle.observed_at,
+        currency=candle.currency,
+        open_krw=candle.open_krw,
+        high_krw=candle.high_krw,
+        low_krw=candle.low_krw,
+        close_krw=candle.close_krw,
+        volume=candle.volume,
+        provider_contract_sha256=candle.provider_contract_sha256,
+        canonical_observation_sha256=candle.canonical_observation_sha256,
+        schema_version=candle.schema_version,
+    )

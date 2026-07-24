@@ -29,6 +29,34 @@ from app.domain.common.errors import (
 from app.domain.common.time import KST
 
 
+class AlwaysEqualText(str):
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class TossCandleQuerySubclass(TossCandleQuery):
+    pass
+
+
+class DailyCandleReadRequestSubclass(DailyCandleReadRequest):
+    pass
+
+
+class TossCandlePageSubclass(TossCandlePage):
+    pass
+
+
+class TossCandleSubclass(TossCandle):
+    pass
+
+
+class TossCandleListSubclass(list[TossCandle]):
+    pass
+
+
 class FakeToss:
     def __init__(
         self,
@@ -237,10 +265,7 @@ async def test_toss_market_data_maps_open_calendar_after_fetch() -> None:
         tzinfo=KST,
     )
     assert evidence.observed_at == observed_at
-    assert (
-        evidence.provider_contract_sha256
-        == TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256
-    )
+    assert evidence.provider_contract_sha256 == TOSS_KR_MARKET_CALENDAR_OPENAPI_ARTIFACT_SHA256
     assert "is_final" not in evidence.to_payload()
 
 
@@ -281,9 +306,7 @@ async def test_toss_market_data_rejects_invalid_calendar_target_before_fetch() -
         ProviderSchemaError,
         match="toss_market_calendar_target_must_be_date",
     ):
-        await service.get_kr_daily_session_evidence(
-            cast(date, datetime(2026, 3, 25, tzinfo=UTC))
-        )
+        await service.get_kr_daily_session_evidence(cast(date, datetime(2026, 3, 25, tzinfo=UTC)))
 
     assert fake.calendar_queries == []
     assert fake.events == []
@@ -440,9 +463,7 @@ async def test_toss_market_data_maps_daily_candle_page_to_pit_contract() -> None
 
     service = TossMarketData(fake, clock=clock)
 
-    page = await service.get_daily_candles(
-        TossCandleQuery(symbol="005930", interval="1d", count=2)
-    )
+    page = await service.get_daily_candles(TossCandleQuery(symbol="005930", interval="1d", count=2))
 
     assert events == ["fetch", "clock"]
     assert page.observed_at == observed_at
@@ -458,10 +479,7 @@ async def test_toss_market_data_maps_daily_candle_page_to_pit_contract() -> None
     assert page.candles[0].close_krw == 72_000
     assert page.candles[0].volume == 3_521_000
     assert page.candles[0].observed_at == observed_at
-    assert (
-        page.candles[0].provider_contract_sha256
-        == TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256
-    )
+    assert page.candles[0].provider_contract_sha256 == TOSS_CANDLE_OPENAPI_ARTIFACT_SHA256
     assert len(page.candles[0].canonical_observation_sha256) == 64
     assert "is_complete" not in page.candles[0].to_payload()
 
@@ -508,6 +526,14 @@ async def test_toss_market_data_bridges_application_daily_candle_request() -> No
             before=datetime(2026, 3, 25, 0, 0),
         ),
         TossCandleQuery(symbol="005930", adjusted=cast(Any, 1)),
+        TossCandleQuery(
+            symbol="005930",
+            interval=cast(Any, AlwaysEqualText("1d")),
+        ),
+        TossCandleQuery(
+            symbol=cast(Any, AlwaysEqualText("005930")),
+            interval="1d",
+        ),
     ],
 )
 async def test_toss_market_data_rejects_invalid_daily_query_before_fetch(
@@ -521,6 +547,61 @@ async def test_toss_market_data_rejects_invalid_daily_query_before_fetch(
 
     assert fake.candle_queries == []
     assert fake.events == []
+
+
+async def test_toss_market_data_rejects_query_and_bridge_request_subclasses() -> None:
+    fake = FakeToss(candle_page=_candle_page())
+    service = TossMarketData(fake)
+
+    with pytest.raises(ProviderSchemaError):
+        await service.get_daily_candles(TossCandleQuerySubclass(symbol="005930", interval="1d"))
+    with pytest.raises(ProviderSchemaError):
+        await service.read_daily_candle_page(
+            DailyCandleReadRequestSubclass(
+                symbol="005930",
+                before=datetime(2026, 3, 25, 0, 0, tzinfo=UTC),
+                count=1,
+                adjusted=True,
+            )
+        )
+
+    assert fake.candle_queries == []
+    assert fake.events == []
+
+
+@pytest.mark.parametrize(
+    "page_case",
+    ["page_subclass", "list_subclass", "candle_subclass", "always_equal_text"],
+)
+async def test_toss_market_data_rejects_raw_response_subclasses(
+    page_case: str,
+) -> None:
+    if page_case == "page_subclass":
+        page: TossCandlePage = TossCandlePageSubclass(
+            candles=[_candle()],
+            nextBefore=None,
+        )
+    elif page_case == "list_subclass":
+        page = _candle_page(candles=[_candle()]).model_copy(
+            update={"candles": TossCandleListSubclass([_candle()])}
+        )
+    elif page_case == "candle_subclass":
+        subclass = TossCandleSubclass.model_validate(_candle().model_dump(by_alias=True))
+        page = _candle_page(candles=[_candle()]).model_copy(update={"candles": [subclass]})
+    else:
+        always_equal = _candle().model_copy(update={"currency": AlwaysEqualText("KRW")})
+        page = _candle_page(candles=[_candle()]).model_copy(update={"candles": [always_equal]})
+
+    fake = FakeToss(candle_page=page)
+    service = TossMarketData(
+        fake,
+        clock=lambda: datetime(2026, 3, 25, 0, 0, 5, tzinfo=UTC),
+    )
+
+    with pytest.raises(ProviderSchemaError):
+        await service.get_daily_candles(TossCandleQuery(symbol="005930", interval="1d", count=1))
+
+    assert len(fake.candle_queries) == 1
 
 
 @pytest.mark.parametrize(
@@ -597,9 +678,7 @@ async def test_toss_market_data_rejects_naive_observation_clock() -> None:
 
 
 async def test_toss_market_data_rejects_naive_next_before_cursor() -> None:
-    raw_page = _candle_page().model_copy(
-        update={"next_before": datetime(2026, 3, 24, 9, 0)}
-    )
+    raw_page = _candle_page().model_copy(update={"next_before": datetime(2026, 3, 24, 9, 0)})
     fake = FakeToss(candle_page=raw_page)
     service = TossMarketData(
         fake,
@@ -624,9 +703,7 @@ async def test_toss_market_data_rejects_page_larger_than_requested_count() -> No
         ProviderSchemaError,
         match="toss_candle_page_exceeds_requested_count",
     ):
-        await service.get_daily_candles(
-            TossCandleQuery(symbol="005930", count=1)
-        )
+        await service.get_daily_candles(TossCandleQuery(symbol="005930", count=1))
 
 
 async def test_toss_market_data_rejects_candle_after_before_cursor() -> None:
@@ -672,9 +749,7 @@ async def test_toss_market_data_rejects_next_cursor_after_query_cursor() -> None
 
 async def test_toss_market_data_rejects_unchanged_next_cursor() -> None:
     cursor = datetime(2026, 3, 24, 9, 0, tzinfo=KST)
-    raw_page = _candle_page(candles=[]).model_copy(
-        update={"next_before": cursor}
-    )
+    raw_page = _candle_page(candles=[]).model_copy(update={"next_before": cursor})
     fake = FakeToss(candle_page=raw_page)
     service = TossMarketData(
         fake,
@@ -685,15 +760,11 @@ async def test_toss_market_data_rejects_unchanged_next_cursor() -> None:
         ProviderSchemaError,
         match="toss_candle_next_before_not_progressing",
     ):
-        await service.get_daily_candles(
-            TossCandleQuery(symbol="005930", before=cursor)
-        )
+        await service.get_daily_candles(TossCandleQuery(symbol="005930", before=cursor))
 
 
 async def test_toss_market_data_rejects_next_cursor_after_oldest_candle() -> None:
-    raw_page = _candle_page(
-        candles=[_candle(timestamp="2026-03-24T09:00:00+09:00")]
-    ).model_copy(
+    raw_page = _candle_page(candles=[_candle(timestamp="2026-03-24T09:00:00+09:00")]).model_copy(
         update={"next_before": datetime(2026, 3, 25, 9, 0, tzinfo=KST)}
     )
     fake = FakeToss(candle_page=raw_page)

@@ -21,7 +21,223 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260715041909_operation_claim_fencing.sql`,
 `20260715041912_sell_cost_basis_checkpoint_guard.sql`,
 `20260715041915_paper_evidence_and_sell_reservation_guards.sql`, and
-`20260718165749_pgcrypto_schema_convergence.sql`.
+`20260718165749_pgcrypto_schema_convergence.sql`, followed by
+`20260719001947_pit_candle_revision_store.sql`,
+`20260719010000_pit_daily_candle_timing_store.sql`,
+`20260719020000_pit_source_observation_occurrence_store.sql`, and
+`20260719030000_pit_daily_candle_as_of_reader.sql`, followed by
+`20260719040000_pit_calendar_observation_store.sql`, and
+`20260719050000_pit_calendar_as_of_reader.sql`, followed by
+`20260719060000_kr_calendar_collection_job_store.sql`, followed by
+`20260719070000_kr_calendar_collection_job_conflict_boundary.sql`, followed by
+`20260719080000_kr_calendar_collection_job_inspection.sql`, followed by
+`20260719090000_pit_daily_candle_collection_job_store.sql`, followed by
+`20260723162000_desktop_operations_sensitive_projection_gate.sql`.
+
+After the Desktop sensitive-projection migration, run the complete
+`python supabase/verify_g1_g2_migration.py` verifier without
+`--skip-postgrest`. Confirm that every admitted AAL2 non-auditor role receives
+both `audit_events` and `reconciliation_cases` as exact empty arrays through
+direct PostgreSQL and PostgREST, while an AAL2 `auditor` receives both
+permissions and the exact known audit/reconciliation fixture. `anon` and
+`service_role` must remain unable to call the Desktop RPC. Do not treat the
+identifier-free reconciliation health state as auditor evidence; it remains
+part of minimum-status availability.
+
+After the occurrence migration, confirm its dedicated fresh and populated
+upgrade verifier passes. The upgrade can reconstruct original content
+observations and the latest retained candle-head observation only; it cannot
+invent intermediate unchanged observations that the previous schema discarded.
+Do not reinterpret an existing quarantined request key. Its durable receipt must
+remain stable, and a genuinely new observation requires a new request key.
+
+After the as-of reader migration, run its dedicated disposable-database
+verifier:
+
+```bash
+python supabase/verify_pit_daily_candle_as_of_reader.py
+```
+
+The RPC is a server-side `service_role` boundary for one exact provider/`KR`/
+six-digit symbol/`1d`/`adjusted` series, an inclusive date range of at most 366
+days, page size `25..100`, and no more than 1,000 raw candidates. It must remain
+unavailable to Desktop, `public`, authenticated clients, and Realtime. The read
+writes zero domain rows.
+
+Treat `evidence_available_at <= as_of` as reconstruction from durable source
+evidence retained when the read runs. Do not reinterpret it as
+`received_at <= as_of` or as proof of which rows had committed at that
+historical time. Multi-page reads must retain the same full raw-candidate
+manifest and PostgreSQL MVCC snapshot token. The cursor expires after 15
+minutes; on expiry, unresolved timeline ambiguity, corrupt binding, or manifest
+drift, discard the entire read and start a new one. Never splice pages or expose
+a partial selection. The Worker adapter performs this validation, buffers all
+pages, and invokes the existing selector exactly once.
+
+Treat the cursor as opaque within the trusted Worker-to-`worker_api` boundary.
+Direct `service_role` callers must replay the server-issued object verbatim;
+they must not rewrite its issuance time or any binding field. The official
+adapter pins first-page metadata and rejects such drift before exposing a
+result.
+
+This reader is not connected to collection, the runtime container, features,
+strategy, backtests, or orders. Its verifier does not establish completeness,
+authenticity, provider finality, corporate-action safety, DQ approval, feature
+readiness, Hosted Staging approval, or any Live authorization. Production Live
+remains not authorized.
+
+After the independent calendar observation migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_pit_calendar_observation_store.py
+```
+
+The RPC accepts one canonical open or closed KR session observation and remains
+available only to the server-side `service_role`. Confirm exact occurrence
+replay, later unchanged occurrence storage, correction revisions, durable
+quarantine, append-only ACLs, and serialization with the existing timing RPC.
+It is not a calendar completeness, provider-finality, DQ, dataset, feature,
+backtest, strategy, or order authorization boundary. The existing timing RPC
+also remains fail closed when a new request tries to bind an older calendar
+occurrence after the calendar stream head has advanced.
+
+After the bounded calendar as-of reader migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_pit_calendar_as_of_reader.py
+```
+
+The Worker-only RPC reads both open and closed sessions for one exact provider
+and the `KR` market. Keep every request within 366 inclusive calendar days,
+page size `25..100`, and 1,000 raw candidates. Keep the server-issued cursor
+opaque: it binds the query, complete ordered candidate manifest, and one MVCC
+snapshot for at most 15 minutes. The reader uses exact immutable occurrence and
+content-revision lineage, never a mutable stream head. The migration also
+converges shared calendar hash dates to explicit `YYYY-MM-DD`; a non-ISO
+session `DateStyle` must produce the same identities, items, and manifest.
+
+`observed_at <= as_of` is the only source-semantic cutoff. `received_at` is
+lineage and cannot reconstruct past database visibility. On cursor expiry,
+manifest drift, corrupt payload/hash/lineage, or any ambiguity in the full
+as-of-eligible retained timeline, discard every buffered page and expose no
+partial result. Also fail the whole read when a non-terminal page is shorter
+than the requested page size, continuation exceeds the declared candidate
+count, response encoding is not identity, or one RPC response exceeds 4 MiB.
+The read writes zero domain rows and
+is unavailable to Desktop, `public`, authenticated clients, and Realtime.
+
+This verifier does not approve collection, runtime-container or scheduler
+wiring, timing backfill, DQ, completeness, authenticity, provider finality,
+corporate-action handling, dataset/research/feature/backtest/strategy/order use,
+Hosted Staging, or Live. Production Live remains not authorized.
+
+After the durable manual calendar collection-job migration, run its dedicated
+disposable-database verifier:
+
+```bash
+python supabase/verify_kr_calendar_collection_job_store.py
+```
+
+The six Worker-only RPCs must remain service-role-only. Confirm reconnect
+durability, concurrent create/begin serialization, exact spec/revision/attempt/
+holder/target fencing, pause followed only by a new explicit manual attempt,
+blocked-attempt takeover denial, immutable calendar occurrence binding,
+canonical UTC timestamps, actual PostgREST `worker_api` profiles, bounded
+`PT409` stale-CAS completion, a fully completed 366-day job, terminal-manifest
+parity, response-size headroom, forced RLS, append-only attempt history, and zero
+writes to trading/order rows. Never add TTL takeover or automatic retry for an
+unresolved attempt.
+
+For `inspect_kr_calendar_collection_job_v1`, confirm valid missing and present
+job UUIDs return the exact `job_found`/`snapshot` envelope, invalid or non-v4
+UUIDs fail closed, and only `service_role` can execute it through the actual
+PostgREST `worker_api` profile. Compare the private job and attempt-ledger
+fingerprint before and after inspection of an existing job; for missing or
+invalid IDs, confirm the exact job/ledger counts and trading/order domain
+snapshot are unchanged.
+
+The durable mutation and inspector adapters are selected only by the separate
+calendar assessment and one-date execution entry points. They are not part of
+the normal runtime or scheduler. Both are false by default. The assessment
+requires a Worker-only Supabase credential bound to a canonical
+`https://<project>.supabase.co` origin. Execution additionally requires
+read-only Toss credentials, a stable UUIDv4 holder, the assessed exact spec
+SHA, and explicit operator confirmation.
+
+First review the exact canonical job fields and the current read-only assessment:
+
+- `missing`: confirm revision is absent, count is 0, and next date is the range start.
+- `ready`: confirm the exact revision, confirmed count, and next date.
+- `paused_retryable`: review the proven pre-write failure and confirm the same exact fields.
+- `paused_unrecognized`: investigate the unrecognized pause reason without retrying it.
+- `collecting`: investigate the in-flight attempt without retrying it.
+- `blocked_unknown`: reconcile the unknown write outcome without retrying it.
+- `completed`: no collection action is allowed.
+
+Obtain those exact values through the supported read-only command. It calls the
+inspector once, performs no mutation or Toss request, and emits `run_precondition`
+only for `missing`, `ready`, or `paused_retryable`:
+
+```powershell
+cd apps/worker
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+python -m app.tools.assess_kr_calendar_collection_job `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD
+```
+
+Review the returned spec SHA and every `run_precondition` field. Do not run the
+mutation command when `explicit_manual_invocation_candidate=false`.
+
+For a reviewed `missing` example, run one date only:
+
+```powershell
+cd apps/worker
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_HOLDER_ID="<stable-uuid-v4>"
+$env:MOCK_PROVIDERS="false"
+$env:TOSS_CREDENTIAL_SCOPE="read_only"
+$env:TOSS_ORDER_CAPABLE_CREDENTIALS="false"
+$env:TOSS_CLIENT_ID="<read-only-client-id>"
+$env:TOSS_CLIENT_SECRET="<read-only-client-secret>"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+python -m app.tools.run_kr_calendar_collection_job_once `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --expected-spec-sha256 <64-lowercase-hex> `
+  --expected-classification missing `
+  --expected-confirmed-count 0 `
+  --expected-next-date YYYY-MM-DD `
+  --confirm-one-date-spec-sha256 <same-64-lowercase-hex>
+```
+
+For `ready` or `paused_retryable`, also pass the reviewed
+`--expected-revision`. A paused retry additionally requires
+`--expected-state-reason collection_failed_before_write` and
+`--confirm-reviewed-paused-retryable-spec-sha256` with the same spec SHA.
+`paused_unrecognized` never emits a run precondition. The command reassesses
+once, then binds execution to the exact assessed state, reason, revision, count,
+and next date. Any drift fails before attempt creation and provider collection.
+Run the command again only after reviewing the new durable state; it never loops
+over the remaining range.
+
+These checks authorize only this one explicit date attempt. They do not approve
+automatic retry, TTL takeover, direct private-table repair, unresolved-write
+recovery, automatic backfill, dataset/DQ certification, research/feature/
+backtest/strategy/order use, Hosted Staging, or Production Live. A spec,
+assessment, snapshot, or adapter error after argument parsing returns only a
+fixed `FINAL=FAIL` line on stdout and exit code 1. Invalid or incomplete CLI
+arguments are rejected by `argparse` with usage/error text on stderr and exit
+code 2. Successful assessment or execution emits its documented evidence on
+stdout and exits with code 0.
 
 ## Start-of-day Paper checklist
 
@@ -105,6 +321,26 @@ row locking, leases, and recipient-side dedupe.
   outbox age, or incident ACK is stale.
 - Webhook secrets, account numbers, authorization data, and provider raw payloads
   never enter audit or outbox records.
+
+### Receiver ACK key rotation
+
+1. Generate a new random 32-byte key outside the repository and encode it as
+   canonical padded base64. Assign a new bounded key ID.
+2. Configure the receiver to accept both old and new IDs. Keep the old key active
+   while completion-write retries may still return an exact cached ACK.
+3. Move the old current ID/key to the matching `PREVIOUS` variables, place the new
+   pair in `CURRENT`, and restart only after the full pair passes startup validation.
+4. Confirm new deliveries are signed by the current ID and exact cached retries
+   signed by the previous ID still authenticate. An item, URL, destination, or
+   payload change must fail the cached ACK.
+5. After the maximum retry/dead-letter and incident investigation window has
+   elapsed with no old-key traffic, remove both previous variables together and
+   then remove the old key from the receiver.
+
+Never log or paste key values or raw key IDs. Bounded operational metrics may use
+only the configured slot label (`current` or `previous`), never the configured or
+receiver-provided ID itself.
+Do not treat a signed receiver ACK as human incident ACK or immutable archive proof.
 
 ## Paper execution investigation
 

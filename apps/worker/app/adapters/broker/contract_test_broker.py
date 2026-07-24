@@ -193,8 +193,14 @@ class ContractTestBroker:
         normalized: Literal["sent", "partial_filled", "filled", "rejected", "canceled"]
         if outcome in {"open", "mismatched_identity"}:
             normalized = "sent"
-        elif outcome in {"partial_filled", "filled", "rejected", "canceled"}:
-            normalized = outcome
+        elif outcome == "partial_filled":
+            normalized = "partial_filled"
+        elif outcome == "filled":
+            normalized = "filled"
+        elif outcome == "rejected":
+            normalized = "rejected"
+        elif outcome == "canceled":
+            normalized = "canceled"
         else:  # pragma: no cover - guarded by the exhaustive fault branches above
             raise ProviderSchemaError(
                 "contract_test",

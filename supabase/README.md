@@ -1,5 +1,35 @@
 # Supabase
 
+## PostgreSQL 17 pgcrypto replay preflight
+
+기존 migration 파일은 적용 이력과 checksum을 보존하기 위해 수정하지 않습니다.
+PostgreSQL 17에서 repository migration runner를 실행하기 직전에 승인된 DB owner
+session으로 `preflight/pgcrypto_replay_preflight.sql`을 먼저 실행합니다. 이 파일은
+numbered migration이 아니며 `supabase_migrations.schema_migrations`를 변경하지
+않습니다.
+
+preflight는 빈 DB의 pgcrypto 부재, replay 전 `public`, replay 전 `extensions`, 이미
+최종 convergence가 적용된 `extensions` 상태만 허용합니다. `extensions`에서 과거
+migration replay가 필요한 경우에는 owner/relocatable/ACL/caller/collision, 전체
+extension member OID, 그리고 PG17 `pgcrypto 1.3`의 exact 36-member
+signature/metadata contract를 검증한 뒤 transaction 안에서만 `public`으로
+staging합니다. extension이 없는 빈 DB도 `public` owner와 direct/inherited/`SET
+ROLE` reachable `CREATE`를 먼저 검사합니다.
+`20260718165749`가 최종적으로 extension을 다시 잠긴 `extensions` schema로
+수렴시킵니다. migration history 누락, retained DB의 extension 부재, catalog에서
+발견된 unsafe caller, 예상 밖 owner/schema/ACL/member contract는 변경 없이
+실패합니다.
+
+실행 전 Worker와 Desktop traffic을 중지하고 exact release SHA, target project ref,
+PostgreSQL version, `migration-checksums.v1.json`, preflight SHA-256 및 실행 출력을
+보존합니다. connection string, token, JWT, secret은 evidence에 포함하지 않습니다.
+외부 single-deployment mutex를 preflight부터 postflight까지 유지하고, preflight와
+실제 runner는 동일한 승인 role·immutable connection profile·persistent public-first
+기본 경로를 사용해야 합니다. `psql`과 runner는 별도 session이므로 actual runner의
+`current_user`/`current_schemas(false)` 시작 receipt가 없거나 session override를
+배제할 수 없으면 실행을 중단합니다.
+자세한 판정·실행·postflight 절차는 `docs/SUPABASE_SETUP.md`를 따릅니다.
+
 SQL migration 순서:
 
 1. `0001_schema.sql`
@@ -38,7 +68,18 @@ SQL migration 순서:
 34. `20260715041912_sell_cost_basis_checkpoint_guard.sql`
 35. `20260715041915_paper_evidence_and_sell_reservation_guards.sql`
 36. `20260718165749_pgcrypto_schema_convergence.sql`
-37. `seed.sql` (로컬 non-live 기본값만)
+37. `20260719001947_pit_candle_revision_store.sql`
+38. `20260719010000_pit_daily_candle_timing_store.sql`
+39. `20260719020000_pit_source_observation_occurrence_store.sql`
+40. `20260719030000_pit_daily_candle_as_of_reader.sql`
+41. `20260719040000_pit_calendar_observation_store.sql`
+42. `20260719050000_pit_calendar_as_of_reader.sql`
+43. `20260719060000_kr_calendar_collection_job_store.sql`
+44. `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`
+45. `20260719080000_kr_calendar_collection_job_inspection.sql`
+46. `20260719090000_pit_daily_candle_collection_job_store.sql`
+47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
+48. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -47,19 +88,34 @@ Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 s
 ```bash
 for f in supabase/migrations/*.sql; do echo "$f"; done
 rg "enable row level security" supabase/migrations/0002_rls.sql
+python .github/scripts/migration_history_guard.py --worktree
+python .github/scripts/repository_safety.py migrations
 python supabase/verify_live_enable_migration.py
 python supabase/verify_g1_g2_migration.py
+python supabase/verify_pit_candle_revision_store.py
+python supabase/verify_pit_daily_candle_timing_store.py
+python supabase/verify_pit_source_observation_occurrence_store.py
+python supabase/verify_pit_daily_candle_as_of_reader.py
+python supabase/verify_pit_calendar_observation_store.py
+python supabase/verify_pit_calendar_as_of_reader.py
+python supabase/verify_kr_calendar_collection_job_store.py
+python supabase/verify_pit_daily_candle_collection_job_store.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
 ```
 
-`verify_g1_g2_migration.py`가 현재 repository-local migration 검증 진입점입니다.
-Docker의 새 `postgres:16-alpine`에 `0001`부터
-`20260718165749_pgcrypto_schema_convergence.sql`까지 적용하는
-clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` 이후 전체를
-적용하는 upgrade 경로, 운영 row가 채워진 `0023` 상태에서 `0024` 이후 전체를
-적용하는 수렴 경로를 각각 검증합니다. clean-install 경로에서는 실제 PostgREST
+`verify_g1_g2_migration.py`가 전체 repository-local migration 검증 진입점입니다.
+실행 시 checksum/RLS repository safety와 `supabase/config.toml`의 PostgreSQL major를
+먼저 검증합니다. `--skip-postgrest`는 완전 PASS가 아니며 `FINAL=PARTIAL`과 exit 2를
+반환합니다.
+Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
+`extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
+`20260723162000_desktop_operations_sensitive_projection_gate.sql`까지 적용하는
+clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
+`public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
+전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail
+직후의 단계별 fail-closed 수렴을 검증합니다. clean-install 경로에서는 실제 PostgREST
 컨테이너도 실행해
 `anon`/`authenticated`/`service_role` RPC 경계를 확인합니다. 추가로 다음을
 검증합니다.
@@ -73,6 +129,8 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
   reclaim/complete/fail, attempt token ABA 차단, 최종 attempt crash dead letter
 - qualification 적용 시점·upgrade 재검증, 미해결 reconciliation break의 계정
   정지, reconciliation claim별 release/fencing token 재검증
+- Desktop snapshot의 auditor 전용 audit/reconciliation SELECT 차단, viewer의 exact
+  empty-array projection, auditor의 known evidence positive control
 - 50건을 넘는 reconciliation keyset drain과 signal-only Realtime publication
 - 검증되지 않은 시가를 원가/0으로 보정하지 않는 snapshot 계약
 - 기존 public order/position을 신규 private 원장에 합산하지 않는 upgrade 격리
@@ -91,6 +149,111 @@ clean-install 경로와, `0015`까지 데이터가 있는 상태에서 `0016` �
   fencing token에 결합되고 tokenless legacy overload가 fail-closed인지
 - 동일 완료 bar의 Paper fill이 하나의 series/source/volume evidence만 사용하고,
   계좌·종목별 active sell reservation이 하나만 존재하는지
+- PIT daily candle의 canonical Python/SQL hash, concurrent exact replay,
+  strictly-later correction revision, A→B→A·시각 역행 quarantine, append-only
+  evidence, service-role 전용 RPC 및 direct table 접근 차단
+- PIT calendar revision의 같은 시간·재발·시각 역행 quarantine, immutable candle/
+  calendar source row에 대한 timing exact binding, DB 재계산 availability/hash,
+  request retry/conflict, forged source 차단 및 invalid timing zero-write
+- PIT candle/calendar content와 observation occurrence 분리, 동일 content 후속
+  관측의 append-only 보존, timing의 exact occurrence FK, component-wise clock
+  monotonicity, populated exact backfill 및 concurrent occurrence convergence
+- bounded PIT daily-candle as-of read의 exact provider/`KR`/symbol/`1d`/`adjusted`
+  범위, 최대 366일·page size `25..100`·raw candidate 1,000건 제한,
+  service-role-only RPC, zero-write read, 15분 MVCC snapshot과 전체 raw-candidate
+  manifest, ambiguity·binding corruption·manifest drift fail-closed
+- bounded PIT KR calendar as-of read의 open/closed retained session, exact
+  provider/`KR`, 최대 366일·page size `25..100`·raw candidate 1,000건 제한,
+  immutable occurrence/revision lineage, service-role-only zero-write RPC,
+  15분 MVCC snapshot/manifest와 전체 timeline ambiguity fail-closed,
+  calendar hash date의 명시적 `YYYY-MM-DD` 수렴과 `DateStyle` 독립성
+- default-disabled 수동 KR calendar range job의 durable snapshot과 append-only
+  attempt ledger, exact revision/fencing CAS, blocked-attempt 무인 takeover 금지,
+  terminal manifest Python/SQL parity, service-role-only RPC와 zero-order-write
+
+`verify_pit_candle_revision_store.py`는 별도의 disposable PostgreSQL에서 위 PIT
+동작을 fresh install과 직전 migration까지 채워진 upgrade 경로로 재검증합니다.
+`verify_pit_daily_candle_timing_store.py`는 calendar revision과 timing binding을
+동일한 fresh/upgrade 경로에서 별도로 검증합니다.
+`verify_pit_source_observation_occurrence_store.py`는 content와 occurrence 분리,
+기존 timing의 exact backfill, 동일 content 후속 관측, exact occurrence binding과
+동시성 수렴을 검증합니다. 이 세 storage 검증은 제출된 evidence의 저장 계약만
+다룹니다. `verify_pit_daily_candle_as_of_reader.py`는 별도의 disposable
+PostgreSQL에서 fresh/upgrade 경로, exact RPC/grant 경계, bounded pagination,
+snapshot/manifest 일관성, concurrent writer, zero-write 및 기존 selector oracle의
+최종 결과 일치를 검증합니다. Worker adapter 자체는 별도 unit test로 검증합니다.
+`verify_pit_calendar_as_of_reader.py`는 별도의 disposable PostgreSQL에서
+fresh/upgrade 경로, open/closed 조회, exact immutable occurrence/content lineage,
+bounded pagination, 15분 snapshot/cursor/manifest, full as-of-eligible
+retained-timeline quarantine, ACL과 zero-write 계약을 검증합니다. 모든 page를
+검증·버퍼하기 전에 부분 결과를 노출하지 않고 non-terminal short page·과도한
+continuation·non-identity response encoding·4 MiB 초과 RPC 응답을 payload-free
+오류로 거부하는 Worker adapter 동작은 별도 unit test로 검증합니다.
+`verify_kr_calendar_collection_job_store.py`는 fresh/populated-upgrade PostgreSQL에서
+동시 create/begin, 재접속 복원, stale CAS, pause 후 새 수동 attempt, blocked 상태의
+takeover 금지, immutable calendar occurrence 결합, canonical UTC, forced RLS/ACL,
+append-only ledger와 zero-order-write를 검증합니다. fresh DB와 같은 disposable
+Docker network에 pinned `postgrest/postgrest:v12.2.8`을 연결하고 실제
+`Accept-Profile: worker_api`와 `Content-Profile: worker_api` 요청으로 다섯 mutation
+RPC의 singleton `[{"snapshot": ...}]` envelope와 read-only inspect RPC의
+`job_found`/`snapshot` envelope를 확인합니다. inspect는 valid missing/present UUID,
+invalid/non-v4 UUID 거부, service-role-only ACL과 호출 전후 job·attempt-ledger
+count가 같고 existing job 전체 fingerprint도 같은 zero-write를 검증합니다. token이
+없는 `anon`과 `authenticated`
+JWT는 거부되고 `service_role` JWT만 성공하며, 같은 service token도 `api`
+profile에서는 해당 Worker RPC를 호출할 수 없어야 합니다. 실제 HTTP 경로로
+load→begin→confirm, begin→pause→rebegin→block과 stale revision CAS의 bounded
+`PT409` safe error 및 zero-write를 검증합니다. 이 conflict boundary는 deterministic
+CAS rejection을 retryable PostgreSQL serialization failure로 노출하지 않고 state
+reload와 다음 명시적 operator 판단을 요구합니다.
+
+별도의 366일 job은 366개 immutable calendar occurrence를 만든 뒤 단일 local SQL
+batch에서 366개 begin/confirm을 순서대로 완료합니다. 최종 revision `733`, ledger
+`732`건, 날짜와 fencing revision이 연속인 checkpoint `366`개, Python/SQL terminal
+manifest parity를 확인하고, completed job을 실제 PostgREST로 다시 읽어 identity
+encoding raw 응답 크기와 4 MiB 제한까지 남은 headroom을 출력합니다. completed reload는
+snapshot과 ledger를 바꾸지 않아야 합니다. 이 durable adapter는
+runtime/container/scheduler에서 아직 선택되지 않습니다.
+
+별도 `KrCalendarCollectionRecoveryAssessmentService`는 유효한 요청에서 inspector를
+정확히 한 번 읽고 exact spec/spec SHA와 canonical snapshot을 다시 결합한 뒤
+missing/ready/paused_retryable/collecting/blocked_unknown/completed만 분류합니다. 상태별
+`recommended_operator_action`은 후속 검토 방향이며 mutation, retry, manual execution,
+manual recovery 또는 Production Live 권한이 아닙니다. collecting/blocked_unknown의
+write outcome은 unresolved로 유지됩니다. 이 서비스에 연결된 Supabase inspector
+adapter와 service-role-only RPC는 구현됐지만 recovery command, runtime/container
+selector, scheduler 또는 hosted operation 연결은 아직 없습니다.
+
+이 검증은 disposable PostgreSQL에 직접 연결한 PostgREST Data API 계약만 다룹니다.
+Supabase Gateway/Kong의 `apikey` 처리, hosted project 설정, 프록시 fault injection,
+모든 PostgREST 오류 코드 조합, 전체 DB digest, Hosted Staging 또는 Production Live
+준비 증거가 아닙니다. Production Live는 승인되지 않았습니다.
+
+`worker_api.list_pit_kr_daily_sessions_as_of_v1`의 `as_of` 의미는
+`occurrence.observed_at <= as_of`인 현재 보존 source evidence를 재구성하는
+것입니다. `received_at`은 immutable lineage이며 과거 DB transaction visibility를
+복원하지 못합니다. Reader는 mutable stream head를 source로 사용하지 않으며,
+cursor expiry, manifest drift, corrupt payload/hash/lineage 또는 전체
+as-of-eligible retained timeline의 unresolved quarantine이 있으면 부분 결과
+없이 fail closed합니다.
+
+`worker_api.list_pit_daily_candles_as_of_v1`의 `as_of` 의미는 현재 보존된 durable
+source evidence 중 `evidence_available_at <= as_of`인 후보를 재구성하는 것입니다.
+이는 `received_at <= as_of` 조건이나 과거 시점의 DB commit visibility를 뜻하지
+않습니다. 첫 페이지의 PostgreSQL MVCC token은 15분 동안 이후 페이지를 같은 현재
+snapshot에 결합하고, 전체 raw-candidate manifest는 page 누락·혼합을 차단합니다.
+Worker adapter는 모든 페이지를 검증·버퍼한 뒤 기존 selector를 정확히 한 번
+호출하며 부분 결과를 노출하지 않습니다. unresolved timeline ambiguity, corrupt
+content/occurrence/timing binding, cursor expiry 또는 manifest drift는 전체 조회를
+fail closed합니다.
+
+이 read RPC들은 server-side `service_role`에만 허용되고 Desktop, `public`,
+authenticated client, Realtime에는 노출되지 않으며 domain row를 쓰지 않습니다.
+reader port와 adapter는 collection, runtime container, scheduler, timing backfill,
+DQ, dataset, research, feature, strategy, backtest, order 경로에 연결되지 않았습니다.
+이 검증은 completeness, authenticity, provider finality, corporate-action safety,
+DQ/feature readiness, Hosted Staging 또는 Production Live 승인을 의미하지
+않습니다. Production Live는 승인되지 않았습니다.
 
 PostgREST image를 받을 수 없는 로컬 parser 디버깅에만
 `--skip-postgrest`를 사용할 수 있습니다. 이 옵션을 사용한 결과는 staging 승인

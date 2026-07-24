@@ -9,3 +9,4 @@ apps/worker/app/adapters/broker/** @choey
 supabase/migrations/** @choey
 render.yaml @choey
 .github/workflows/** @choey
+.github/rulesets/** @choey

@@ -49,6 +49,20 @@ async def test_default_runtime_routes_only_to_legacy_trading_loop(
     await main_module.async_main(settings)
 
     assert runtime.trading_loop.calls == 1
+    assert runtime.closed is True
+
+
+async def test_legacy_runtime_is_closed_when_loop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeLegacyRuntime(fail=True)
+    monkeypatch.setattr(main_module, "bootstrap", lambda _settings: runtime)
+
+    with pytest.raises(RuntimeError, match="legacy_loop_failed"):
+        await main_module.async_main(Settings(RUN_ONCE=True))
+
+    assert runtime.repository.recorded == 1
+    assert runtime.closed is True
 
 
 async def test_operations_runtime_is_closed_when_loop_fails(
@@ -88,16 +102,33 @@ class FakeOperationsRuntime:
 
 
 class FakeTradingLoop:
-    def __init__(self) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
         self.calls = 0
 
     async def run(self) -> None:
         self.calls += 1
+        if self.fail:
+            raise RuntimeError("legacy_loop_failed")
+
+
+class FakeRepository:
+    def __init__(self) -> None:
+        self.recorded = 0
+
+    async def record_engine_event(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        self.recorded += 1
 
 
 class FakeLegacyRuntime:
-    def __init__(self) -> None:
-        self.trading_loop = FakeTradingLoop()
+    def __init__(self, *, fail: bool = False) -> None:
+        self.trading_loop = FakeTradingLoop(fail=fail)
+        self.repository = FakeRepository()
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def _v2_settings() -> Settings:

@@ -160,13 +160,14 @@ Supabase 값을 비워 둔 경우 UI는 연결 설정 안내를 표시합니다.
 
 > Hosted staging에 아래 절차를 적용하는 작업은 별도 사용자 승인이 필요합니다. 기본 구현·검증은 disposable local PostgreSQL에서 수행합니다.
 
-1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 migration과 `seed.sql`을 순서대로 적용합니다.
+1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 PG17 pgcrypto preflight를 먼저
+   실행하고, checksum이 고정된 migration과 `seed.sql`을 순서대로 적용합니다.
 2. Supabase Auth TOTP를 켜고 서로 다른 운영 사용자 두 명 이상을 AAL2로 등록한 뒤 V2 역할을 UUID에 할당합니다.
 3. `apps/desktop/.env.local`에는 URL과 publishable key만 넣습니다.
 4. 별도 hosted-staging 승인을 받은 뒤에만 Worker에 서버용 URL과 secret key를
    제공하고 `EXECUTION_V2_ENABLED=true`, `EXECUTION_V2_WORKER_API_ENABLED=true`를
    함께 설정합니다. 기존 `USE_SUPABASE_REPOSITORY` 경로는 V2 원장이 아닙니다.
-5. Desktop의 **설정** 화면에서 개인 운영 계정으로 로그인하고 TOTP challenge를 완료합니다.
+5. Desktop의 **계정·보안** 화면에서 `이 기기 연결`을 한 번 완료하고 TOTP challenge를 진행합니다. 저장된 세션은 다음 실행부터 자동으로 복구되지만, 위험 작업의 AAL2 확인은 별도로 유지됩니다.
 
 ```dotenv
 # apps/desktop/.env.local — 공개 가능한 client 설정만
@@ -181,6 +182,11 @@ EXECUTION_V2_WORKER_API_ENABLED=true
 EXECUTION_V2_ENVIRONMENT=paper
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SECRET_KEY=<server-secret-key>
+ALERT_WEBHOOK_URL=https://<approved-receiver>/events
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID=<rotation-id>
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=<canonical-base64-32-byte-key>
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID=
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64=
 ```
 
 `seed_strategy_v1`, `seed_watchlist_demo`, `run_paper_cycle_once`는 legacy 연구
@@ -204,6 +210,9 @@ opening command, execution/cost evidence, worker lease를 갖춘 뒤에만 실�
 | `EXECUTION_V2_ENABLED` | Worker | V2 runtime을 명시적으로 구성했을 때만 `true` |
 | `EXECUTION_V2_ENVIRONMENT` | Worker | `paper` 또는 로컬 `contract_test` |
 | `EXECUTION_V2_WORKER_API_ENABLED` | Worker | migration/RPC 검증 후에만 `true` |
+| `ALERT_WEBHOOK_URL` | Worker | HTTPS-only approved receiver; ACK key와 함께 설정 |
+| `ALERT_WEBHOOK_RECEIVER_ACK_*` | Worker | current/previous 32-byte HMAC ACK keys; Desktop 금지 |
+| `DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_*` | 별도 dead-man | main Worker와 공유하지 않는 별도 HMAC ACK keys |
 | `VITE_SUPABASE_URL` | Desktop | Supabase project URL |
 | `VITE_SUPABASE_PUBLISHABLE_KEY` | Desktop | client publishable key |
 | `VITE_SUPABASE_REALTIME_DISABLED` | Desktop | `true`이면 polling 조회 전용; 모든 mutation 차단 |
@@ -279,6 +288,7 @@ npm run desktop:e2e
 Migration·repository safety:
 
 ```bash
+python .github/scripts/migration_history_guard.py --worktree
 python .github/scripts/repository_safety.py migrations
 python .github/scripts/repository_safety.py workflows
 python supabase/verify_g1_g2_migration.py
@@ -316,7 +326,7 @@ Render는 fencing qualification 전까지 Background Worker 한 개만 실행하
 
 ### Desktop에 `권한 필요`가 표시됨
 
-**Access & MFA** 화면에서 개인 Supabase Auth 계정으로 로그인하고 TOTP AAL2를
+**계정·보안** 화면에서 이 기기가 개인 Supabase Auth 계정에 연결됐고 TOTP AAL2를
 완료했는지, UUID에 필요한 V2 역할이 할당됐는지 확인하세요. 권한이 없는 mutation은
 안전하게 차단되어야 합니다.
 
@@ -358,6 +368,7 @@ V2 migration을 적용하고 Worker에 서버 전용 Supabase 설정과
 - [Backtesting Policy](docs/BACKTESTING_POLICY.md) · [AI Upgrade Policy](docs/AI_UPGRADE_POLICY.md)
 - [API Connections](docs/API_CONNECTIONS.md) · [API Gaps](docs/API_GAPS.md)
 - [Cost Limits](docs/COST_LIMITS.md) · [Observability](docs/OBSERVABILITY.md)
+- [Current QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md) · [Test Plan](docs/TEST_PLAN.md)
 
 ## 기여와 보안
 

@@ -72,9 +72,31 @@ py -m app.tools.run_execution_v2_operations
 py -m app.tools.run_execution_v2_operations --loop --interval-sec 30
 ```
 
-`ALERT_WEBHOOK_URL`이 없으면 outbox 항목은 전달 완료로 가장하지 않고 retryable
-failure로 기록됩니다. 현재 재구성에 필요한 bar/provider evidence source가 없으면
-reconciliation 항목은 `manual`로 격리합니다.
+로컬 환경에서 `ALERT_WEBHOOK_URL`이 없으면 outbox 항목은 전달 완료로 가장하지
+않고 retryable failure로 기록됩니다. `ENV=production|prod`에서는 URL과 current
+receiver ACK key가 모두 없더라도 startup이 중단됩니다. URL을 설정할 때는 HTTPS
+절대 URL과 다음 receiver ACK 설정을 함께 제공해야 하며, 하나라도 빠지거나 형식이
+틀리면 startup이 중단됩니다.
+
+```dotenv
+ALERT_WEBHOOK_URL=<https-receiver-url>
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID=receiver-2026-07
+ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=<canonical-base64-32-byte-key>
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID=
+ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64=
+```
+
+수신자는 정확한 POST URL, request/response SHA-256, status, context, identity,
+timestamp를 canonical HMAC-SHA256으로 서명해야 합니다. current/previous 키 회전을
+지원하지만 알 수 없는 키, unsigned ACK, 변조, redirect, stale first-attempt ACK는
+실패합니다. Outbox 재시도만 같은 요청의 오래된 cached ACK를 still-configured current
+key 또는 rotation overlap의 previous key에 한해 허용합니다. dead-man은
+별도 `DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_*` 키를 사용하고 매 요청에 새 transport ACK를
+서명해야 합니다. HMAC ACK는 사람의 incident ACK나 외부 immutable archive 증거가
+아닙니다.
+
+현재 재구성에 필요한 bar/provider evidence source가 없으면 reconciliation 항목은
+`manual`로 격리합니다.
 
 ## 명시적 Paper source 게시
 
@@ -141,6 +163,59 @@ py -m app.tools.resume_paper_execution_v2_once `
 boundary는 아직 없습니다. 운영자가 만든 hash는 파일 고정성만 증명하며 출처의
 진실성을 증명하지 않습니다. 따라서 이 도구는 제한형 수동 복구 경계이고,
 무인 production paper 실행 G1 완료 근거가 아닙니다.
+
+## KR 거래일 증거 한 날짜 수집
+
+`run_kr_calendar_collection_job_once`는 normal Worker나 scheduler와 분리된
+기본 비활성 명령입니다. 운영자가 read-only assessment의 exact spec SHA,
+classification, revision, confirmed count, next date, state reason을 검토한 뒤 한
+날짜만 수집합니다. `paused_retryable`에는 exact
+`collection_failed_before_write` reason과 별도 재시도 검토 확인이 필요합니다.
+
+먼저 mutation과 Toss 호출이 없는 assessment 명령으로 실행 입력을 얻습니다.
+
+```powershell
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+py -m app.tools.assess_kr_calendar_collection_job `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD
+```
+
+출력의 `explicit_manual_invocation_candidate`가 `true`일 때만
+`run_precondition`의 exact 값과 confirmation flag를 별도로 검토해 다음 명령에
+옮깁니다. `paused_unrecognized`, `collecting`, `blocked_unknown`, `completed`는
+실행 입력을 출력하지 않습니다.
+
+```powershell
+$env:KR_CALENDAR_COLLECTION_ASSESSMENT_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_MANUAL_EXECUTION_ENABLED="true"
+$env:KR_CALENDAR_COLLECTION_HOLDER_ID="<stable-uuid-v4>"
+$env:MOCK_PROVIDERS="false"
+$env:TOSS_CREDENTIAL_SCOPE="read_only"
+$env:TOSS_ORDER_CAPABLE_CREDENTIALS="false"
+$env:TOSS_CLIENT_ID="<read-only-client-id>"
+$env:TOSS_CLIENT_SECRET="<read-only-client-secret>"
+$env:SUPABASE_URL="https://<project>.supabase.co"
+$env:SUPABASE_SECRET_KEY="<worker-only-secret>"
+py -m app.tools.run_kr_calendar_collection_job_once `
+  --job-id <job-uuid-v4> `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --expected-spec-sha256 <canonical-spec-sha256> `
+  --expected-classification missing `
+  --expected-confirmed-count 0 `
+  --expected-next-date YYYY-MM-DD `
+  --confirm-one-date-spec-sha256 <same-canonical-spec-sha256>
+```
+
+한 번 실행한 뒤에는 새 durable 상태를 다시 검토해야 합니다. 이 명령은 loop,
+TTL takeover, unknown-write recovery, 자동 재시도, dataset/DQ 인증, feature,
+backtest, strategy, order 또는 Production Live 권한을 만들지 않습니다. exact
+운영 절차와 `ready`/`paused_retryable` 인자는
+[`docs/RUNBOOK.md`](../../docs/RUNBOOK.md)를 따릅니다.
 
 ## Historical/quarantined 도구
 

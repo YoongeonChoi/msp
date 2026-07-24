@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.application.services.dead_man_service import DeadManEvaluator, DeadManSnapshot
-from app.application.use_cases.run_dead_man_monitor import RunDeadManMonitor
+from app.application.use_cases.run_dead_man_monitor import (
+    DeadManAlertDeliveryError,
+    RunDeadManMonitor,
+)
 
 NOW = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
 EPISODE_ONE = "00000000-0000-4000-8000-000000000001"
@@ -50,9 +55,37 @@ async def test_snapshot_failure_uses_direct_monitor_source_alert() -> None:
 
     assert not result.source_available
     assert result.evaluation.reason_codes == ("monitor_source_unreachable",)
+    assert destination.events == [(EPISODE_ONE, "unhealthy", ("monitor_source_unreachable",))]
+
+
+async def test_stable_unhealthy_state_is_not_realerted_on_each_poll() -> None:
+    later = NOW + timedelta(seconds=10)
+    observed_times = iter((NOW, later))
+    source = SequenceSource(
+        (
+            _snapshot(observed_at=NOW, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=later, heartbeat_age=timedelta(minutes=6)),
+        )
+    )
+    destination = RecordingDestination()
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: next(observed_times),
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    first = await runner.run_once()
+    repeated = await runner.run_once()
+
+    assert first.alert_delivered
+    assert not repeated.alert_delivered
     assert destination.events == [
-        (EPISODE_ONE, "unhealthy", ("monitor_source_unreachable",))
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
     ]
+    assert destination.observed_times == [NOW]
 
 
 async def test_reason_changes_share_episode_and_recurrence_gets_new_episode() -> None:
@@ -95,6 +128,145 @@ async def test_reason_changes_share_episode_and_recurrence_gets_new_episode() ->
     ]
 
 
+async def test_failed_unhealthy_is_accepted_before_recovery_is_emitted() -> None:
+    source = SequenceSource((_snapshot(heartbeat_age=timedelta(minutes=6)), _snapshot()))
+    destination = FailingCallsDestination({1})
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: NOW,
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    with pytest.raises(
+        DeadManAlertDeliveryError,
+        match="dead_man_alert_delivery_failed",
+    ):
+        await runner.run_once()
+    healthy = await runner.run_once()
+
+    assert healthy.evaluation.healthy
+    assert healthy.alert_delivered
+    assert [event[1] for event in destination.events] == [
+        "unhealthy",
+        "unhealthy",
+        "recovered",
+    ]
+
+
+async def test_failed_unhealthy_delivery_retries_the_same_episode() -> None:
+    source = SequenceSource(
+        (
+            _snapshot(heartbeat_age=timedelta(minutes=6)),
+            _snapshot(heartbeat_age=timedelta(minutes=6), dead_letter_count=1),
+            _snapshot(),
+        )
+    )
+    destination = FailingCallsDestination({1})
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: NOW,
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    with pytest.raises(
+        DeadManAlertDeliveryError,
+        match="dead_man_alert_delivery_failed",
+    ):
+        await runner.run_once()
+    retry = await runner.run_once()
+    recovery = await runner.run_once()
+
+    assert retry.alert_delivered
+    assert recovery.alert_delivered
+    assert len(destination.events) == 4
+    assert all(event[0] == EPISODE_ONE for event in destination.events)
+    assert [event[1] for event in destination.events] == [
+        "unhealthy",
+        "unhealthy",
+        "unhealthy",
+        "recovered",
+    ]
+    assert destination.events[-1][2] == (
+        "worker_heartbeat_stale",
+        "delivery_outbox_dead_lettered",
+    )
+
+
+async def test_failed_stable_unhealthy_retries_only_the_original_observation() -> None:
+    later = NOW + timedelta(seconds=10)
+    latest = NOW + timedelta(seconds=20)
+    observed_times = iter((NOW, later, latest))
+    source = SequenceSource(
+        (
+            _snapshot(observed_at=NOW, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=later, heartbeat_age=timedelta(minutes=6)),
+            _snapshot(observed_at=latest, heartbeat_age=timedelta(minutes=6)),
+        )
+    )
+    destination = FailingCallsDestination({1})
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: next(observed_times),
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    with pytest.raises(
+        DeadManAlertDeliveryError,
+        match="dead_man_alert_delivery_failed",
+    ):
+        await runner.run_once()
+    retry = await runner.run_once()
+    stable = await runner.run_once()
+
+    assert retry.alert_delivered
+    assert not stable.alert_delivered
+    assert destination.events == [
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
+        (EPISODE_ONE, "unhealthy", ("worker_heartbeat_stale",)),
+    ]
+    assert destination.observed_times == [NOW, NOW]
+
+
+async def test_failed_recovery_delivery_keeps_episode_open_for_retry() -> None:
+    source = SequenceSource(
+        (_snapshot(heartbeat_age=timedelta(minutes=6)), _snapshot(), _snapshot())
+    )
+    destination = FailingCallsDestination({2})
+    runner = RunDeadManMonitor(
+        source,
+        destination,
+        DeadManEvaluator(),
+        account_id="paper-primary",
+        clock=lambda: NOW,
+        episode_id_factory=lambda: EPISODE_ONE,
+    )
+
+    await runner.run_once()
+    with pytest.raises(
+        DeadManAlertDeliveryError,
+        match="dead_man_alert_delivery_failed",
+    ):
+        await runner.run_once()
+    retry = await runner.run_once()
+
+    assert retry.alert_delivered
+    assert [event[1] for event in destination.events] == [
+        "unhealthy",
+        "recovered",
+        "recovered",
+    ]
+    assert all(event[0] == EPISODE_ONE for event in destination.events)
+
+
 class SequenceSource:
     def __init__(self, snapshots: tuple[DeadManSnapshot, ...]) -> None:
         self.snapshots = list(snapshots)
@@ -106,8 +278,9 @@ class SequenceSource:
         observed_at: datetime,
     ) -> DeadManSnapshot:
         assert account_id == "paper-primary"
-        assert observed_at == NOW
-        return self.snapshots.pop(0)
+        snapshot = self.snapshots.pop(0)
+        assert observed_at == snapshot.observed_at
+        return snapshot
 
 
 class FailingSource:
@@ -124,6 +297,7 @@ class FailingSource:
 class RecordingDestination:
     def __init__(self) -> None:
         self.events: list[tuple[str, str, tuple[str, ...]]] = []
+        self.observed_times: list[datetime] = []
 
     async def deliver_dead_man_alert(
         self,
@@ -135,27 +309,53 @@ class RecordingDestination:
         observed_at: datetime,
     ) -> None:
         assert account_id == "paper-primary"
-        assert observed_at == NOW
         self.events.append((episode_id, event, reason_codes))
+        self.observed_times.append(observed_at)
+
+
+class FailingCallsDestination(RecordingDestination):
+    def __init__(self, failing_calls: set[int]) -> None:
+        super().__init__()
+        self.failing_calls = failing_calls
+
+    async def deliver_dead_man_alert(
+        self,
+        *,
+        account_id: str,
+        episode_id: str,
+        event: str,
+        reason_codes: tuple[str, ...],
+        observed_at: datetime,
+    ) -> None:
+        await super().deliver_dead_man_alert(
+            account_id=account_id,
+            episode_id=episode_id,
+            event=event,
+            reason_codes=reason_codes,
+            observed_at=observed_at,
+        )
+        if len(self.events) in self.failing_calls:
+            raise RuntimeError("delivery failed")
 
 
 def _snapshot(
     *,
+    observed_at: datetime = NOW,
     heartbeat_age: timedelta = timedelta(seconds=1),
     dead_letter_count: int = 0,
 ) -> DeadManSnapshot:
     return DeadManSnapshot(
-        observed_at=NOW,
-        latest_heartbeat_at=NOW - heartbeat_age,
+        observed_at=observed_at,
+        latest_heartbeat_at=observed_at - heartbeat_age,
         latest_heartbeat_status="ok",
         latest_heartbeat_release_sha="a" * 40,
-        commands_last_completed_at=NOW - timedelta(seconds=1),
-        execution_last_completed_at=NOW - timedelta(seconds=1),
-        settlement_last_completed_at=NOW - timedelta(seconds=1),
-        reconciliation_last_completed_at=NOW - timedelta(seconds=1),
-        outbox_last_completed_at=NOW - timedelta(seconds=1),
+        commands_last_completed_at=observed_at - timedelta(seconds=1),
+        execution_last_completed_at=observed_at - timedelta(seconds=1),
+        settlement_last_completed_at=observed_at - timedelta(seconds=1),
+        reconciliation_last_completed_at=observed_at - timedelta(seconds=1),
+        outbox_last_completed_at=observed_at - timedelta(seconds=1),
         lease_holder_id="worker-a",
-        lease_expires_at=NOW + timedelta(minutes=1),
+        lease_expires_at=observed_at + timedelta(minutes=1),
         lease_release_sha="a" * 40,
         oldest_pending_outbox_at=None,
         dead_letter_count=dead_letter_count,

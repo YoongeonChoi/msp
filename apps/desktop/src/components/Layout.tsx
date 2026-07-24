@@ -3,25 +3,97 @@ import { LockKeyhole, ShieldCheck } from "lucide-react";
 import { getPageLabel, navItems } from "../lib/navigation";
 import type { PageKey } from "../lib/navigation";
 import { useOptionalOperationsSnapshot } from "../lib/operationsSnapshotContext";
+import { operationsErrorTitle } from "../lib/operationsData";
 import { OperationsStatusRail } from "./operations/OperationsStatusRail";
 import { formatOperationsRoles } from "../lib/presentation";
 import { Pill } from "./ui";
+
+export type DeviceConnectionState =
+  | "checking"
+  | "connected"
+  | "disconnected"
+  | "setup-required"
+  | "error";
+
+const connectionStateCopy: Record<
+  Exclude<DeviceConnectionState, "connected">,
+  { readonly account: string; readonly detail: string; readonly assurance: string }
+> = {
+  checking: {
+    account: "기기 연결 확인 중",
+    detail: "저장된 세션 확인 중",
+    assurance: "세션 확인 중"
+  },
+  disconnected: {
+    account: "기기 연결 필요",
+    detail: "운영 세션 없음",
+    assurance: "기기 연결 필요"
+  },
+  "setup-required": {
+    account: "연결 설정 필요",
+    detail: "환경 설정 확인 필요",
+    assurance: "연결 설정 필요"
+  },
+  error: {
+    account: "기기 연결 확인 불가",
+    detail: "계정 상태 다시 확인",
+    assurance: "인증 상태 확인 불가"
+  }
+};
 
 export function AppLayout({
   page,
   setPage,
   preloadPage,
+  connectionState,
   children
 }: {
   readonly page: PageKey;
   readonly setPage: (page: PageKey) => void;
   readonly preloadPage?: (page: PageKey) => void;
+  readonly connectionState: DeviceConnectionState;
   readonly children: React.ReactNode;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const snapshotContext = useOptionalOperationsSnapshot();
   const snapshot = snapshotContext?.snapshot;
   const actor = snapshot?.access.actor ?? null;
+  const disconnectedCopy = connectionState === "connected"
+    ? null
+    : connectionStateCopy[connectionState];
+  const accountLabel = actor?.display_name ?? (
+    disconnectedCopy?.account ?? (
+      snapshot === undefined
+        ? "이 기기 연결됨"
+        : snapshot.access.signed_in
+          ? "계정 정보 확인 불가"
+          : "기기 연결 필요"
+    )
+  );
+  const accountDetail = actor !== null
+    ? formatOperationsRoles(actor.roles)
+    : disconnectedCopy?.detail ?? (
+      snapshotContext?.isLoading === true
+        ? "운영 상태 확인 중"
+        : snapshot === undefined
+          ? snapshotContext?.error
+            ? operationsErrorTitle(snapshotContext.error)
+            : "운영 상태 대기"
+          : snapshot.access.signed_in
+            ? "역할 확인 불가"
+            : "운영 세션 없음"
+    );
+  const assuranceLabel = snapshot?.access.assurance_level === "aal2"
+    ? "2단계 인증"
+    : disconnectedCopy?.assurance ?? (
+      snapshotContext?.isLoading === true
+        ? "운영 권한 확인 중"
+        : snapshot === undefined
+          ? "운영 권한 확인 대기"
+          : snapshot.access.session_state === "active"
+            ? "2단계 인증 필요"
+            : "기기 재연결 필요"
+    );
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -68,14 +140,12 @@ export function AppLayout({
 
             <div className="flex min-w-0 items-center gap-2 text-right">
               <div className="hidden min-w-0 lg:block">
-                <p className="max-w-56 truncate text-sm font-semibold">{actor?.display_name ?? "로그인 확인 중"}</p>
-                <p className="max-w-56 truncate text-xs text-mutedStrong">
-                  {actor === null || actor === undefined ? "역할 확인 불가" : formatOperationsRoles(actor.roles)}
-                </p>
+                <p className="max-w-56 truncate text-sm font-semibold">{accountLabel}</p>
+                <p className="max-w-56 truncate text-xs text-mutedStrong">{accountDetail}</p>
               </div>
               <Pill tone={snapshot?.access.assurance_level === "aal2" ? "safe" : "warning"}>
                 <LockKeyhole size={13} aria-hidden="true" />
-                {snapshot?.access.assurance_level === "aal2" ? "2단계 인증" : "추가 인증 필요"}
+                {assuranceLabel}
               </Pill>
             </div>
           </div>

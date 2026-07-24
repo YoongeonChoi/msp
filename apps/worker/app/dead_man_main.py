@@ -26,6 +26,7 @@ async def async_main(settings: DeadManSettings | None = None) -> None:
     source = SupabaseDeadManSource(resolved_settings)
     destination = DeadManWebhookDestination(
         resolved_settings.alert_webhook_url.get_secret_value(),
+        key_ring=resolved_settings.receiver_ack_key_ring(),
         timeout_sec=resolved_settings.request_timeout_sec,
     )
     runner = RunDeadManMonitor(
@@ -44,8 +45,10 @@ async def async_main(settings: DeadManSettings | None = None) -> None:
         logger.exception("dead_man_monitor_failed")
         raise
     finally:
-        await source.close()
-        await destination.close()
+        try:
+            await source.close()
+        finally:
+            await destination.close()
 
 
 def main() -> None:

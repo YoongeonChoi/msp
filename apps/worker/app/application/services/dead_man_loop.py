@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import asyncio
 
-from app.application.use_cases.run_dead_man_monitor import RunDeadManMonitor
+import structlog
+
+from app.application.use_cases.run_dead_man_monitor import (
+    DeadManAlertDeliveryError,
+    RunDeadManMonitor,
+)
 from app.infrastructure.graceful_shutdown import ShutdownFlag
+
+logger = structlog.get_logger()
 
 
 class DeadManMonitorLoop:
@@ -22,7 +29,10 @@ class DeadManMonitorLoop:
 
     async def run(self) -> None:
         while not self.shutdown.requested:
-            await self.run_monitor.run_once()
+            try:
+                await self.run_monitor.run_once()
+            except DeadManAlertDeliveryError:
+                logger.warning("dead_man_alert_delivery_failed")
             if self.shutdown.requested:
                 return
             await asyncio.sleep(self.interval_sec)

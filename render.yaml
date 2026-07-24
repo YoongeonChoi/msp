@@ -6,8 +6,8 @@ services:
     plan: starter
     branch: main
     rootDir: apps/worker
-    buildCommand: python -m app.tools.write_release_metadata && python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
-    startCommand: python -m app.main
+    buildCommand: 'python -m app.tools.write_release_metadata && python -m pip install --require-hashes --only-binary=:all: -r requirements.lock'
+    startCommand: 'python -m app.main'
     autoDeployTrigger: "off"
     numInstances: 1
     maxShutdownDelaySeconds: 120
@@ -59,6 +59,14 @@ services:
       - key: OPENAI_MODEL
         value: gpt-5.5
       - key: ALERT_WEBHOOK_URL
+        sync: false
+      - key: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID
+        sync: false
+      - key: ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64
+        sync: false
+      - key: ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID
+        sync: false
+      - key: ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64
         sync: false
       - key: ALERT_WEBHOOK_TIMEOUT_SEC
         value: "5"

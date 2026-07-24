@@ -11,6 +11,8 @@ from app.infrastructure.secrets_redaction import redact_mapping
 
 def configure_logging() -> None:
     logging.basicConfig(format="%(message)s", level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

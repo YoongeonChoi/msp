@@ -27,6 +27,7 @@ const unknownSnapshot = makeRequestedUnknownResolutionSnapshot();
 const genericCalls: string[] = [];
 const unknownGrants: UnknownResolutionStepUpRequestV2[] = [];
 const reviews: UnknownResolutionReviewV2[] = [];
+let unknownFetches = 0;
 const operationsApi: OperationsDataApi = {
   fetchSnapshot: async () => operationsSnapshot,
   issueStepUpGrant: async () => {
@@ -50,7 +51,10 @@ const operationsApi: OperationsDataApi = {
   })
 };
 const unknownApi: UnknownResolutionDataApi = {
-  fetchSnapshot: async () => unknownSnapshot,
+  fetchSnapshot: async () => {
+    unknownFetches += 1;
+    return unknownSnapshot;
+  },
   issueStepUpGrant: async (input) => {
     unknownGrants.push(input);
     return {
@@ -111,6 +115,9 @@ const rendered = render(
 );
 
 await waitFor(() => container.textContent?.includes("지금 확인할 항목") === true);
+await waitFor(() =>
+  unknownFetches === 1 && container.textContent?.includes("005930 매수 상태 확인") === true
+);
 await act(async () => buttonByText(dom, container, "독립 검토").click());
 await waitFor(() => container.textContent?.includes("위험 승인자 독립 검토") === true);
 assert.match(container.textContent ?? "", /요청 요약 해시, 증거 SHA, 최종 주문 상태와 모든 누락 체결을 검토/);
