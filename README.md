@@ -2,104 +2,329 @@
 
 [![CI](https://github.com/YoongeonChoi/msp/actions/workflows/ci.yml/badge.svg)](https://github.com/YoongeonChoi/msp/actions/workflows/ci.yml)
 [![Security](https://github.com/YoongeonChoi/msp/actions/workflows/security.yml/badge.svg)](https://github.com/YoongeonChoi/msp/actions/workflows/security.yml)
+[![Migration Check](https://github.com/YoongeonChoi/msp/actions/workflows/migration-check.yml/badge.svg)](https://github.com/YoongeonChoi/msp/actions/workflows/migration-check.yml)
 
-한국 국내 주식의 데이터 수집, 전략 연구, Paper Trading, 위험 통제, 운영 감사를 한곳에서 다루는 **paper-first 자동매매 연구·제어 시스템**입니다.
+**한국 주식 전략 연구를 안전한 Paper 실행, 복식부기 원장, 운영 승인과 감사까지 연결하는 NO-LIVE 제어 시스템입니다.**
 
-수익률보다 안전성, 재현성, 설명 가능성, 관측 가능성을 우선합니다. Desktop은 주문 엔진이 아니라 Supabase RLS를 통과한 control plane이며, broker 주문 경로는 Python Worker만 소유합니다.
+단순히 매수·매도 신호를 만드는 데서 끝나지 않습니다. 어떤 데이터와 전략 버전으로 결정했는지 기록하고, 주문 전후의 위험 조건을 다시 확인하며, 프로세스가 중단돼도 중복 실행 없이 복구할 수 있는지를 시스템 전체에서 다룹니다.
 
 > [!WARNING]
-> 이 프로젝트는 투자 자문이나 수익을 보장하는 제품이 아닙니다. G1+G2 릴리스는 내부 전용 `paper`와 로컬 `contract_test`만 지원합니다. 기본값은 `enabled=false`, `mode=paper`, `live_order_allowed=false`이며 Production Live 주문은 UI·DB·설정·네트워크에서 금지됩니다.
+> 이 저장소는 투자 자문, 수익 보장 상품, 고객 자산 운용 서비스가 아닙니다. 현재 지원 환경은 내부 `paper`와 로컬 zero-network `contract_test`뿐입니다. 현재 배포 설정, Execution V2 환경 타입, 데이터베이스 migration 계약, Toss network adapter와 Desktop command surface는 Production Live 주문을 허용하지 않습니다. 회귀·drill용 legacy 모델 일부는 live 형태의 상태를 표현하지만 production order network path로 연결되지 않습니다.
 
-## 현재 상태
+## 왜 만들었나
 
-| 영역 | 제공 기능 | 상태 |
-| --- | --- | --- |
-| Worker | 상시 trading cycle, provider health, heartbeat | 구현 |
-| 전략 | 가중치 기반 점수, 결정 근거 snapshot, draft/승인 경계 | 구현 |
-| Paper Trading V2 | 영속 계좌, 결정론적 부분체결, 예약, 복식부기 원장, 재시작 복구 커널 | 로컬 구현·검증 단계 |
-| 주문 안전 | lease/fencing, `control_epoch`, semantic dedupe, 현금·수량 원자 예약 | 로컬 구현·검증 단계 |
-| Desktop | 운영 상태, 명령/ACK, 승인함, incident, stale/offline 차단, 수동 reconciliation | 로컬 구현·검증 단계 |
-| 운영 통제 | MFA/RBAC, maker/checker, append-only audit, transactional outbox | 로컬 구현·검증 단계 |
-| Supabase | `private` 원장, 최소 `api` projection, Worker 전용 `worker_api` RPC | migration 검증 단계 |
-| 실주문 | Production order write 경로와 credential | 금지 (`NO-LIVE`) |
+자동매매 예제는 대개 신호와 API 호출의 정상 경로만 보여 줍니다. 실제 운영에서는 그보다 다음 질문이 더 어렵습니다.
 
-현재 승인 범위와 남은 제한은 [G0 운영 경계](docs/G0_OPERATING_BOUNDARY.md), [기업 프로그램 계획](docs/ENTERPRISE_PROGRAM_PLAN.md), [ADR-0007](docs/00_DECISIONS/ADR-0007-execution-safety-kernel.md), [실행 정책](docs/EXECUTION_POLICY.md)에서 확인할 수 있습니다. 과거 Live readiness 문서는 추적성만을 위해 보존되며 현재 운영 또는 승인 기준이 아닙니다.
+- 같은 신호가 재시도됐을 때 주문이 두 번 생성되지 않는가?
+- 오래된 Worker가 lease를 잃은 뒤에도 상태를 변경할 수 없는가?
+- 부분체결과 수수료·세금이 원장과 포지션에 정확히 반영되는가?
+- 데이터가 나중에 정정돼도 당시 알 수 있었던 정보만 재현할 수 있는가?
+- 운영자가 요청·승인·Worker ACK·실제 postcondition을 구분할 수 있는가?
+- 정보가 누락되거나 서로 충돌할 때 시스템이 추측하지 않고 멈추는가?
 
-사업·규제·원장·데이터·운영을 함께 다루는 다음 단계의 실행 기준은
-[Enterprise Trading Program Plan](docs/ENTERPRISE_PROGRAM_PLAN.md)입니다. 이 계획은
-숫자형 준비도와 별도로 binary stage gate를 적용하며, 현재 live 상태를 `NO-GO`로
-판정합니다.
+KR Auto Trading Lab은 이 질문을 **fail-closed 불변식과 검증 가능한 증거**로 풀기 위한 모듈러 모놀리스입니다. 수익률보다 안전성, 재현성, 설명 가능성, 관측 가능성을 우선합니다.
 
-## 주요 특징
+## 누구를 위한 프로젝트인가
 
-- **Fail-closed 위험 통제**: 설정, market, quote freshness, provider health, account sync, 현금, 보유수량, 종목·섹터 노출, 일일 손실·주문 수, 중복·cooldown을 `RiskService`에서 평가합니다.
-- **Paper Truth 실행**: Paper mode는 결정론적 1분 bar 체결, 현금·수량 예약, 부분체결·만료, 균형 복식부기와 idempotent replay를 사용합니다.
-- **설명 가능한 결정**: component score, feature snapshot, strategy version, risk 결과를 하나의 decision snapshot으로 보존합니다.
-- **운영자 중심 Cockpit**: heartbeat/lease/release/ledger checkpoint, 요청·승인·Worker ACK·postcondition, incident와 stale/offline 경계를 한국어 UI로 제공합니다.
-- **AI와 주문의 분리**: OpenAI는 연구·분류·후보 제안에만 사용하며, 출력이 주문 실행이나 live 전략 승격으로 연결되지 않습니다.
-- **최소 권한 데이터 경계**: Desktop은 publishable key와 AAL2 역할 세션만 사용하고, Worker는 검토된 `worker_api` RPC만 호출합니다.
-- **수동 배포 원칙**: Render 자동 배포는 꺼져 있으며, hosted staging 적용도 별도 사용자 승인 전에는 수행하지 않습니다.
+- 한국 주식 Paper Trading 인프라를 연구하는 개발자
+- 전략 결과와 실행·회계 결과를 분리해 검토하려는 퀀트 연구자
+- maker/checker, incident, reconciliation 흐름을 설계하는 리스크·운영 검토자
+- Python, PostgreSQL, Supabase, React/Tauri를 하나의 E2E 시스템으로 학습하려는 엔지니어
 
-## 아키텍처
+현재 범위는 일반 투자자용 완전 자동매매 앱, 다계정 SaaS, 공식 broker sandbox, 실주문 시스템이 아닙니다.
+
+## 현재 지원 범위
+
+| 영역          | 현재 제공하는 것                                                   | 명시적 한계                                               |
+| ------------- | ------------------------------------------------------------------ | --------------------------------------------------------- |
+| 실행 환경     | `paper`, 로컬 `contract_test`                                      | Production Live 없음                                      |
+| 안전 기본값   | `enabled=false`, `mode=paper`, `live_order_allowed=false`          | 누락된 설정을 자동 보정하지 않음                          |
+| 전략          | 설명 가능한 5-factor reference heuristic                           | 검증된 알파·예측 확률이 아님                              |
+| Paper V2      | LIMIT/DAY, 정수 주식, 부분체결·만료, 비용, 복식부기                | MARKET, IOC/FOK, modify, short, margin 없음               |
+| 데이터        | PIT candle/calendar revision, occurrence, as-of reader, quarantine | 공식 completeness·authenticity·corporate-action 인증 없음 |
+| Control plane | Supabase RLS, 좁은 `api` projection/RPC, Worker 전용 `worker_api`  | hosted 운영 증거는 아직 없음                              |
+| Desktop       | 상태, 승인, incident, reconciliation, MFA/접근 관리                | signed packaged artifact 없음                             |
+| Broker        | Toss 계좌·가격·candle·calendar 등 read-only 경계                   | create/cancel/modify 네트워크 write 없음                  |
+| AI            | 뉴스 분류와 연구 후보 제안                                         | 주문 실행·전략 승격 권한 없음                             |
+| 배포          | 수동 Render Background Worker blueprint                            | 실제 배포 완료를 의미하지 않음                            |
+
+기업 운영 stage gate는 숫자형 QA와 별개입니다. 현재 `G0`, `G1`, `G2`는 모두 `FAIL`이며 Production Live는 `NO-GO`입니다. 판정 근거는 [G0 Operating Boundary](docs/G0_OPERATING_BOUNDARY.md)와 [Enterprise Trading Program Plan](docs/ENTERPRISE_PROGRAM_PLAN.md)에 있습니다.
+
+## End-to-End 설계와 현재 연결 상태
+
+```mermaid
+flowchart LR
+    Provider["Read-only providers"] -->|"default-off one-shot"| Collector["명시적 수집 경계"]
+    Collector --> PIT["PIT candle / calendar evidence"]
+    PIT -.-> Research["Explicit research assembly<br/>(not runtime-wired)"]
+    Research -.-> Candidate["Reviewed execution candidate<br/>(no automatic promotion)"]
+    Candidate --> Decision["Versioned decision evidence"]
+    Decision --> Risk["RiskService policy conjunction"]
+    Risk --> Reserve["DB reserve + semantic dedupe"]
+    Reserve --> Simulator["Paper or zero-network contract_test"]
+    Simulator --> Observation["Immutable observation"]
+    Observation --> Ledger["Balanced ledger + projection"]
+    Ledger --> API["Data-minimized api projection"]
+    API --> Desktop["Tauri operations cockpit"]
+    Desktop --> Command["Request · review · step-up"]
+    Command --> Worker["Lease-bound Worker claim"]
+    Worker --> Ack["ACK + runtime postcondition"]
+    Ack --> API
+    Ledger --> Outbox["Transactional outbox"]
+    Outbox --> Receiver["Authenticated HTTPS receiver"]
+```
+
+실선은 구현된 경계 사이의 연결을, 점선은 명시적으로 호출할 수 있지만 정상 runtime·scheduler에는 자동 연결되지 않은 구간을 뜻합니다. 각 trust boundary는 권한을 다시 검증하고 다음 구성요소에 필요한 최소 권한만 전달합니다.
+
+1. Provider adapter는 검토된 read 작업만 수행합니다.
+2. 연구 점수는 주문 권한이 아니라 decision evidence입니다.
+3. `RiskService` 결과만으로도 충분하지 않습니다. DB가 lease, fencing token, `control_epoch`, 자원과 중복 조건을 원자적으로 다시 확인합니다.
+4. Paper 또는 zero-network `contract_test`에서 검증된 execution observation만 accounting transaction으로 연결됩니다.
+5. Desktop은 broker를 호출하거나 원장 테이블을 직접 수정하지 않습니다.
+6. 요청·승인·claim·ACK·postcondition은 서로 다른 상태이며 마지막 조건 전에는 완료로 표시하지 않습니다.
+
+## 시스템 구조와 선택 이유
 
 ```text
-Tauri + React Desktop Cockpit
-        │  publishable key + AAL2 role session
-        ▼
-Supabase Auth / api projections + operation RPC
-        │
-        ▼
-private ledger/control source of truth
-        ▲
-        │  worker_api RPC allowlist
-        │
-Python Render Background Worker
-  ├─ Application: cycle, risk, execution kernel, reconciliation
-  ├─ Domain: entities, policies, value objects
-  ├─ Adapters: deterministic Paper, local contract_test, read-only providers
-  └─ Infrastructure: logging, metrics, redaction, shutdown
+apps/worker/      Python application/domain/port/adapter trading engine
+apps/desktop/     Tauri 2 + React + Vite operations cockpit
+packages/shared/  UI-facing TypeScript schemas
+supabase/         PostgreSQL migrations, RLS, RPC, Realtime, seed
+docs/             Architecture, policy, runbook, QA, decision records
+.github/          CI, security, dependency and migration guards
+render.yaml       Manual-deploy Background Worker blueprint
 ```
 
-핵심 trust boundary는 다음과 같습니다.
+### Python Worker
 
-1. Desktop은 broker API를 호출하지 않습니다.
-2. `ExecutionService`만 execution adapter의 create operation을 호출할 수 있습니다.
-3. intent 예약과 dispatch 직전에 risk/control/lease/fencing 조건을 다시 확인합니다.
-4. 실제 Toss는 read-only이며, 주문 lifecycle은 네트워크 없는 `contract_test`에서만 검증합니다.
+거래 cycle, 위험 평가, Paper 체결, reconciliation과 outbox를 서버 측 한 프로세스에 둡니다. Ports and Adapters 경계를 사용해 domain 규칙이 Supabase, Toss, OpenDART, OpenAI 같은 외부 시스템에 직접 의존하지 않도록 했습니다.
 
-자세한 구성은 [Architecture](docs/ARCHITECTURE.md)와 [Context Map](docs/CONTEXT_MAP.md)을 참고하세요.
+### Supabase와 PostgreSQL
 
-## 사전 요구사항
+원자 예약, idempotency, 불변 원장과 maker/checker처럼 경쟁 상태에 민감한 규칙은 데이터베이스가 최종 판정합니다. `private`는 source of truth, `api`는 Desktop용 최소 projection, `worker_api`는 서버 전용 RPC allowlist입니다.
+
+### Tauri + React
+
+Desktop은 주문 엔진이 아니라 운영 Cockpit입니다. publishable key와 개인 Auth 세션만 보유하며, strict schema와 RLS/RPC를 통과한 데이터만 표시합니다. 이전 사용자의 민감 snapshot이 다음 사용자에게 남지 않도록 principal별 cache 경계를 둡니다.
+
+### Render Background Worker
+
+HTTP 요청 수명과 분리된 지속 실행 모델이 trading cycle에 적합해 Background Worker blueprint를 사용합니다. 자동 배포는 꺼져 있고, 배포 여부와 준비 상태는 별도 운영 증거로 판단합니다.
+
+더 자세한 trust boundary와 구성요소 책임은 [Architecture](docs/ARCHITECTURE.md)와 [Context Map](docs/CONTEXT_MAP.md)에 정리돼 있습니다.
+
+## 엔진을 수식으로 이해하기
+
+### 1. 설명 가능한 전략 점수
+
+`WeightedFactorStrategyV1`은 다섯 component score의 정규화 가중합입니다.
+
+- `T`: technical, `F`: fundamental, `M`: market/sector
+- `N`: news/event, `P`: portfolio
+- `w_i`: 각 component의 무차원 가중치
+
+```math
+W = w_T + w_F + w_M + w_N + w_P
+```
+
+```math
+S_{raw} =
+\begin{cases}
+0, & W \le 0 \\
+\dfrac{w_T T+w_F F+w_M M+w_N N+w_P P}{W}, & W>0
+\end{cases}
+```
+
+```math
+S = \min(1,\max(0,S_{raw}))
+```
+
+기본 가중치는 technical `0.35`, fundamental `0.25`, market/sector `0.15`, news/event `0.15`, portfolio `0.10`입니다. 기본 행동 경계는 다음과 같습니다.
+
+```math
+Action(S)=
+\begin{cases}
+BUY, & S \ge 0.68 \\
+SELL, & S \le 0.25 \\
+HOLD, & \text{otherwise}
+\end{cases}
+```
+
+이 식은 결과 이유를 분해하기 쉬운 **연구용 기준선**입니다. 현재 provider feature path에는 상수 기반 technical·portfolio 입력이 남아 있고, `confidence`는 통계적으로 보정된 성공확률이 아니라 `final_score`와 같습니다. 따라서 예측 모델이나 검증된 알파로 해석하면 안 됩니다.
+
+### 2. 위험 엔진은 평균이 아니라 논리곱이다
+
+위험 항목을 평균내서 높은 점수로 낮은 점수를 상쇄하지 않습니다. 모드별 필수 정책이 모두 허용해야만 다음 단계로 갑니다.
+
+```math
+Allowed_m(x)=\bigwedge_{p\in P_m}p(x)
+```
+
+`P_m`은 모든 모드에서 같은 집합이 아닙니다. 현재 구현에서 공통 정책 집합을 `P_common`이라 두면 다음 관계입니다.
+
+```math
+P_{paper}=P_{common}
+```
+
+```math
+P_{live}=P_{common}\cup\{LiveStrategyApproval,Mode,LivePermission,MarketOpen,ProviderHealth,SellQuantity\}
+```
+
+```math
+Reasons=\{reason_p\mid p(x)=false\},\qquad
+Severity=\max_p Severity_p
+```
+
+공통 정책은 bot·설정·전략 버전, quote freshness, 계좌 동기화, 주문 금액, 현금, 종목·섹터 노출, 일일 손실·주문 수, 중복, 뉴스 위험, 유동성, 변동성과 cooldown을 검사합니다. legacy live 평가는 여기에 live 승인·mode·permission, 장 개장, provider health와 매도 보유수량 정책을 추가합니다. Paper의 `RiskService` 집합에는 `MarketOpen`, `ProviderHealth`, `SellQuantity`가 없지만, Paper V2의 매도 수량은 이후 원자 reservation에서 보유·예약 가능 수량을 다시 검사합니다. 어느 경계에서도 알 수 없는 노출과 위험을 안전한 값으로 간주하지 않습니다.
+
+### 3. 수량, semantic dedupe와 자원 예약
+
+legacy signal sizing에서 KRW 주문 금액 `A`와 지정가 `L`로 정수 주식 수량을 계산할 때는 다음 식을 사용합니다.
+
+```math
+q=\left\lfloor\frac{A}{L}\right\rfloor
+```
+
+`A ≤ 0`, `L ≤ 0` 또는 계산된 `q=0`이면 legacy helper는 수량 대신 `None`을 반환합니다. Paper V2는 이 식으로 수량을 새로 만들지 않고, 검토된 양의 정수 `q`를 입력으로 받아 지정가·수수료를 포함한 cash reservation 또는 보유수량 reservation을 원자적으로 검증합니다.
+
+동일한 signal identity와 유효 window를 재시도해도 중복 주문이 되지 않도록 canonical JSON의 SHA-256을 semantic key로 사용합니다. 수량과 지정가는 key가 아니라 동일 key 재요청의 payload 일치 여부에서 별도로 검증됩니다.
+
+```math
+K=SHA256(CanonicalJSON(account,environment,strategy,symbol,side,signalWindow,policyVersion))
+```
+
+매수 예약금은 승인된 수수료율 `r_b`까지 보수적으로 포함합니다.
+
+```math
+R_{buy}=qL+\left\lceil qLr_b\right\rceil
+```
+
+매도는 현금 대신 `q`주를 예약합니다. DB는 동일 key의 exact replay, 다른 intent의 semantic duplicate, 같은 key의 payload conflict를 구분하고 현재 lease·fencing token·`control_epoch`를 함께 검사합니다.
+
+### 4. 결정론적 Paper LIMIT 체결
+
+결정이 발생한 분의 bar는 사용하지 않습니다. 첫 가능 시각은 다음 full minute입니다.
+
+```math
+t_{eligible}=\lfloor t_{decision}\rfloor_{minute}+1\ minute
+```
+
+완료됐고 미래 정보가 아니며 유효기간 안에 있는 1분 bar만 후보가 됩니다. bar `t`의 최대 참여 가능 수량은 거래량의 1%에서 같은 account/symbol이 이미 사용한 수량을 뺀 값입니다.
+
+```math
+C_t=\left\lfloor0.01V_t\right\rfloor-q_{other,t},\qquad
+q_t=\min(q_{remaining},C_t)
+```
+
+이미 사용된 수량이 `⌊0.01V_t⌋`를 넘으면 음수 수량으로 보정하지 않고 invariant 오류로 중단합니다. `C_t=0`이면 해당 bar에서는 체결하지 않습니다.
+
+매수 reference price `R`은 시가가 지정가 이하이면 시가, 그렇지 않고 저가가 지정가에 닿으면 지정가입니다. 매도는 반대 조건을 사용합니다. 체결가는 10 bps의 불리한 slippage를 적용하되 지정가를 침범하지 않습니다.
+
+```math
+P_{buy}=\min\left(L,\operatorname{ceilTick}(R(1+0.001))\right)
+```
+
+```math
+P_{sell}=\max\left(L,\operatorname{floorTick}(R(1-0.001))\right)
+```
+
+bar별 잔량만 순차 체결하고, 전체 수량에 도달하면 `filled`, 일부만 체결되면 `partial_filled`, 유효기간이 끝난 잔량만 `expired`가 됩니다.
+
+### 5. 비용, 손익과 복식부기
+
+체결 총액과 승인된 비용 schedule은 다음처럼 계산됩니다.
+
+```math
+Gross=qP
+```
+
+```math
+Commission=\lceil Gross\cdot r_c\rceil,\qquad
+Tax_{sell}=\lceil Gross\cdot r_t\rceil
+```
+
+부분 매도의 원가 해제와 실현손익은 moving weighted average 원가를 사용합니다. 아래에서 `Q`와 `C`는 매도 전 보유 수량과 총 취득원가, `q`는 `1 ≤ q ≤ Q`인 체결 수량입니다.
+
+```math
+CostRelief=
+\begin{cases}
+C, & q=Q \\
+\left\lfloor\dfrac{Cq}{Q}\right\rfloor, & q<Q
+\end{cases}
+```
+
+```math
+TradingPnL=Gross-CostRelief
+```
+
+```math
+NetRealizedOutcome=TradingPnL-Commission-Tax
+```
+
+fill의 `realized_pnl_krw`는 위 순비용 반영 결과입니다. 복식부기 원장의 `REALIZED_PNL` 계정에는 `TradingPnL`을 기록하고, 수수료와 세금은 각각 `FEES`, `TAXES` 비용 계정에 분리합니다. 따라서 원장 계정 하나와 fill의 순실현 결과를 같은 값으로 해석하면 안 됩니다.
+
+모든 accounting transaction은 다음 불변식을 만족해야 생성됩니다.
+
+```math
+\sum Debit=\sum Credit
+```
+
+현금, 예약 현금, 포지션과 예약 수량은 음수가 될 수 없습니다. 동일 fill sequence의 transaction ID는 결정적으로 생성되므로 exact replay가 원장을 두 번 변경하지 않습니다.
+
+### 6. Point-in-Time 데이터 선택
+
+일봉 `D`는 다음 영업일 정규장 시작 이후 candle과 calendar가 모두 관측돼야 사용할 수 있습니다.
+
+```math
+t_{cutoff}=NextBusinessSessionRegularStart(D)
+```
+
+```math
+t_{available}=\max(t_{candleObserved},t_{calendarObserved})
+```
+
+as-of 시각 `T`에서 보이는 후보는 다음 조건을 만족하는 revision뿐입니다.
+
+```math
+Eligible(c,T)\iff t_{available}(c)\le T
+```
+
+동일 observation clock의 충돌, 과거 hash 재등장, candle/timing identity 불일치는 모두 차단됩니다. 이 경계는 당시 사용 가능했던 source-semantic evidence를 재현하지만, SHA-256 자체가 provider 서명이나 거래소 전체 이력의 완전성을 증명하지는 않습니다.
+
+### 7. Backtest 지표의 범위
+
+경량 연구 도구는 일별 수익률 `r_i`가 `n`개일 때 평균 `\bar r`과 표본 표준편차 `s_r`를 사용합니다.
+
+```math
+\bar r=\frac{1}{n}\sum_{i=1}^{n}r_i,\qquad
+s_r=\sqrt{\frac{\sum_{i=1}^{n}(r_i-\bar r)^2}{n-1}}
+```
+
+```math
+SharpeLike=\frac{\bar r}{s_r}\sqrt{252}
+```
+
+```math
+MDD=\min_t\left(\frac{E_t-\max_{\tau\le t}E_\tau}{\max_{\tau\le t}E_\tau}\right)
+```
+
+```math
+CAGR=(1+R_{total})^{365/d}-1
+```
+
+여기서 `E_t`는 시점 `t`의 equity, `d`는 시작일과 종료일 사이의 calendar day 수입니다. `SharpeLike`는 `n<2`이거나 표본분산이 `0` 이하이면 `None`이며 무위험수익률을 차감하지 않습니다. `MDD`는 drawdown을 `0` 이하의 signed 값으로 보존합니다. CAGR은 `d<365`이면 `None`이고, 구현은 세 지표를 소수점 여섯 자리로 반올림합니다. certified dataset replay가 아직 없으므로 이 결과는 전략 승격이나 미래 수익의 증거가 아닙니다.
+
+## 5분 안전 Quickstart
+
+### 사전 요구사항
 
 - Python 3.12 이상
-- Node.js 22 이상과 npm
-- Desktop native 앱 실행 시 Rust stable 및 [Tauri 2 OS prerequisites](https://v2.tauri.app/start/prerequisites/)
-- 실제 Cockpit 데이터 연동 시 Supabase project와 서로 다른 운영 Auth 계정 2개 이상
-- 선택 사항: Docker가 실행 중인 환경은 disposable PostgreSQL migration 검증에 사용됩니다.
+- Node.js 22.12 이상 권장과 npm
+- native Desktop을 실행할 때만 Rust stable과 [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-실제 API key 없이도 Worker mock one-shot과 Desktop build/test를 실행할 수 있습니다.
+실제 API key나 broker credential 없이 Worker mock one-shot과 Desktop 설정 화면을 확인할 수 있습니다.
 
-## 5분 Mock Quickstart
-
-### 1. 환경 파일 준비
-
-PowerShell:
-
-```powershell
-Copy-Item apps/worker/.env.example apps/worker/.env
-Copy-Item apps/desktop/.env.example apps/desktop/.env.local
-```
-
-Bash:
-
-```bash
-cp apps/worker/.env.example apps/worker/.env
-cp apps/desktop/.env.example apps/desktop/.env.local
-```
-
-`.env`와 `.env.local`은 Git에 커밋하지 마세요. Desktop에는 `VITE_SUPABASE_URL`과 `VITE_SUPABASE_PUBLISHABLE_KEY` 외의 secret을 넣지 않습니다.
-
-### 2. Worker 설치
+### Worker mock one-shot
 
 PowerShell:
 
@@ -108,6 +333,9 @@ cd apps/worker
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
+$env:MOCK_PROVIDERS = "true"
+$env:RUN_ONCE = "true"
+python -m app.main
 ```
 
 Bash:
@@ -117,247 +345,198 @@ cd apps/worker
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
-```
-
-### 3. 안전한 one-shot cycle 실행
-
-PowerShell:
-
-```powershell
-$env:MOCK_PROVIDERS = "true"
-$env:RUN_ONCE = "true"
-python -m app.main
-```
-
-Bash:
-
-```bash
 MOCK_PROVIDERS=true RUN_ONCE=true python -m app.main
 ```
 
-초기 설정은 `enabled=false`이므로 provider health와 heartbeat를 확인하고 주문은
-만들지 않는 것이 정상입니다. 이 legacy one-shot은 V2 원장 smoke test가 아닙니다.
-V2 Paper 실행에는 다음 절의 control-plane migration과 승인 evidence가 필요합니다.
+기본값은 `enabled=false`이므로 heartbeat와 provider 상태만 확인되고 주문이 생성되지 않는 것이 정상입니다. 이 명령은 안전한 legacy smoke test이며 Paper V2 원장 qualification은 아닙니다.
 
-### 4. Desktop 설치 및 실행
+### Desktop 개발 화면
 
-저장소 root에서:
+저장소 root의 새 terminal에서 실행합니다.
 
 ```bash
 npm ci
 npm run desktop:dev
 ```
 
-이 명령은 Vite 웹 개발 서버입니다. 실제 Tauri 창을 실행하려면 Rust와 OS prerequisites를 준비한 뒤 다음을 사용합니다.
+Supabase client 설정이 없으면 앱은 fail-closed 연결 안내를 표시합니다. native Tauri 창은 OS prerequisites를 준비한 뒤 실행합니다.
 
 ```bash
 npm --workspace apps/desktop run tauri -- dev
 ```
 
-Supabase 값을 비워 둔 경우 UI는 연결 설정 안내를 표시합니다. 실제 control-plane 데이터를 보려면 다음 절을 진행하세요.
+## Paper V2를 E2E로 실행하려면
 
-## Supabase 연결
+5분 Quickstart와 실제 control plane 구성은 의도적으로 분리돼 있습니다.
 
-> Hosted staging에 아래 절차를 적용하는 작업은 별도 사용자 승인이 필요합니다. 기본 구현·검증은 disposable local PostgreSQL에서 수행합니다.
+1. [Supabase Setup](docs/SUPABASE_SETUP.md)의 PG17 preflight와 checksum 검증을 통과합니다.
+2. migration과 fail-closed seed를 순서대로 적용합니다.
+3. 서로 다른 운영 사용자 두 명을 TOTP AAL2로 등록하고 역할을 분리합니다.
+4. Worker에만 서버용 secret을 제공하고 Desktop에는 URL과 publishable key만 둡니다.
+5. opening command, execution/cost/calendar/tick/volume/corporate-action evidence, release qualification과 lease를 확인합니다.
+6. Paper command의 요청→검토→claim→ACK→runtime postcondition을 확인합니다.
+7. 원장 checkpoint, reserve, fill, settlement, reconciliation과 incident evidence를 검토합니다.
 
-1. [Supabase Setup](docs/SUPABASE_SETUP.md)에 따라 PG17 pgcrypto preflight를 먼저
-   실행하고, checksum이 고정된 migration과 `seed.sql`을 순서대로 적용합니다.
-2. Supabase Auth TOTP를 켜고 서로 다른 운영 사용자 두 명 이상을 AAL2로 등록한 뒤 V2 역할을 UUID에 할당합니다.
-3. `apps/desktop/.env.local`에는 URL과 publishable key만 넣습니다.
-4. 별도 hosted-staging 승인을 받은 뒤에만 Worker에 서버용 URL과 secret key를
-   제공하고 `EXECUTION_V2_ENABLED=true`, `EXECUTION_V2_WORKER_API_ENABLED=true`를
-   함께 설정합니다. 기존 `USE_SUPABASE_REPOSITORY` 경로는 V2 원장이 아닙니다.
-5. Desktop의 **계정·보안** 화면에서 `이 기기 연결`을 한 번 완료하고 TOTP challenge를 진행합니다. 저장된 세션은 다음 실행부터 자동으로 복구되지만, 위험 작업의 AAL2 확인은 별도로 유지됩니다.
+Hosted staging 적용과 외부 credential 사용은 별도 승인 없이는 수행하지 않습니다. 자세한 순서는 [Paper Trading Operations](docs/PAPER_TRADING_OPERATIONS.md)와 [Runbook](docs/RUNBOOK.md)을 따르세요.
 
-```dotenv
-# apps/desktop/.env.local — 공개 가능한 client 설정만
-VITE_SUPABASE_URL=https://<project-ref>.supabase.co
-VITE_SUPABASE_PUBLISHABLE_KEY=<publishable-key>
+## 개발에 사용한 QA 체크리스트
+
+QA는 “코드가 존재한다”가 아니라 **커밋된 exact SHA에서 요구사항을 직접 증명했는가**를 평가합니다. 각 세부 항목은 증거가 모두 있으면 전점, 하나라도 없으면 0점인 이진 방식입니다. README에는 반복 실행 순서 10개를 요약하며, 실제 채점의 source of truth는 8개 영역·67개 ID를 가진 [QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)입니다.
+
+```math
+QA_{total}=\sum_{k=1}^{8} Score_k\times Weight_k
 ```
 
-```dotenv
-# apps/worker/.env — 서버 전용, 절대 커밋 금지
-EXECUTION_V2_ENABLED=true
-EXECUTION_V2_WORKER_API_ENABLED=true
-EXECUTION_V2_ENVIRONMENT=paper
-SUPABASE_URL=https://<project-ref>.supabase.co
-SUPABASE_SECRET_KEY=<server-secret-key>
-ALERT_WEBHOOK_URL=https://<approved-receiver>/events
-ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_ID=<rotation-id>
-ALERT_WEBHOOK_RECEIVER_ACK_CURRENT_KEY_B64=<canonical-base64-32-byte-key>
-ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_ID=
-ALERT_WEBHOOK_RECEIVER_ACK_PREVIOUS_KEY_B64=
-```
+아래 표는 `0c6b5f6`에서 공개한 **과거 engineering 기준선**입니다. 그 뒤 cache 격리와 migration-history 방어가 수정됐으므로 최신 HEAD를 다시 평가하기 전에는 현재 점수로 사용할 수 없습니다. Live 준비도와도 무관합니다.
 
-`seed_strategy_v1`, `seed_watchlist_demo`, `run_paper_cycle_once`는 legacy 연구
-fixture이며 신규 V2 원장이나 G1 검증 증거를 만들지 않습니다. V2 계좌는 승인된
-opening command, execution/cost evidence, worker lease를 갖춘 뒤에만 실행합니다.
+| 평가축                  |   가중치 | 기록 점수 | 핵심 점검 내용                                                     | 남은 핵심 항목                                   |
+| ----------------------- | -------: | --------: | ------------------------------------------------------------------ | ------------------------------------------------ |
+| TS · 거래 안전 경계     |      20% |        96 | NO-LIVE, risk, reservation, lease/fencing, transport               | unknown-write 수동 복구                          |
+| FC · 기능 완성도        |      15% |        74 | Worker, Paper V2, control plane, PIT primitive                     | dataset replay, 자동 pipeline, durable scheduler |
+| DI · 데이터·연구 무결성 |      10% |        95 | canonical identity, immutable revision, lineage, bounded transport | 공식 corporate-action/full-DQ 인증               |
+| OP · 운영 가시성        |      15% |        80 | heartbeat, incident, reconciliation, outbox, receiver ACK          | 독립 dead-man, human ACK, durable scheduler      |
+| DT · Desktop 정확성     |      10% |        93 | strict schema, RBAC, maker/checker, cache, accessibility           | packaged visual smoke, signed artifact           |
+| TC · 테스트·CI          |      10% |       100 | Worker/Desktop/Rust/migration/security/dependency gate             | exact SHA마다 재검증                             |
+| DO · 문서·온보딩        |      10% |        97 | architecture, policy, runbook, API gap, setup                      | current-status 문서 hub                          |
+| MA · 유지보수성         |      10% |        78 | ports/adapters, strict types, shared guards, wiring                | 대형 adapter/SQL 분해, scheduler 응집도          |
+| **가중 종합**           | **100%** | **88.60** | engineering trend only                                             | `G0/G1/G2`와 분리                                |
 
-## 환경 설정 요약
+실제 반복 개발에서 사용하는 핵심 확인 순서는 다음과 같습니다. 아래 checkbox는 새 exact SHA를 평가할 때마다 비우고 다시 실행하는 템플릿입니다.
 
-| 변수 | 위치 | 기본값/용도 |
-| --- | --- | --- |
-| `MOCK_PROVIDERS` | Worker | `true`, 외부 provider 대신 안전한 mock 사용 |
-| `RUN_ONCE` | Worker | `false`, 한 cycle 후 종료 여부 |
-| `USE_SUPABASE_REPOSITORY` | Worker | legacy compatibility only; V2 source of truth로 사용 금지 |
-| `BOT_DEFAULT_MODE` | Worker | `paper` |
-| `SUPABASE_URL` | Worker | server-side repository URL |
-| `SUPABASE_SECRET_KEY` | Worker | 서버 전용 secret, Desktop 금지 |
-| `TOSS_CREDENTIAL_SCOPE` | Worker | Toss credential 사용 시 반드시 `read_only` |
-| `TOSS_ORDER_CAPABLE_CREDENTIALS` | Worker | 반드시 `false`; `true`/미확인은 startup 차단 |
-| `LIVE_ORDER_EXECUTION_ENABLED` | Worker | 반드시 `false` |
-| `TOSS_ORDER_ENDPOINT_ENABLED` | Worker | 반드시 `false` |
-| `EXECUTION_V2_ENABLED` | Worker | V2 runtime을 명시적으로 구성했을 때만 `true` |
-| `EXECUTION_V2_ENVIRONMENT` | Worker | `paper` 또는 로컬 `contract_test` |
-| `EXECUTION_V2_WORKER_API_ENABLED` | Worker | migration/RPC 검증 후에만 `true` |
-| `ALERT_WEBHOOK_URL` | Worker | HTTPS-only approved receiver; ACK key와 함께 설정 |
-| `ALERT_WEBHOOK_RECEIVER_ACK_*` | Worker | current/previous 32-byte HMAC ACK keys; Desktop 금지 |
-| `DEAD_MAN_ALERT_WEBHOOK_RECEIVER_ACK_*` | 별도 dead-man | main Worker와 공유하지 않는 별도 HMAC ACK keys |
-| `VITE_SUPABASE_URL` | Desktop | Supabase project URL |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | Desktop | client publishable key |
-| `VITE_SUPABASE_REALTIME_DISABLED` | Desktop | `true`이면 polling 조회 전용; 모든 mutation 차단 |
+- [ ] 안전 기본값과 Production order network 격리를 확인한다.
+- [ ] strategy decision, risk result, feature hash와 정책 버전을 결속한다.
+- [ ] semantic duplicate, stale lease/fence/epoch와 자원 경쟁을 차단한다.
+- [ ] Paper partial fill, expiry, 비용과 원장 균형을 재현한다.
+- [ ] PIT revision·occurrence·as-of·quarantine의 변조와 충돌을 거부한다.
+- [ ] Desktop role, maker/checker, stale/offline/session/cache 경계를 검증한다.
+- [ ] outbox retry/dead-letter와 receiver 인증 실패가 성공으로 표시되지 않는지 확인한다.
+- [ ] Worker test, Ruff, strict mypy, Desktop test/E2E/build, Cargo와 migration replay를 실행한다.
+- [ ] 비밀 패턴, dependency, CodeQL, workflow 권한과 migration history를 검사한다.
+- [ ] exact SHA의 증거를 기록하고 기능별 점수를 다시 계산한다.
 
-Provider별 변수는 [Worker `.env.example`](apps/worker/.env.example)에서 확인하세요. 검증되지 않은 endpoint, parameter, rate limit은 구현하지 않고 [API Gaps](docs/API_GAPS.md)에 기록합니다.
+Cyber Trusted Access가 필요한 hosted Supabase AAL2 사용자, 실제 alert/archive receiver, 실제 Toss read-only 호출, restore·soak·10거래일 운영은 숫자에서 `N/A (external)`로 제외합니다. 제외는 `PASS`가 아니며 binary stage gate도 바꾸지 않습니다. 전체 배점·ID·증거·다음 구현 순서는 [QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)에서 확인할 수 있습니다.
 
-## 권장 Paper Trading 운영 흐름
+## 검증 명령
 
-1. `enabled=false`, `mode=paper`, `live_order_allowed=false`와 `LIVE 금지`를 확인합니다.
-2. 두 운영 사용자의 TOTP AAL2와 역할 분리를 확인합니다.
-3. `paper-primary` opening command를 maker/checker로 승인하고 opening journal이 한
-   번만 기록됐는지 확인합니다.
-4. 승인된 execution/cost/calendar/tick/volume/corporate-action evidence와 release
-   qualification을 확인합니다.
-5. Worker lease/fencing과 `control_epoch`가 일치한 상태에서 Paper command를
-   요청·승인하고 Worker ACK와 runtime postcondition을 확인합니다.
-6. Desktop에서 원장 checkpoint, 부분체결, reserve, reconciliation, incident와
-   audit archive receipt를 검토합니다.
-7. outcome/backtest는 실행 원장과 분리된 연구 절차로 수행합니다.
-
-```bash
-cd apps/worker
-python -m app.tools.update_outcomes_once
-python -m app.tools.run_backtest --strategy strategy_v1_weighted_factor --start YYYY-MM-DD --end YYYY-MM-DD
-python -m app.tools.paper_health_report
-```
-
-`paper_health_report`는 읽기 중심 운영 진단이며 실주문 승인 도구가 아닙니다. 자세한 절차는 [Paper Trading Operations](docs/PAPER_TRADING_OPERATIONS.md)를 참고하세요.
-
-## Desktop 화면
-
-| 화면 | 용도 |
-| --- | --- |
-| Operations Control | PAPER/CONTRACT TEST 상태, `LIVE 금지`, heartbeat, lease, release, ledger checkpoint |
-| Safety Command Center | 요청·승인·claim·Worker ACK·postcondition timeline과 Emergency Stop |
-| Approval Inbox | maker/checker, 변경 diff, MFA/step-up, 만료 상태 |
-| Incident Center | ACK, 담당자, 완화, 서로 다른 risk approver의 종결 |
-| Manual Reconciliation | `unknown_requires_manual_check`의 증거와 fail-closed 대사 상태(읽기 전용) |
-| Access & MFA | 개인 세션, TOTP AAL2, 역할과 접근 변경 요청/검토 |
-
-기존 연구용 Dashboard, Watchlist, Portfolio, Orders, Signals, Strategy Lab, Logs
-페이지와 관대한 row adapter는 G1+G2 release source에서 제거됐으며 Git 이력에서만
-보존됩니다.
-
-Desktop mutation은 strict schema v1, stale/offline/session 경계, Supabase RLS/RPC를 통과합니다. `applied`와 runtime postcondition 전에는 완료로 표시하지 않습니다.
-
-## 검증
+아래 명령 블록은 각각 저장소 root의 새 shell에서 시작합니다. 커밋 전에는
+worktree를, 커밋 후에는 base/head의 full SHA와 GitHub run의 `headSha`를 따로
+확인합니다.
 
 Worker:
 
 ```bash
 cd apps/worker
 python -m ruff check app
-python -m mypy app
+python -m mypy --strict app
 python -m pytest
 ```
 
-Desktop:
+Desktop과 Tauri:
 
 ```bash
+npm ci
 npm run desktop:lint
 npm run desktop:typecheck
 npm run desktop:test
-npm run desktop:build
-```
-
-선택적 E2E:
-
-```bash
+# OS에 맞는 한 줄만 실행
+npx playwright install --with-deps chromium # Linux / CI
+npx playwright install chromium             # Windows / macOS
 npm run desktop:e2e
+npm run desktop:build
+cd apps/desktop/src-tauri
+cargo check --locked
+cargo test --locked
+cargo build --locked
 ```
 
-Migration·repository safety:
+Migration과 repository policy:
 
 ```bash
+# 커밋 전 local 변경
 python .github/scripts/migration_history_guard.py --worktree
+
+# 커밋된 후보: <BASE_SHA>와 <HEAD_SHA>는 검증한 full 40-character SHA로 치환
+python .github/scripts/migration_history_guard.py --base <BASE_SHA> --head <HEAD_SHA>
+
 python .github/scripts/repository_safety.py migrations
 python .github/scripts/repository_safety.py workflows
 python supabase/verify_g1_g2_migration.py
+python supabase/verify_pit_candle_revision_store.py
+python supabase/verify_pit_daily_candle_timing_store.py
+python supabase/verify_pit_source_observation_occurrence_store.py
+python supabase/verify_pit_daily_candle_as_of_reader.py
+python supabase/verify_pit_calendar_observation_store.py
+python supabase/verify_pit_calendar_as_of_reader.py
+python supabase/verify_kr_calendar_collection_job_store.py
+python supabase/verify_pit_daily_candle_collection_job_store.py
 ```
 
-마지막 명령은 Docker daemon과 disposable PostgreSQL container가 필요합니다. CI와 검증 정책은 [CI/CD](docs/CI_CD.md)와 [Test Plan](docs/TEST_PLAN.md)에 정리되어 있습니다.
+`BASE_SHA`는 PR의 검증된 base commit, `HEAD_SHA`는 평가할 commit입니다. 로컬
+`origin/main`을 사용할 때는 해당 ref가 의도한 base와 같은 SHA인지 먼저 확인합니다.
+PR merge candidate는 GitHub workflow의 base SHA와 merge SHA로 다시 검사합니다.
 
-## 프로젝트 구조
+Branch HEAD의 exact-SHA security receipt 확인 예시(PowerShell):
 
-```text
-apps/
-  worker/       Python 3.12 trading engine와 operator tools
-  desktop/      Tauri 2 + React + Vite management cockpit
-packages/
-  shared/       UI-facing TypeScript schema
-supabase/
-  migrations/   schema, RLS, Realtime, audit, runtime invariant
-  seed.sql      fail-closed 초기 데이터
-docs/           architecture, policy, runbook, security, readiness
-.github/        CI, security scan, migration guard, CODEOWNERS
-render.yaml     수동 배포 Render Background Worker blueprint
+아래 GitHub receipt 명령에는 [GitHub CLI](https://cli.github.com/) 설치와 해당
+repository의 Actions를 읽을 수 있는 계정 인증이 필요합니다. 먼저
+`gh auth status`로 현재 host와 권한을 확인하세요.
+
+```powershell
+$headSha = (git rev-parse HEAD).Trim()
+gh run list --workflow security.yml --commit $headSha --event push `
+  --json databaseId,headSha,status,conclusion,url
+gh run view <RUN_ID> --json headSha,status,conclusion,jobs
+gh run watch <RUN_ID> --exit-status
 ```
 
-## Render 배포
+조회된 `headSha`가 `$headSha`와 다르거나 하나의 필수 job이라도 성공하지 않으면
+QA checkbox를 완료로 표시하지 않습니다. CodeQL, gitleaks, dependency review,
+`npm audit`, `pip-audit`, Bandit과 lock-derived evidence의 정확한 명령은
+[security workflow](.github/workflows/security.yml)가 source of truth입니다.
 
-Render는 fencing qualification 전까지 Background Worker 한 개만 실행하며 `autoDeployTrigger: "off"`를 유지합니다. 배포·복구 환경은 Paper disabled, order credential 없음으로 시작하고 target commit을 보고하는 새 heartbeat를 확인해야 합니다.
+`pull_request` run은 source branch의 `headSha`를 표시하지만 실제 job은 GitHub가
+합성한 merge candidate를 checkout합니다. 따라서 PR gate는 별도로 base/head와
+checkout commit을 확인합니다.
 
-실제 절차는 [Render Deployment](docs/RENDER_DEPLOYMENT.md), [Release Process](docs/RELEASE_PROCESS.md), [Rollback](docs/ROLLBACK.md)을 따르세요. README는 의도적으로 live 활성화 절차나 secret 값을 제공하지 않습니다.
+```powershell
+gh pr view <PR_NUMBER> --json baseRefOid,headRefOid,statusCheckRollup
+gh run list --workflow security.yml --commit $headSha --event pull_request `
+  --json databaseId,headSha,status,conclusion,url
+gh run watch <PR_RUN_ID> --exit-status
+gh run view <PR_RUN_ID> --log | Select-String 'HEAD is now at'
+```
 
-## 자주 발생하는 문제
+로그의 merge 문구가 위 `baseRefOid`와 `headRefOid`를 가리키지 않으면 오래된
+receipt입니다. PR run의 `headSha`만 보고 merge candidate의 exact SHA라고
+판정하지 않습니다.
 
-### `python`, `node`, `npm`을 찾지 못함
+Supabase verifier는 Docker daemon과 disposable PostgreSQL이 필요합니다. 전체
+순서의 source of truth는
+[migration-check workflow](.github/workflows/migration-check.yml)입니다. CI는
+Worker, Desktop, Playwright, Rust, migration replay, dependency audit, secret
+scan과 CodeQL을 분리된 fail-closed job으로 실행합니다.
 
-사전 요구 버전을 설치하고 새 terminal을 여세요. Windows에서 Python launcher가 없다면 `py` 대신 `python`을 사용합니다.
+## 알려진 한계와 다음 작업
 
-### Desktop에 `권한 필요`가 표시됨
+현재 부족한 기능을 성공처럼 포장하지 않습니다.
 
-**계정·보안** 화면에서 이 기기가 개인 Supabase Auth 계정에 연결됐고 TOTP AAL2를
-완료했는지, UUID에 필요한 V2 역할이 할당됐는지 확인하세요. 권한이 없는 mutation은
-안전하게 차단되어야 합니다.
+1. candle 수집 one-shot은 존재하지만 source→feature→decision 자동 pipeline과 정상 runtime scheduler 연결은 없습니다.
+2. restart-safe scheduler의 retry budget, dead-letter와 manual replay가 아직 하나의 응집된 운영 경계로 완성되지 않았습니다.
+3. certified dataset registry와 exact code/feature manifest 기반 replay가 없습니다.
+4. 공식 corporate-action PIT coverage, adjustment evidence와 독립 verifier receipt가 없습니다.
+5. hosted RLS/AAL2 역할 분리, 외부 human alert ACK, immutable archive, restore/soak 증거가 없습니다.
+6. 독립 failure-domain dead-man 배치와 signed Desktop artifact/provenance가 없습니다.
+7. 실제 Toss 주문 create/status/cancel/modify lifecycle network 경로와 공식 sandbox 인증을 제공하지 않습니다.
+8. Git tag와 GitHub Release가 없으며, 현재 manifest version은 개발 단계의 `0.1.0`입니다.
+9. Tauri의 Linux GTK/WebKit 전이 경로에는 Dependabot이 보고한 `glib 0.18.5` Medium 경보가 남아 있습니다. 취약한 버전이 병렬로 남지 않도록 호환되는 부모 stack을 확인해 올려야 하며, 근거 없이 경보를 dismiss하지 않습니다.
 
-### Worker는 실행됐는데 Desktop에 데이터가 없음
+이 README와 current QA index가 포함된 exact SHA에서 DO-6과 전체 점수를 다시 평가합니다. 이후 우선순위는 `glib` 부모 stack 검증, durable scheduler, unknown-write 운영 qualification, 대형 Worker API/SQL 수직 분해입니다. 외부 provider 계약이 불확실하면 endpoint나 성공 응답을 만들어내지 않고 [API Gaps](docs/API_GAPS.md)에 검증 절차를 기록합니다.
 
-mock 기본값은 in-memory kernel입니다. Desktop에서 보려면 별도 승인된 환경에서
-V2 migration을 적용하고 Worker에 서버 전용 Supabase 설정과
-`EXECUTION_V2_WORKER_API_ENABLED=true`가 필요합니다. legacy
-`USE_SUPABASE_REPOSITORY` 데이터는 V2 snapshot에 합산되지 않습니다.
+## 개발 workflow
 
-### 주문이 생성되지 않음
+모든 코드·문서·설정 작업은 `develop`에서 시작합니다. 기능 하나를 검증해 원자적으로 커밋하고 `origin/develop`에 push한 뒤, exact HEAD의 CI·migration·security gate와 리뷰를 통과한 merge commit 또는 fast-forward만 `main`에 통합합니다. squash, rebase, force-push로 장기 branch 계보를 바꾸지 않습니다.
 
-기본값 `enabled=false`는 의도된 안전 상태입니다. Paper V2는 설정·정책 version·bar/cost/tick/corporate-action evidence·lease/fencing·현금·보유수량·semantic duplicate gate를 적용합니다. 누락된 증거를 기본값으로 보정하지 않으며, Paper 매도는 V2 원장의 available quantity만 사용합니다.
-
-### `unknown_requires_manual_check` 주문이 보임
-
-자동 재시도하거나 UI에서 강제로 완료 처리하지 마세요. 주문 안전 큐와 [Runbook](docs/RUNBOOK.md)의 reconciliation 절차로 provider 상태와 감사 증거를 확인해야 합니다.
-
-### Live mode를 선택할 수 없음
-
-정상 동작입니다. 현재 릴리스는 Production Live를 지원하지 않으며 활성화 절차도 제공하지 않습니다. 외부 주문 요구가 생기면 기존 설정을 확장하지 않고 G0 사업·규제 심사를 다시 엽니다.
-
-## 남은 주요 작업
-
-- 검증된 candle 기반 technical feature 자동 적재
-- 목표 비중·no-trade band·현금 reserve·비용을 포함한 rebalance planner
-- outcome, backtest, 월간 연구, retention의 안전한 무인 scheduling
-- 독립 failure domain의 worker dead-man monitor 운영 배치
-- hosted staging RLS/MFA/alert/archive/restore 증거와 10거래일 Paper/Shadow gate
-
-기능이 없다는 이유로 가짜 live endpoint나 mock 성공 응답을 추가하지 않습니다. provider 계약의 불확실성은 구현 차단 사유입니다.
+변경 전 [Git Rules](docs/GIT_RULES.md), [Coding Standards](docs/CODING_STANDARDS.md), 각 디렉터리의 `AGENTS.md`를 확인하세요. risk, execution, broker, migration과 workflow는 보호 영역입니다.
 
 ## 문서 안내
 
@@ -370,8 +549,8 @@ V2 migration을 적용하고 Worker에 서버 전용 Supabase 설정과
 - [Cost Limits](docs/COST_LIMITS.md) · [Observability](docs/OBSERVABILITY.md)
 - [Current QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md) · [Test Plan](docs/TEST_PLAN.md)
 
-## 기여와 보안
+## 보안, 기여와 라이선스
 
-변경 전 [Git Rules](docs/GIT_RULES.md), [Coding Standards](docs/CODING_STANDARDS.md), 각 디렉터리의 `AGENTS.md`를 확인하세요. risk, execution, broker, migration, workflow는 보호 영역이며 변경 이유·테스트·rollback 근거가 필요합니다.
+비밀정보, 계좌 식별자, 실제 token, 미공개 취약점은 issue, 문서, 로그나 seed에 올리지 마세요. 보안 경계와 공개 절차는 [Security](docs/SECURITY.md)를 따릅니다.
 
-비밀정보, 계좌 식별자, 실제 token, 미공개 취약점은 issue나 로그에 올리지 마세요. 보안 모델과 공개 범위는 [Security](docs/SECURITY.md)를 따릅니다.
+현재 저장소에는 별도 `LICENSE`와 정식 `CONTRIBUTING.md`가 없습니다. 공개 저장소라는 사실만으로 사용·수정·배포 권한이 부여되는 것은 아닙니다. 기여 절차와 라이선스가 확정되기 전에는 소유자에게 먼저 문의하세요.
