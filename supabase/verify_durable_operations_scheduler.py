@@ -948,16 +948,37 @@ def verify_definition_digest_and_db_clock(
             retry_max_seconds=10,
         ),
     }
-    receipts: dict[str, dict[str, Any]] = {}
-    for job_key in JOB_KEYS:
+    command_before = database_now(container)
+    command_receipt = ensure_definition(
+        container,
+        outer_token,
+        specs["operations.commands"],
+    )
+    command_after = database_now(container)
+    receipts = {"operations.commands": command_receipt}
+    for job_key in JOB_KEYS[1:]:
         receipts[job_key] = ensure_definition(container, outer_token, specs[job_key])
 
-    command_receipt = receipts["operations.commands"]
-    if _timestamp(command_receipt["next_due_at"]) != _timestamp(
-        command_receipt["observed_at"]
-    ):
+    next_due_at = _timestamp(command_receipt["next_due_at"])
+    observed_at = _timestamp(command_receipt["observed_at"])
+    if not command_before <= next_due_at <= observed_at <= command_after:
         raise VerificationError(
-            "new definition next_due_at was not assigned from the DB observation"
+            "new definition clock ordering mismatch: "
+            f"before={command_before.isoformat()}, "
+            f"next_due_at={next_due_at.isoformat()}, "
+            f"observed_at={observed_at.isoformat()}, "
+            f"after={command_after.isoformat()}"
+        )
+    stored_clock = scalar(
+        container,
+        "select concat_ws('|',next_due_at=created_at,next_due_at=updated_at,"
+        f"next_due_at={sql_text(str(command_receipt['next_due_at']))}::timestamptz) "
+        "from private.scheduler_job_definitions "
+        f"where definition_id={sql_text(str(command_receipt['definition_id']))}::uuid;",
+    )
+    if stored_clock != "t|t|t":
+        raise VerificationError(
+            f"new definition stored clock provenance mismatch: {stored_clock}"
         )
     repeated = ensure_definition(container, outer_token, specs["operations.commands"])
     stable_fields = DEFINITION_RECEIPT_FIELDS - {"observed_at"}
@@ -1913,7 +1934,7 @@ def verify_startup_drain_and_execution_barrier(
         "where definition.account_id='paper-primary' "
         "and definition.job_key='operations.commands';",
     )
-    expected = f"succeeded|true|{HOLDER_ID}|{outer_token}|{RELEASE_SHA}|true|true|true"
+    expected = f"succeeded|t|{HOLDER_ID}|{outer_token}|{RELEASE_SHA}|t|t|t"
     if command_barrier != expected:
         raise VerificationError(f"current command barrier evidence mismatch: {command_barrier}")
 
@@ -3524,7 +3545,7 @@ def verify_security_contract(container: str) -> None:
         "from contract_object join pg_catalog.pg_roles owner "
         "on owner.oid=contract_object.owner_oid;",
     )
-    if owner_contract != "25|1|0|true":
+    if owner_contract != "25|1|0|t":
         raise VerificationError(
             f"scheduler trusted owner catalog mismatch: {owner_contract}"
         )

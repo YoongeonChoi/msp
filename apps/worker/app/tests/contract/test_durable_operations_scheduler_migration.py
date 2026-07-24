@@ -316,6 +316,13 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert "scheduler_run_lock_fixture" in source
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
+    assert "command_before <= next_due_at <= observed_at <= command_after" in source
+    assert "next_due_at=created_at,next_due_at=updated_at" in source
+    assert 'stored_clock != "t|t|t"' in source
+    assert 'expected = f"succeeded|t|{HOLDER_ID}|{outer_token}|{RELEASE_SHA}|t|t|t"' in source
+    assert 'owner_contract != "25|1|0|t"' in source
+    assert "new definition stored clock provenance mismatch" in source
+    assert "new definition next_due_at was not assigned from the DB observation" not in source
 
 
 def test_populated_upgrade_fixture_models_and_revokes_trusted_owner_capability() -> None:
