@@ -79,7 +79,8 @@ SQL migration 순서:
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
 46. `20260719090000_pit_daily_candle_collection_job_store.sql`
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
-48. `seed.sql` (로컬 non-live 기본값만)
+48. `20260724210000_durable_operations_scheduler.sql`
+49. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -100,6 +101,7 @@ python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
 python supabase/verify_kr_calendar_collection_job_store.py
 python supabase/verify_pit_daily_candle_collection_job_store.py
+python supabase/verify_durable_operations_scheduler.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
@@ -111,7 +113,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 반환합니다.
 Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
 `extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
-`20260723162000_desktop_operations_sensitive_projection_gate.sql`까지 적용하는
+`20260724210000_durable_operations_scheduler.sql`까지 적용하는
 clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
 `public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
 전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail
@@ -131,6 +133,16 @@ clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는
   정지, reconciliation claim별 release/fencing token 재검증
 - Desktop snapshot의 auditor 전용 audit/reconciliation SELECT 차단, viewer의 exact
   empty-array projection, auditor의 known evidence positive control
+- DB clock이 소유하는 고정 운영 job 5종의 definition/run/inner lease, 현재 outer
+  worker lease와 release/fencing 결속, restart 시 command 선행 barrier, 단일 active
+  run, desired digest의 4상태 typed convergence, rolling upgrade 중 기존 run만
+  recovery하는 no-new-cadence 경계, bounded retry/dead-letter와 reason-bound manual replay
+- settlement/reconciliation이 missing·disabled·blocked·expired인 동안 신규 execution
+  차단, 기존 expired execution의 terminal cleanup과 command/reconciliation/outbox
+  recovery progress는 계속되는 우선순위 경계
+- execution/settlement lease expiry의 자동·수동 replay 금지, command/reconciliation/
+  outbox에만 허용한 좁은 retry matrix, response-loss 뒤 새 outer lease에서도 exact
+  request ID로 immutable replay 생성 영수증을 회수하는 takeover 경계
 - 50건을 넘는 reconciliation keyset drain과 signal-only Realtime publication
 - 검증되지 않은 시가를 원가/0으로 보정하지 않는 snapshot 계약
 - 기존 public order/position을 신규 private 원장에 합산하지 않는 upgrade 격리

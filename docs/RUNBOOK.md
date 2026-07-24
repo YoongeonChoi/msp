@@ -32,7 +32,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719070000_kr_calendar_collection_job_conflict_boundary.sql`, followed by
 `20260719080000_kr_calendar_collection_job_inspection.sql`, followed by
 `20260719090000_pit_daily_candle_collection_job_store.sql`, followed by
-`20260723162000_desktop_operations_sensitive_projection_gate.sql`.
+`20260723162000_desktop_operations_sensitive_projection_gate.sql`, followed by
+`20260724210000_durable_operations_scheduler.sql`.
 
 After the Desktop sensitive-projection migration, run the complete
 `python supabase/verify_g1_g2_migration.py` verifier without
@@ -43,6 +44,66 @@ permissions and the exact known audit/reconciliation fixture. `anon` and
 `service_role` must remain unable to call the Desktop RPC. Do not treat the
 identifier-free reconciliation health state as auditor evidence; it remains
 part of minimum-status availability.
+
+After the durable operations scheduler migration, run its fresh-install and
+populated-upgrade verifier:
+
+```bash
+python supabase/verify_durable_operations_scheduler.py
+```
+
+The verifier must finish with
+`FINAL=PASS durable_operations_scheduler_verifier`. It uses disposable
+PostgreSQL 17.6 containers and proves the following boundaries directly:
+
+- the database, not a caller timestamp or `asyncio.sleep`, owns due time,
+  retry availability, and lease expiry;
+- the current outer Worker lease binds account, holder, fencing token, and
+  release SHA, while every inner lease expires no later than that outer lease;
+- a definition TTL and the outer lease must each provide at least ten database-
+  clock seconds before a claim is issued; the Worker bounds the complete RPC to
+  five seconds and keeps at least five seconds before starting a handler;
+- a restart forces a command drain for the new outer fencing generation before
+  execution can be claimed, even when the stored command cadence is not yet due;
+- each definition has at most one pending, leased, or retry-wait run and stale
+  completion, duplicate claim, wrong release, and old fencing tokens fail closed;
+- command, reconciliation, and outbox polling use only their exact retry reason;
+  execution and settlement never use scheduler-level automatic retry;
+- expired execution or settlement is dead-lettered with an unknown effect and is
+  not eligible for generic manual replay; reconciliation evidence must be added
+  by a separate approved resolution contract before that policy can change;
+- eligible manual replay binds source revision, definition and failure digests,
+  failure reason, replay generation, request UUID, and explicit confirmation,
+  creates a new child, and leaves the source terminal row immutable;
+- a lost replay response can be recovered with the same semantic request under
+  a later valid outer lease; changing any bound source field is rejected;
+- forced RLS, zero table policies, zero runtime table grants, exact service-role
+  RPC grants, empty function search paths, and zero order/trading side effects
+  remain true on fresh and populated upgrades.
+
+Do not start the normal scheduler by simply replacing definitions first. During
+a rolling release, an older definition may still own a leased or retry-wait run.
+Call `converge_scheduler_job_definition` for each fixed job and accept only its
+exact `converged`, `claimed`, `wait`, or `manual_resolution` disposition.
+`converged` requires the requested digest and no active run. `claimed` can
+dispatch only the existing non-effectful recovery claim through the same fixed
+job binding and result validator as a normal claim; it never creates an old-
+definition cadence run. Re-query `wait` using database time and never turn its
+timestamp into caller-side eligibility authority.
+
+`scheduler_outer_lease_renewal_required` is not a sleep-until-expiry order.
+Renew the same account/holder/fencing/release lease immediately, refresh the
+local lease snapshot under the shared renewal/scheduler lock, and re-query the
+convergence RPC. Never execute the claim using the pre-renewal snapshot.
+
+Do not enter new execution claims until command, settlement, and reconciliation
+barriers are healthy. A blocked execution or settlement remains a manual-
+resolution incident, but commands, reconciliation, and outbox must keep making
+bounded recovery/delivery progress. A missing, disabled, blocked, or expired
+settlement or reconciliation definition closes new execution. An unexpired old
+effectful run is a bounded wait; expiry is an unknown-effect dead letter, not
+permission to delete state, rewrite a digest, or replay it. `asyncio.sleep` may
+provide polling backpressure only; it is never cadence or expiry authority.
 
 After the occurrence migration, confirm its dedicated fresh and populated
 upgrade verifier passes. The upgrade can reconstruct original content

@@ -215,6 +215,13 @@ WORKER_API_ALLOWLIST = frozenset(
         "pause_pit_daily_candle_collection_attempt_v1",
         "block_pit_daily_candle_collection_attempt_v1",
         "confirm_pit_daily_candle_collection_attempt_v1",
+        "ensure_scheduler_job_definition",
+        "converge_scheduler_job_definition",
+        "claim_due_scheduler_job",
+        "complete_scheduler_job_run",
+        "fail_scheduler_job_run",
+        "inspect_scheduler_dead_letter",
+        "replay_scheduler_dead_letter",
     }
 )
 
