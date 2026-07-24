@@ -282,7 +282,7 @@ def test_populated_upgrade_fixture_models_and_revokes_trusted_owner_capability()
 
     assert "create role supabase_admin nologin nosuperuser bypassrls;" in source
     assert "create role migration_operator login nosuperuser inherit bypassrls;" in source
-    assert 'identity != "migration_operator|false|true"' in source
+    assert 'identity != "migration_operator|f|t"' in source
     assert "alter role migration_operator nobypassrls;" in source
     assert 'scheduler_owner_receipt != "25|1|supabase_admin|true|true"' in source
     assert 'cleanup_receipt != "0|postgres|f|f|f|f|f|f"' in source

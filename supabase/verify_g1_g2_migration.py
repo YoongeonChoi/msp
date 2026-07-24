@@ -1364,7 +1364,7 @@ reset role;
             "from pg_roles where rolname=current_user;",
             user=preflight_user,
         ).stdout.strip()
-        if identity != "migration_operator|false|true":
+        if identity != "migration_operator|f|t":
             raise VerificationError(
                 "preflight role is not the expected temporary non-superuser "
                 f"BYPASSRLS owner: {identity}"
