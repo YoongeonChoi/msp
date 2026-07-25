@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent
@@ -68,6 +68,11 @@ JOB_KEYS = (
     "operations.settlement",
     "operations.reconciliation",
     "operations.outbox",
+)
+EffectfulJobKey = Literal["operations.execution", "operations.settlement"]
+EFFECTFUL_JOB_KEYS: tuple[EffectfulJobKey, ...] = (
+    "operations.execution",
+    "operations.settlement",
 )
 RPC_NAMES = (
     "ensure_scheduler_job_definition",
@@ -347,6 +352,23 @@ def definition_spec(
         "max_manual_replays": max_manual_replays,
         "enabled": enabled,
     }
+
+
+def effectful_definition_spec(
+    job_key: EffectfulJobKey,
+    *,
+    enabled: bool = True,
+    interval_seconds: int = 1,
+    lease_ttl_seconds: int = 30,
+) -> dict[str, object]:
+    return definition_spec(
+        job_key,
+        enabled=enabled,
+        interval_seconds=interval_seconds,
+        lease_ttl_seconds=lease_ttl_seconds,
+        max_attempts=1,
+        max_manual_replays=0,
+    )
 
 
 def definition_digest(spec: dict[str, object]) -> str:
@@ -755,6 +777,13 @@ def inspect_dead_letter(
     if receipt.get("found") is True:
         if type(dead_letter) is not dict or set(dead_letter) != DEAD_LETTER_FIELDS:
             raise VerificationError(f"dead-letter shape mismatch: {dead_letter}")
+        if (
+            dead_letter["account_id"] != account_id
+            or str(dead_letter["source_run_id"]) != run_id
+        ):
+            raise VerificationError(
+                f"dead-letter request binding mismatch: {dead_letter}"
+            )
     elif dead_letter is not None:
         raise VerificationError(f"missing inspection exposed dead letter: {receipt}")
     return receipt
@@ -935,11 +964,11 @@ def verify_definition_digest_and_db_clock(
             lease_ttl_seconds=10,
             retry_base_seconds=1,
         ),
-        "operations.execution": definition_spec(
+        "operations.execution": effectful_definition_spec(
             "operations.execution",
             lease_ttl_seconds=10,
         ),
-        "operations.settlement": definition_spec(
+        "operations.settlement": effectful_definition_spec(
             "operations.settlement",
             lease_ttl_seconds=10,
         ),
@@ -1385,11 +1414,15 @@ def verify_rolling_upgrade_definition_convergence(container: str) -> None:
         account_id=effectful_account,
         holder_id=effectful_holder,
     )
-    for job_key in ("operations.execution", "operations.settlement"):
+    for job_key in EFFECTFUL_JOB_KEYS:
         ensure_definition(
             container,
             effectful_token,
-            definition_spec(job_key, interval_seconds=1, lease_ttl_seconds=10),
+            effectful_definition_spec(
+                job_key,
+                interval_seconds=1,
+                lease_ttl_seconds=10,
+            ),
             account_id=effectful_account,
             holder_id=effectful_holder,
         )
@@ -1411,7 +1444,7 @@ def verify_rolling_upgrade_definition_convergence(container: str) -> None:
         holder_id=effectful_holder,
     )
 
-    for index, job_key in enumerate(("operations.execution", "operations.settlement")):
+    for index, job_key in enumerate(EFFECTFUL_JOB_KEYS):
         active_receipt = claim_due(
             container,
             effectful_token,
@@ -1422,7 +1455,7 @@ def verify_rolling_upgrade_definition_convergence(container: str) -> None:
         if active_claim is None or active_claim["run"]["job_key"] != job_key:
             raise VerificationError(f"effectful recovery claim mismatch: {active_receipt}")
         active_run_id = str(active_claim["run"]["run_id"])
-        desired = definition_spec(
+        desired = effectful_definition_spec(
             job_key,
             interval_seconds=2,
             lease_ttl_seconds=10,
@@ -1691,7 +1724,7 @@ def verify_manual_replay_compare_and_swap(
     dead_letter: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     outer_token = int(outer["fencing_token"])
-    execution_enabled = definition_spec(
+    execution_enabled = effectful_definition_spec(
         "operations.execution",
         lease_ttl_seconds=10,
     )
@@ -1971,12 +2004,12 @@ def verify_settlement_gate_and_recovery_progress(container: str) -> None:
             interval_seconds=300,
             lease_ttl_seconds=30,
         ),
-        "operations.execution": definition_spec(
+        "operations.execution": effectful_definition_spec(
             "operations.execution",
             interval_seconds=1,
             lease_ttl_seconds=30,
         ),
-        "operations.settlement": definition_spec(
+        "operations.settlement": effectful_definition_spec(
             "operations.settlement",
             interval_seconds=1,
             lease_ttl_seconds=10,
@@ -2234,7 +2267,7 @@ def verify_missing_barrier_expired_execution_cleanup(container: str) -> None:
         holder_id=holder_id,
     )
     outer_token = int(outer["fencing_token"])
-    execution_spec = definition_spec(
+    execution_spec = effectful_definition_spec(
         "operations.execution",
         interval_seconds=300,
         lease_ttl_seconds=10,
@@ -2310,12 +2343,12 @@ def verify_reconciliation_execution_gate(container: str) -> None:
         interval_seconds=300,
         lease_ttl_seconds=30,
     )
-    execution_spec = definition_spec(
+    execution_spec = effectful_definition_spec(
         "operations.execution",
         interval_seconds=1,
         lease_ttl_seconds=30,
     )
-    settlement_spec = definition_spec(
+    settlement_spec = effectful_definition_spec(
         "operations.settlement",
         interval_seconds=300,
         lease_ttl_seconds=30,
@@ -2848,8 +2881,8 @@ def verify_effectful_explicit_failure_is_not_retryable(container: str) -> None:
             interval_seconds=300,
             lease_ttl_seconds=30,
         ),
-        definition_spec("operations.execution", lease_ttl_seconds=30),
-        definition_spec("operations.settlement", lease_ttl_seconds=30),
+        effectful_definition_spec("operations.execution", lease_ttl_seconds=30),
+        effectful_definition_spec("operations.settlement", lease_ttl_seconds=30),
         definition_spec(
             "operations.reconciliation",
             interval_seconds=300,
@@ -3118,7 +3151,7 @@ def verify_outer_lease_time_and_budget_boundaries(container: str) -> None:
         ttl_seconds=60,
     )
     long_token = int(long_outer["fencing_token"])
-    invalid_ttl_spec = definition_spec(
+    invalid_ttl_spec = effectful_definition_spec(
         "operations.settlement",
         lease_ttl_seconds=9,
     )

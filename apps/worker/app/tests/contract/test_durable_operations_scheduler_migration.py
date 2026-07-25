@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -300,6 +301,7 @@ def test_scheduler_conflict_target_is_forward_patched_without_metadata_drift() -
 
 def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None:
     source = _regular_file(VERIFIER)
+    parsed = ast.parse(source)
     assert 'POSTGRES_IMAGE = "postgres:17.6-alpine"' in source
     assert f'MIGRATION_NAME = "{MIGRATION_NAME}"' in source
     for marker in EXPECTED_VERIFICATION_MARKERS:
@@ -354,6 +356,58 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert 'if opened != "12":' in account_fixtures
     assert "LOCK_FIXTURE_START_POLL_ATTEMPTS = 600" in source
     assert "LOCK_FIXTURE_START_POLL_SECONDS = 0.05" in source
+    effectful_helper = source[
+        source.index("def effectful_definition_spec") :
+        source.index("def definition_digest")
+    ]
+    assert "job_key: EffectfulJobKey" in effectful_helper
+    assert "max_attempts=1" in effectful_helper
+    assert "max_manual_replays=0" in effectful_helper
+    generic_dynamic_calls = [
+        call
+        for call in ast.walk(parsed)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "definition_spec"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+    ]
+    assert len(generic_dynamic_calls) == 1
+    direct_effectful_calls = [
+        call
+        for call in ast.walk(parsed)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "definition_spec"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and call.args[0].value in {"operations.execution", "operations.settlement"}
+    ]
+    assert direct_effectful_calls == []
+    effectful_calls = [
+        call
+        for call in ast.walk(parsed)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "effectful_definition_spec"
+    ]
+    assert {
+        call.args[0].value
+        for call in effectful_calls
+        if call.args and isinstance(call.args[0], ast.Constant)
+    } == {"operations.execution", "operations.settlement"}
+    assert any(
+        call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "job_key"
+        for call in effectful_calls
+    )
+    inspection_helper = source[
+        source.index("def inspect_dead_letter") : source.index("def _replay_sql")
+    ]
+    assert 'dead_letter["account_id"] != account_id' in inspection_helper
+    assert 'str(dead_letter["source_run_id"]) != run_id' in inspection_helper
+    assert "dead-letter request binding mismatch" in inspection_helper
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
     assert "command_before <= next_due_at <= observed_at <= command_after" in source
