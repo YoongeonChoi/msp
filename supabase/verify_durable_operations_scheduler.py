@@ -830,7 +830,7 @@ def wait_for_run_deadline(container: str, run_id: str, column: str) -> None:
         raise VerificationError(f"unsupported scheduler deadline: {column}")
     psql(
         container,
-        "select pg_catalog.pg_sleep(least(greatest(pg_catalog.extract(epoch from ("
+        "select pg_catalog.pg_sleep(least(greatest(extract(epoch from ("
         f"{column} - pg_catalog.clock_timestamp())),0)+0.25,40)) "
         "from private.scheduler_job_runs "
         f"where run_id={sql_text(run_id)}::uuid;",
@@ -1897,7 +1897,7 @@ def verify_startup_drain_and_execution_barrier(
     due_delta = float(
         scalar(
             container,
-            "select pg_catalog.extract(epoch from (next_due_at-"
+            "select extract(epoch from (next_due_at-"
             "pg_catalog.clock_timestamp())) from private.scheduler_job_definitions "
             "where account_id='paper-primary' and job_key='operations.commands';",
         )
@@ -3275,7 +3275,7 @@ def verify_outer_lease_time_and_budget_boundaries(container: str) -> None:
         )
     psql(
         container,
-        "select pg_catalog.pg_sleep(least(greatest(pg_catalog.extract(epoch from ("
+        "select pg_catalog.pg_sleep(least(greatest(extract(epoch from ("
         "acquired_at-pg_catalog.clock_timestamp())),0)+0.25,15)) "
         "from private.worker_leases "
         f"where account_id={sql_text(future_account)};",

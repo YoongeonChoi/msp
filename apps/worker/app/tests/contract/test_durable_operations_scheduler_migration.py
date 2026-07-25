@@ -316,6 +316,8 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert "domain_snapshot(fresh)" in source
     assert "scheduler_definition_lock_fixture" in source
     assert "scheduler_run_lock_fixture" in source
+    assert "pg_catalog.extract(epoch from" not in source
+    assert source.count("extract(epoch from") == 3
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
     assert "command_before <= next_due_at <= observed_at <= command_after" in source
