@@ -637,6 +637,34 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertEqual(result, 1, output)
         self.assertIn("trusted base as its second parent", output)
 
+    def test_remote_rejects_tree_identical_octopus_merge_from_base(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        root_tree = self.fixture.git("rev-parse", f"{root}^{{tree}}")
+        base_tree = self.fixture.git("rev-parse", f"{base}^{{tree}}")
+        first_side = self.fixture.git(
+            "commit-tree", root_tree, "-p", root, "-m", "first side history"
+        )
+        second_side = self.fixture.git(
+            "commit-tree", root_tree, "-p", root, "-m", "second side history"
+        )
+        head = self.fixture.git(
+            "commit-tree",
+            base_tree,
+            "-p",
+            base,
+            "-p",
+            first_side,
+            "-p",
+            second_side,
+            "-m",
+            "tree-identical octopus merge",
+        )
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("exactly two parents", output)
+
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
 

@@ -272,14 +272,15 @@ def _is_trusted_noop_sync_merge(
     return commit_tree == trusted_tree
 
 
-def _is_reversed_trusted_noop_sync_merge(
+def _is_noncanonical_trusted_noop_sync_merge(
     repo_root: Path,
     *,
     trusted_base: str,
     commit: str,
     parents: Sequence[str],
+    canonical: bool,
 ) -> bool:
-    if len(parents) != 2 or parents[0] != trusted_base:
+    if canonical or len(parents) < 2 or trusted_base not in parents:
         return False
     trusted_tree = _git(repo_root, "rev-parse", f"{trusted_base}^{{tree}}").strip()
     commit_tree = _git(repo_root, "rev-parse", f"{commit}^{{tree}}").strip()
@@ -645,15 +646,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     commit=commit,
                     parents=parents,
                 )
-                if _is_reversed_trusted_noop_sync_merge(
+                if _is_noncanonical_trusted_noop_sync_merge(
                     repo_root,
                     trusted_base=base,
                     commit=commit,
                     parents=parents,
+                    canonical=trusted_noop_sync_merge,
                 ):
                     violations.append(
-                        f"{commit_boundary} ancestry-only sync merge must use the "
-                        "trusted base as its second parent"
+                        f"{commit_boundary} ancestry-only sync merge must use exactly "
+                        "two parents with the trusted base as its second parent"
                     )
                 for parent, entries in parent_entries.items():
                     parent_boundary = (
