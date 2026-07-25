@@ -4,6 +4,15 @@ This file records notable user, operator, and safety-boundary changes. Versionin
 [Release Process](docs/RELEASE_PROCESS.md); `v0.x.y` denotes the Paper qualification
 phase and never grants Production Live authority.
 
+## [Unreleased]
+
+### Fixed
+
+- Allow the required post-integration `develop` fast-forward only when the merge
+  commit has the trusted push base as its second parent, its first parent is already
+  an ancestor of that base, and its complete tree is unchanged. Migration rewrites,
+  non-no-op merges, and untrusted parent order remain fail closed.
+
 ## [0.1.0] - 2026-07-26
 
 ### Added

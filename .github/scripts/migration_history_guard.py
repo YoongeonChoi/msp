@@ -5,7 +5,10 @@ New migrations must append after the immediately preceding version and remain
 regular 100644 blobs. A migration becomes immutable as soon as a commit adds it,
 including within the candidate history being reviewed. An all-zero push base is
 rejected because an established long-lived ref must never be recreated without
-an independently preserved migration boundary.
+an independently preserved migration boundary. An ancestry-only merge may advance
+a long-lived ref when its trusted base is the second parent and the complete tree is
+unchanged; this preserves merge ancestry without reclassifying trusted migrations as
+new first-parent additions.
 """
 
 from __future__ import annotations
@@ -53,9 +56,17 @@ def _git(repo_root: Path, *args: str) -> str:
     return result.stdout
 
 
-def _require_ancestor(repo_root: Path, base: str, head: str) -> None:
+def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     result = subprocess.run(
-        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", base, head],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ],
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -63,11 +74,16 @@ def _require_ancestor(repo_root: Path, base: str, head: str) -> None:
         check=False,
     )
     if result.returncode == 0:
-        return
+        return True
     if result.returncode == 1:
-        raise GuardError("--base is not an ancestor of --head")
+        return False
     detail = result.stderr.strip() or result.stdout.strip() or "unknown git error"
-    raise GuardError(f"cannot establish base ancestry: {detail}")
+    raise GuardError(f"cannot establish commit ancestry: {detail}")
+
+
+def _require_ancestor(repo_root: Path, base: str, head: str) -> None:
+    if not _is_ancestor(repo_root, base, head):
+        raise GuardError("--base is not an ancestor of --head")
 
 
 def _repository_root(path: Path) -> Path:
@@ -225,6 +241,35 @@ def _is_unchanged_trusted_first_parent_addition(
         and first_parent_entries.get(path) == trusted_entry
         and commit_entries.get(path) == trusted_entry
     )
+
+
+def _is_unchanged_trusted_base_addition(
+    change: Change,
+    trusted_entries: dict[str, tuple[str, str, str]],
+    commit_entries: dict[str, tuple[str, str, str]],
+) -> bool:
+    if change.status != "A" or len(change.paths) != 1:
+        return False
+    path = change.paths[0]
+    trusted_entry = trusted_entries.get(path)
+    return trusted_entry is not None and commit_entries.get(path) == trusted_entry
+
+
+def _is_trusted_noop_sync_merge(
+    repo_root: Path,
+    *,
+    trusted_base: str,
+    commit: str,
+    parents: Sequence[str],
+) -> bool:
+    if len(parents) != 2 or parents[1] != trusted_base:
+        return False
+    first_parent = parents[0]
+    if not _is_ancestor(repo_root, first_parent, trusted_base):
+        return False
+    trusted_tree = _git(repo_root, "rev-parse", f"{trusted_base}^{{tree}}").strip()
+    commit_tree = _git(repo_root, "rev-parse", f"{commit}^{{tree}}").strip()
+    return commit_tree == trusted_tree
 
 
 def _invalid_additions(paths: set[str]) -> list[str]:
@@ -580,6 +625,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 first_parent_entries = parent_entries[first_parent]
                 first_parent_paths = set(first_parent_entries)
                 commit_entries = _tree_entries(repo_root, commit)
+                trusted_noop_sync_merge = _is_trusted_noop_sync_merge(
+                    repo_root,
+                    trusted_base=base,
+                    commit=commit,
+                    parents=parents,
+                )
                 for parent, entries in parent_entries.items():
                     parent_boundary = (
                         commit_boundary
@@ -599,6 +650,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 change,
                                 base_entries,
                                 first_parent_entries,
+                                commit_entries,
+                            )
+                        ]
+                    elif trusted_noop_sync_merge:
+                        # GitHub records a reviewed develop-to-main integration with
+                        # main as the first parent. Fast-forwarding develop to that
+                        # exact, tree-identical merge commit must not make migrations
+                        # already protected by develop look new relative to old main.
+                        parent_changes = [
+                            change
+                            for change in parent_changes
+                            if not _is_unchanged_trusted_base_addition(
+                                change,
+                                base_entries,
                                 commit_entries,
                             )
                         ]

@@ -468,6 +468,99 @@ class MigrationHistoryGuardTests(unittest.TestCase):
             r"commit [0-9a-f]{12} parent [0-9a-f]{12} A: .*20260719080000_base\.sql",
         )
 
+    def test_remote_accepts_tree_identical_long_lived_sync_merge(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        self.fixture.git("switch", "-q", "--detach", root)
+        self.fixture.git("merge", "--no-ff", "-m", "merge reviewed base", base)
+        head = self.fixture.git("rev-parse", "HEAD")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 0, output)
+        self.assertIn("new migrations: 0", output)
+
+    def test_remote_rejects_non_noop_long_lived_sync_merge(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        self.fixture.git("switch", "-q", "--detach", root)
+        self.fixture.git("merge", "--no-ff", "--no-commit", base)
+        self.fixture.write("README.md", "changed during merge\n")
+        head = self.fixture.commit("mutate reviewed base merge", "README.md")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} parent [0-9a-f]{12} A: .*20260719080000_base\.sql",
+        )
+
+    def test_remote_rejects_sync_merge_with_modified_protected_migration(self) -> None:
+        _root, first_parent = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719080000_base.sql"
+        self.fixture.write(path, "select 2;\n")
+        base = self.fixture.commit("unsafe trusted modification", path)
+        self.fixture.git("switch", "-q", "--detach", first_parent)
+        self.fixture.git("merge", "--no-ff", "-m", "sync unsafe modification", base)
+        head = self.fixture.git("rev-parse", "HEAD")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} parent [0-9a-f]{12} M: .*20260719080000_base\.sql",
+        )
+
+    def test_remote_rejects_sync_merge_with_deleted_protected_migration(self) -> None:
+        _root, first_parent = self.fixture.timestamp_base()
+        path = "supabase/migrations/20260719080000_base.sql"
+        self.fixture.git("rm", "-q", "--", path)
+        base = self.fixture.commit("unsafe trusted deletion")
+        self.fixture.git("switch", "-q", "--detach", first_parent)
+        self.fixture.git("merge", "--no-ff", "-m", "sync unsafe deletion", base)
+        head = self.fixture.git("rev-parse", "HEAD")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} parent [0-9a-f]{12} D: .*20260719080000_base\.sql",
+        )
+
+    def test_remote_rejects_sync_merge_with_renamed_protected_migration(self) -> None:
+        _root, first_parent = self.fixture.timestamp_base()
+        source = "supabase/migrations/20260719080000_base.sql"
+        target = "supabase/migrations/20260719090000_renamed.sql"
+        self.fixture.git("mv", "--", source, target)
+        base = self.fixture.commit("unsafe trusted rename")
+        self.fixture.git("switch", "-q", "--detach", first_parent)
+        self.fixture.git("merge", "--no-ff", "-m", "sync unsafe rename", base)
+        head = self.fixture.git("rev-parse", "HEAD")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn(source, output)
+        self.assertIn(target, output)
+
+    def test_remote_rejects_tree_identical_sync_from_divergent_first_parent(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        self.fixture.git("switch", "-q", "--detach", root)
+        self.fixture.write("README.md", "divergent\n")
+        self.fixture.commit("diverge first parent", "README.md")
+        self.fixture.git("merge", "--no-ff", "--no-commit", base)
+        self.fixture.write("README.md", "fixture\n")
+        head = self.fixture.commit("tree-identical divergent merge", "README.md")
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertRegex(
+            output,
+            r"commit [0-9a-f]{12} parent [0-9a-f]{12} A: .*20260719080000_base\.sql",
+        )
+
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
 
