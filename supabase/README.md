@@ -85,7 +85,8 @@ SQL migration 순서:
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
 48. `20260724210000_durable_operations_scheduler.sql`
 49. `20260724234500_durable_scheduler_conflict_target.sql`
-50. `seed.sql` (로컬 non-live 기본값만)
+50. `20260725090000_durable_scheduler_budget_policy.sql`
+51. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -118,7 +119,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 반환합니다.
 Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
 `extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
-`20260724234500_durable_scheduler_conflict_target.sql`까지 적용하는
+`20260725090000_durable_scheduler_budget_policy.sql`까지 적용하는
 clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
 `public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
 전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail
@@ -137,6 +138,15 @@ routine도 동일하게 정규화합니다. migration 내부에서는 constraint
 실패하면 두 함수 교체 전체가 transaction으로 롤백됩니다. 별도 disposable verifier는
 commit 전후 OID·ACL·source SHA와 constraint metadata도 비교해 배포 증거를 거부하지만,
 그 사후 비교 자체가 이미 commit된 운영 migration을 자동 롤백하지는 않습니다.
+
+`20260725090000_durable_scheduler_budget_policy.sql`은 job별 retry/replay 예산을
+Worker 사전 검증이 아니라 PostgreSQL의 validated CHECK constraint로도 강제합니다.
+`operations.execution`과 `operations.settlement`은 정확히 1회 시도와 0회 수동
+재실행만 허용하고, commands/reconciliation/outbox는 최대 3회 시도와 최대 1회
+수동 재실행만 허용합니다. migration은 테이블을 잠근 뒤 기존 위반 row가 하나라도
+있으면 SQLSTATE `23514`로 전체 transaction을 중단하며 값을 임의 보정하지 않습니다.
+따라서 실패 시 해당 definition의 운영 근거를 검토하고 명시적으로 수렴시킨 후 다시
+적용해야 합니다.
 
 - exposed `api`/`worker_api` 함수가 모두 `SECURITY INVOKER`인지와 정확한 worker
   RPC allowlist

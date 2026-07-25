@@ -15,6 +15,12 @@ CONFLICT_FIX_MIGRATION_NAME = (
 CONFLICT_FIX_MIGRATION = (
     ROOT / "supabase" / "migrations" / CONFLICT_FIX_MIGRATION_NAME
 )
+BUDGET_POLICY_MIGRATION_NAME = (
+    "20260725090000_durable_scheduler_budget_policy.sql"
+)
+BUDGET_POLICY_MIGRATION = (
+    ROOT / "supabase" / "migrations" / BUDGET_POLICY_MIGRATION_NAME
+)
 VERIFIER = ROOT / "supabase" / "verify_durable_operations_scheduler.py"
 G1_G2_VERIFIER = ROOT / "supabase" / "verify_g1_g2_migration.py"
 MANIFEST = ROOT / "supabase" / "migration-checksums.v1.json"
@@ -39,6 +45,7 @@ EXPECTED_RPCS = {
 }
 EXPECTED_VERIFICATION_MARKERS = {
     "definition_digest_and_db_clock",
+    "definition_budget_policy",
     "outer_lease_binding",
     "commands_priority",
     "forced_startup_command_drain",
@@ -68,6 +75,7 @@ EXPECTED_VERIFICATION_MARKERS = {
     "single_trusted_owner_catalog",
     "zero_trading_order_side_effects",
     "populated_upgrade",
+    "populated_budget_policy_rollback",
     "conflict_target_drift_rollback",
     "disposable_container_cleanup",
 }
@@ -299,15 +307,55 @@ def test_scheduler_conflict_target_is_forward_patched_without_metadata_drift() -
     assert "#variable_conflict use_column" not in sql
 
 
+def test_scheduler_budget_policy_is_append_only_and_job_specific() -> None:
+    sql = _regular_file(BUDGET_POLICY_MIGRATION)
+    assert "lock table private.scheduler_job_definitions in access exclusive mode" in sql
+    assert "scheduler_job_definitions_job_budget_v1_check" in sql
+    assert "durable_scheduler_budget_policy_existing_rows_invalid" in sql
+    assert ") is not true" in sql
+    assert "using errcode = '23514'" in sql
+    assert "alter table private.scheduler_job_definitions" in sql
+    assert ") not valid;" in sql
+    assert "validate constraint scheduler_job_definitions_job_budget_v1_check" in sql
+    assert "definition.max_attempts = 1" in sql
+    assert "definition.max_manual_replays = 0" in sql
+    assert "definition.max_attempts between 1 and 3" in sql
+    assert "definition.max_manual_replays between 0 and 1" in sql
+    assert "max_attempts = 1" in sql
+    assert "max_manual_replays = 0" in sql
+    assert "max_attempts between 1 and 3" in sql
+    assert "max_manual_replays between 0 and 1" in sql
+    assert ") is true) not valid;" in sql
+    for job_key in EXPECTED_JOBS:
+        assert f"'{job_key}'" in sql
+    assert "create or replace function" not in sql
+    assert "grant " not in sql.casefold()
+
+
 def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None:
     source = _regular_file(VERIFIER)
     parsed = ast.parse(source)
     assert 'POSTGRES_IMAGE = "postgres:17.6-alpine"' in source
     assert f'MIGRATION_NAME = "{MIGRATION_NAME}"' in source
+    assert f'BUDGET_POLICY_MIGRATION_NAME = (\n    "{BUDGET_POLICY_MIGRATION_NAME}"' in source
     for marker in EXPECTED_VERIFICATION_MARKERS:
         assert f'"{marker}"' in source
     assert "apply_repository(fresh)" in source
     assert "verify_populated_upgrade(upgrade)" in source
+    assert "verify_definition_budget_policy(fresh, first_outer)" in source
+    assert "verify_budget_policy_populated_rollback(" in source
+    budget_verifier = source[
+        source.index("def verify_definition_budget_policy") :
+        source.index("def open_scheduler_account_fixtures")
+    ]
+    assert 'safe_after_rejection != "3|1"' in budget_verifier
+    assert (
+        "update private.scheduler_job_definitions set max_attempts=4," in budget_verifier
+    )
+    assert '"revision=revision+1,updated_at=pg_catalog.clock_timestamp() "' in budget_verifier
+    assert budget_verifier.count(
+        '"scheduler_job_definitions_job_budget_v1_check"'
+    ) >= 3
     assert "verify_conflict_target_drift_rollback(upgrade)" in source
     assert '"23514"' in source
     assert "durable_scheduler_conflict_patch_target_invalid" in source
@@ -475,6 +523,7 @@ def test_scheduler_migration_checksums_are_wired_after_final_freeze() -> None:
     for migration_name, migration_path in (
         (MIGRATION_NAME, MIGRATION),
         (CONFLICT_FIX_MIGRATION_NAME, CONFLICT_FIX_MIGRATION),
+        (BUDGET_POLICY_MIGRATION_NAME, BUDGET_POLICY_MIGRATION),
     ):
         migration = _regular_file(migration_path)
         expected = hashlib.sha256(migration.encode("utf-8")).hexdigest()

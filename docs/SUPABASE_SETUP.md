@@ -130,7 +130,8 @@ guarantee. Any ambiguous state stops the release.
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
 48. `20260724210000_durable_operations_scheduler.sql`
 49. `20260724234500_durable_scheduler_conflict_target.sql`
-50. `seed.sql`
+50. `20260725090000_durable_scheduler_budget_policy.sql`
+51. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -286,6 +287,14 @@ The timestamp migrations extend that boundary in this order:
   that the first replacement is rolled back when the second function fails
   inside the same migration transaction. This migration does not add an RPC,
   table, grant, cadence job, or trading authority.
+- `20260725090000_durable_scheduler_budget_policy.sql` adds the authoritative
+  job-specific retry/replay budget CHECK without changing the RPC surface.
+  Execution and settlement require `max_attempts=1` and
+  `max_manual_replays=0`; commands, reconciliation, and outbox allow at most
+  three attempts and one manual replay. The migration takes an exclusive table
+  lock, rejects any populated row outside that policy with SQLSTATE `23514`,
+  and never rewrites an unsafe value into a guessed safe value. Resolve and
+  document any rejected definition before retrying the migration.
 
 ## Required project configuration
 

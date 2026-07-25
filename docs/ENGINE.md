@@ -43,9 +43,11 @@ The required post-`0024` engine/database tail is
 `20260714161511_unknown_execution_resolution_v2.sql`, and
 `20260714165910_unknown_resolution_desktop_projection.sql`, followed by
 `20260715020752_kst_trading_date_convergence.sql`. The durable cadence boundary
-is finalized by `20260724210000_durable_operations_scheduler.sql` after the
-intervening evidence, calendar, and Desktop projection migrations documented in
-[Supabase Setup](SUPABASE_SETUP.md).
+is established by `20260724210000_durable_operations_scheduler.sql`, corrected
+by `20260724234500_durable_scheduler_conflict_target.sql`, and capped at the
+database boundary by `20260725090000_durable_scheduler_budget_policy.sql` after
+the intervening evidence, calendar, and Desktop projection migrations
+documented in [Supabase Setup](SUPABASE_SETUP.md).
 
 ## Paper execution v1
 

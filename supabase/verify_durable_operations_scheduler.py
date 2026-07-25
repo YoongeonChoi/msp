@@ -46,6 +46,9 @@ MIGRATION_NAME = "20260724210000_durable_operations_scheduler.sql"
 CONFLICT_FIX_MIGRATION_NAME = (
     "20260724234500_durable_scheduler_conflict_target.sql"
 )
+BUDGET_POLICY_MIGRATION_NAME = (
+    "20260725090000_durable_scheduler_budget_policy.sql"
+)
 CHECKSUM_MANIFEST = ROOT / "migration-checksums.v1.json"
 ACCOUNT_ID = "paper-primary"
 HOLDER_ID = "51515151-5151-4515-8515-515151515151"
@@ -112,6 +115,7 @@ CONSTRAINT_CONFLICT_FRAGMENT = (
 VERIFICATION_MARKERS = frozenset(
     {
         "definition_digest_and_db_clock",
+        "definition_budget_policy",
         "outer_lease_binding",
         "commands_priority",
         "forced_startup_command_drain",
@@ -141,6 +145,7 @@ VERIFICATION_MARKERS = frozenset(
         "single_trusted_owner_catalog",
         "zero_trading_order_side_effects",
         "populated_upgrade",
+        "populated_budget_policy_rollback",
         "conflict_target_drift_rollback",
         "disposable_container_cleanup",
     }
@@ -874,7 +879,11 @@ def verify_checksum_wiring() -> None:
         manifest = json.loads(CHECKSUM_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         raise VerificationError("durable scheduler checksum is not wired") from error
-    for migration_name in (MIGRATION_NAME, CONFLICT_FIX_MIGRATION_NAME):
+    for migration_name in (
+        MIGRATION_NAME,
+        CONFLICT_FIX_MIGRATION_NAME,
+        BUDGET_POLICY_MIGRATION_NAME,
+    ):
         target = MIGRATIONS / migration_name
         if not target.is_file() or target.is_symlink():
             raise VerificationError(
@@ -893,7 +902,83 @@ def verify_checksum_wiring() -> None:
                 "durable scheduler checksum mismatch: "
                 f"migration={migration_name}, expected={expected!r}, actual={actual}"
             )
-    print("PASS durable scheduler migration and conflict fix checksum wiring")
+    print("PASS durable scheduler migration tail checksum wiring")
+
+
+def verify_definition_budget_policy(
+    container: str,
+    outer: dict[str, Any],
+) -> None:
+    outer_token = int(outer["fencing_token"])
+    invalid_ensure_specs = (
+        effectful_definition_spec("operations.execution")
+        | {"max_attempts": 2},
+        effectful_definition_spec("operations.settlement")
+        | {"max_manual_replays": 1},
+    )
+    invalid_converge_specs = (
+        definition_spec("operations.commands", max_attempts=4),
+        definition_spec("operations.outbox", max_manual_replays=2),
+    )
+    for spec in invalid_ensure_specs:
+        _service_failure(
+            container,
+            HOLDER_ID,
+            _ensure_sql(spec).format(outer_token=outer_token),
+            "scheduler_job_definitions_job_budget_v1_check",
+        )
+    for spec in invalid_converge_specs:
+        _service_failure(
+            container,
+            HOLDER_ID,
+            _converge_sql(spec, outer_token),
+            "scheduler_job_definitions_job_budget_v1_check",
+        )
+
+    safe_upper_bound = definition_spec(
+        "operations.outbox",
+        max_attempts=3,
+        max_manual_replays=1,
+    )
+    safe_receipt = ensure_definition(container, outer_token, safe_upper_bound)
+    expect_failure(
+        container,
+        "update private.scheduler_job_definitions set max_attempts=4,"
+        "revision=revision+1,updated_at=pg_catalog.clock_timestamp() "
+        "where definition_id="
+        f"{sql_text(str(safe_receipt['definition_id']))}::uuid;",
+        "scheduler_job_definitions_job_budget_v1_check",
+    )
+    safe_after_rejection = scalar(
+        container,
+        "select concat_ws('|',max_attempts,max_manual_replays) "
+        "from private.scheduler_job_definitions where definition_id="
+        f"{sql_text(str(safe_receipt['definition_id']))}::uuid;",
+    )
+    if safe_after_rejection != "3|1":
+        raise VerificationError(
+            "scheduler budget policy changed a rejected direct update: "
+            f"{safe_after_rejection}"
+        )
+
+    constraint_receipt = scalar(
+        container,
+        "select concat_ws('|',constraint_record.contype='c',"
+        "constraint_record.convalidated) "
+        "from pg_catalog.pg_constraint as constraint_record "
+        "where constraint_record.conrelid="
+        "'private.scheduler_job_definitions'::regclass "
+        "and constraint_record.conname="
+        "'scheduler_job_definitions_job_budget_v1_check';",
+    )
+    if constraint_receipt != "t|t":
+        raise VerificationError(
+            f"scheduler budget policy constraint mismatch: {constraint_receipt}"
+        )
+    print(
+        "PASS definition_budget_policy accepts the safe upper bound and rejects "
+        "unsafe ensure, converge and direct SQL budgets"
+    )
 
 
 def open_scheduler_account_fixtures(container: str) -> None:
@@ -3919,18 +4004,74 @@ $drift$;
     print("PASS conflict_target_drift_rollback")
 
 
+def verify_budget_policy_populated_rollback(
+    container: str,
+    migration: Path,
+    outer_token: int,
+) -> None:
+    unsafe_spec = definition_spec(
+        "operations.outbox",
+        interval_seconds=60,
+        lease_ttl_seconds=30,
+        max_attempts=4,
+        retry_base_seconds=5,
+        retry_max_seconds=5,
+    )
+    unsafe_receipt = ensure_definition(container, outer_token, unsafe_spec)
+    before = scalar(
+        container,
+        "select concat_ws('|',count(*),min(definition_sha256),"
+        "min(max_attempts),min(max_manual_replays)) "
+        "from private.scheduler_job_definitions where definition_id="
+        f"{sql_text(str(unsafe_receipt['definition_id']))}::uuid;",
+    )
+    expect_failure(
+        container,
+        "\\set VERBOSITY verbose\n" + migration.read_text(encoding="utf-8"),
+        "23514",
+        "durable_scheduler_budget_policy_existing_rows_invalid",
+    )
+    after = scalar(
+        container,
+        "select concat_ws('|',count(*),min(definition_sha256),"
+        "min(max_attempts),min(max_manual_replays)) "
+        "from private.scheduler_job_definitions where definition_id="
+        f"{sql_text(str(unsafe_receipt['definition_id']))}::uuid;",
+    )
+    constraint_count = scalar(
+        container,
+        "select count(*) from pg_catalog.pg_constraint "
+        "where conrelid='private.scheduler_job_definitions'::regclass "
+        "and conname='scheduler_job_definitions_job_budget_v1_check';",
+    )
+    if before != after or constraint_count != "0":
+        raise VerificationError(
+            "failed budget-policy migration did not roll back atomically: "
+            f"before={before!r}, after={after!r}, constraints={constraint_count!r}"
+        )
+    safe_spec = dict(unsafe_spec)
+    safe_spec["max_attempts"] = 3
+    safe_receipt = ensure_definition(container, outer_token, safe_spec)
+    if safe_receipt["definition_id"] != unsafe_receipt["definition_id"]:
+        raise VerificationError("budget-policy fixture convergence changed definition id")
+    psql(container, migration.read_text(encoding="utf-8"))
+    print("PASS populated_budget_policy_rollback and corrected migration apply")
+
+
 def verify_populated_upgrade(container: str) -> None:
     psql(container, bootstrap_sql())
     target = MIGRATIONS / MIGRATION_NAME
     conflict_fix = MIGRATIONS / CONFLICT_FIX_MIGRATION_NAME
+    budget_policy = MIGRATIONS / BUDGET_POLICY_MIGRATION_NAME
     migrations = sorted(MIGRATIONS.glob("*.sql"))
     try:
         target_index = migrations.index(target)
         conflict_fix_index = migrations.index(conflict_fix)
+        budget_policy_index = migrations.index(budget_policy)
     except ValueError as error:
         raise VerificationError("durable scheduler migration boundary is missing") from error
-    if conflict_fix_index <= target_index:
-        raise VerificationError("durable scheduler conflict fix boundary is invalid")
+    if not target_index < conflict_fix_index < budget_policy_index:
+        raise VerificationError("durable scheduler migration tail boundary is invalid")
     for migration in migrations[:target_index]:
         psql(container, migration.read_text(encoding="utf-8"))
     psql(container, SEED.read_text(encoding="utf-8"))
@@ -3959,7 +4100,14 @@ def verify_populated_upgrade(container: str) -> None:
     psql(container, conflict_fix.read_text(encoding="utf-8"))
     after_conflict_fix = scheduler_conflict_patch_snapshot(container)
     verify_conflict_patch_transition(before_conflict_fix, after_conflict_fix)
-    for migration in migrations[conflict_fix_index + 1 :]:
+    for migration in migrations[conflict_fix_index + 1 : budget_policy_index]:
+        psql(container, migration.read_text(encoding="utf-8"))
+    verify_budget_policy_populated_rollback(
+        container,
+        budget_policy,
+        int(outer["fencing_token"]),
+    )
+    for migration in migrations[budget_policy_index + 1 :]:
         psql(container, migration.read_text(encoding="utf-8"))
     spec = definition_spec(
         "operations.outbox",
@@ -4060,6 +4208,7 @@ def main() -> int:
         open_scheduler_account_fixtures(fresh)
         before_domain = domain_snapshot(fresh)
         first_outer = acquire_outer_lease(fresh)
+        verify_definition_budget_policy(fresh, first_outer)
         specs, first_claim = verify_definition_digest_and_db_clock(
             fresh,
             first_outer,

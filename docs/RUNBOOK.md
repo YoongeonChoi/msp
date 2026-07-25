@@ -34,7 +34,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260719090000_pit_daily_candle_collection_job_store.sql`, followed by
 `20260723162000_desktop_operations_sensitive_projection_gate.sql`, followed by
 `20260724210000_durable_operations_scheduler.sql`, followed by
-`20260724234500_durable_scheduler_conflict_target.sql`.
+`20260724234500_durable_scheduler_conflict_target.sql`, followed by
+`20260725090000_durable_scheduler_budget_policy.sql`.
 
 After the Desktop sensitive-projection migration, run the complete
 `python supabase/verify_g1_g2_migration.py` verifier without
@@ -46,7 +47,8 @@ permissions and the exact known audit/reconciliation fixture. `anon` and
 identifier-free reconciliation health state as auditor evidence; it remains
 part of minimum-status availability.
 
-After the durable operations scheduler and its conflict-target correction,
+After the durable operations scheduler, its conflict-target correction, and
+the authoritative job-specific budget policy,
 run the fresh-install, populated-upgrade, catalog-preservation, and atomic
 rollback verifier:
 
