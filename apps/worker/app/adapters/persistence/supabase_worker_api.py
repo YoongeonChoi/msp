@@ -10,6 +10,10 @@ from uuid import UUID
 
 import httpx
 
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
 from app.config import Settings
 from app.domain.common.json import JsonObject, JsonValue
 from app.domain.execution_v2.cash_settlement import (
@@ -136,7 +140,8 @@ class SupabaseWorkerApi:
     ) -> None:
         if not settings.execution_v2_enabled or not settings.execution_v2_worker_api_enabled:
             raise ExecutionInvariantError("execution_v2_worker_api_is_not_enabled")
-        if not settings.supabase_url or settings.supabase_secret_key is None:
+        supabase_url = settings.supabase_url
+        if not supabase_url or settings.supabase_secret_key is None:
             raise ExecutionInvariantError("execution_v2_worker_api_credentials_are_missing")
         resolved_release_sha = release_sha or worker_release_metadata().get("release_sha")
         if (
@@ -144,24 +149,51 @@ class SupabaseWorkerApi:
             or _SHA_RE.fullmatch(resolved_release_sha) is None
         ):
             raise ExecutionInvariantError("execution_v2_worker_api_release_sha_is_missing")
+        try:
+            authority = persistence_authority_fingerprint(
+                namespace="supabase-worker-api",
+                origin=supabase_url,
+                profile=WORKER_API_SCHEMA,
+            )
+        except ValueError:
+            raise ExecutionInvariantError(
+                "execution_v2_worker_api_origin_is_invalid"
+            ) from None
         secret = settings.supabase_secret_key.get_secret_value()
-        self.release_sha = resolved_release_sha.lower()
-        self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
-        self.headers = supabase_api_headers(secret) | {
+        self._release_sha = resolved_release_sha.lower()
+        self._persistence_authority: PersistenceAuthority = authority
+        self._base_url = supabase_url.rstrip("/") + "/rest/v1/rpc"
+        self._headers = supabase_api_headers(secret) | {
             "accept-profile": WORKER_API_SCHEMA,
             "content-profile": WORKER_API_SCHEMA,
             "content-type": "application/json",
         }
         self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=10.0, headers=self.headers)
+        self._client = client or httpx.AsyncClient(
+            timeout=10.0,
+            headers=self._headers,
+            trust_env=False,
+        )
 
     async def close(self) -> None:
         if self._owns_client:
-            await self.client.aclose()
+            await self._client.aclose()
+
+    @property
+    def release_sha(self) -> str:
+        return self._release_sha
 
     @property
     def current_release_sha(self) -> str:
-        return self.release_sha
+        return self._release_sha
+
+    @property
+    def persistence_authority(self) -> PersistenceAuthority:
+        return self._persistence_authority
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     async def acquire_worker_lease(
         self,
@@ -1960,10 +1992,10 @@ class SupabaseWorkerApi:
         payload: JsonObject,
     ) -> object:
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if rpc == "complete_cash_settlement":
@@ -2004,10 +2036,10 @@ class SupabaseWorkerApi:
         if rpc not in WORKER_API_RPC_ALLOWLIST:
             raise ExecutionInvariantError("worker_api_rpc_is_not_allowed")
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if rpc == "apply_unknown_resolution_v2":
@@ -2030,10 +2062,10 @@ class SupabaseWorkerApi:
         if rpc not in WORKER_API_RPC_ALLOWLIST:
             raise ExecutionInvariantError("worker_api_rpc_is_not_allowed")
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
             response.raise_for_status()
             return response.json()

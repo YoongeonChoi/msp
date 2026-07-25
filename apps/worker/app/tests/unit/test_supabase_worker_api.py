@@ -13,6 +13,9 @@ from app.adapters.persistence.supabase_worker_api import (
     WORKER_API_RPC_ALLOWLIST,
     SupabaseWorkerApi,
 )
+from app.application.ports.persistence_authority import (
+    persistence_authority_fingerprint,
+)
 from app.config import Settings
 from app.domain.common.json import JsonObject
 from app.domain.execution_v2.models import (
@@ -197,6 +200,49 @@ def test_worker_api_rejects_release_sha_outside_exact_database_contract(
 ) -> None:
     with pytest.raises(ExecutionInvariantError, match="release_sha_is_missing"):
         SupabaseWorkerApi(_enabled_settings(), release_sha=release_sha)
+
+
+async def test_worker_api_exposes_only_read_only_runtime_identity() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, request=request, json=[])
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = SupabaseWorkerApi(
+            _enabled_settings(),
+            release_sha="a" * 40,
+            client=client,
+        )
+
+        expected_authority = persistence_authority_fingerprint(
+            namespace="supabase-worker-api",
+            origin="https://example.supabase.co",
+            profile="worker_api",
+        )
+        assert adapter.release_sha == "a" * 40
+        assert adapter.current_release_sha == adapter.release_sha
+        assert adapter.persistence_authority == expected_authority
+        assert adapter.base_url == "https://example.supabase.co/rest/v1/rpc"
+        assert not hasattr(adapter, "client")
+        assert not hasattr(adapter, "headers")
+        for field, value in (
+            ("release_sha", "b" * 40),
+            ("persistence_authority", "supabase-worker-api:" + "f" * 64),
+            ("base_url", "https://attacker.invalid/rest/v1/rpc"),
+        ):
+            with pytest.raises(AttributeError):
+                setattr(adapter, field, value)
+
+
+async def test_worker_api_rejects_non_origin_supabase_url() -> None:
+    settings = _enabled_settings().model_copy(
+        update={"supabase_url": "https://example.supabase.co/unexpected"}
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, request=request, json=[])
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ExecutionInvariantError, match="worker_api_origin_is_invalid"):
+            SupabaseWorkerApi(settings, release_sha="a" * 40, client=client)
 
 
 async def test_worker_api_uses_private_schema_and_exact_lease_rpc_contract() -> None:
