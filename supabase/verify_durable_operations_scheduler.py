@@ -2509,10 +2509,17 @@ def verify_job_specific_retry_matrix_and_completion(
         ),
         "scheduler_completion_compare_and_swap_failed",
     )
-    settlement_disabled = dict(specs["operations.settlement"])
-    settlement_disabled["enabled"] = False
-    ensure_definition(container, outer_token, settlement_disabled)
-    specs["operations.settlement"] = settlement_disabled
+    effectful_expiry_isolation = (
+        "operations.settlement",
+        "operations.reconciliation",
+        "operations.outbox",
+    )
+    for job_key in effectful_expiry_isolation:
+        disabled = dict(specs[job_key])
+        disabled["enabled"] = False
+        ensure_definition(container, outer_token, disabled)
+        specs[job_key] = disabled
+    settlement_disabled = specs["operations.settlement"]
     wait_for_run_deadline(
         container,
         str(execution["run"]["run_id"]),

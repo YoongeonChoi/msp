@@ -318,6 +318,19 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert "scheduler_run_lock_fixture" in source
     assert "pg_catalog.extract(epoch from" not in source
     assert source.count("extract(epoch from") == 3
+    retry_matrix = source[
+        source.index("def verify_job_specific_retry_matrix_and_completion") :
+        source.index("def verify_concurrent_single_claim")
+    ]
+    isolation_prefix = retry_matrix.split("wait_for_run_deadline(", maxsplit=1)[0]
+    assert "for job_key in effectful_expiry_isolation:" in isolation_prefix
+    assert 'disabled["enabled"] = False' in isolation_prefix
+    for job_key in (
+        "operations.settlement",
+        "operations.reconciliation",
+        "operations.outbox",
+    ):
+        assert f'"{job_key}"' in isolation_prefix
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
     assert "command_before <= next_due_at <= observed_at <= command_after" in source
