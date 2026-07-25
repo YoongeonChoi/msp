@@ -1250,7 +1250,11 @@ function snapshotCommandHash(): string {
 async function confirmNativeDialog(page: Page, title: string, confirmLabel: string): Promise<void> {
   const dialog = page.getByRole("dialog", { name: title });
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: confirmLabel, exact: true }).press("Enter");
+  const cancelButton = dialog.getByRole("button", { name: "취소", exact: true });
+  await expect(cancelButton).toBeFocused();
+  const confirmButton = dialog.getByRole("button", { name: confirmLabel, exact: true });
+  await expect(confirmButton).toBeEnabled();
+  await confirmButton.press("Enter");
   await expect(dialog).toHaveCount(0);
 }
 
