@@ -282,7 +282,10 @@ def _is_reversed_trusted_noop_sync_merge(
     if len(parents) != 2 or parents[0] != trusted_base:
         return False
     second_parent = parents[1]
-    if not _is_ancestor(repo_root, second_parent, trusted_base):
+    if not (
+        _is_ancestor(repo_root, second_parent, trusted_base)
+        or _is_ancestor(repo_root, trusted_base, second_parent)
+    ):
         return False
     trusted_tree = _git(repo_root, "rev-parse", f"{trusted_base}^{{tree}}").strip()
     commit_tree = _git(repo_root, "rev-parse", f"{commit}^{{tree}}").strip()

@@ -580,6 +580,35 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertEqual(result, 1, output)
         self.assertIn("trusted base as its second parent", output)
 
+    def test_remote_rejects_redundant_merge_of_integrated_main_into_base(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        tree = self.fixture.git("rev-parse", f"{base}^{{tree}}")
+        integrated_main = self.fixture.git(
+            "commit-tree",
+            tree,
+            "-p",
+            root,
+            "-p",
+            base,
+            "-m",
+            "integrate reviewed base into main",
+        )
+        head = self.fixture.git(
+            "commit-tree",
+            tree,
+            "-p",
+            base,
+            "-p",
+            integrated_main,
+            "-m",
+            "redundantly merge integrated main into base",
+        )
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("trusted base as its second parent", output)
+
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
 
