@@ -561,6 +561,25 @@ class MigrationHistoryGuardTests(unittest.TestCase):
             r"commit [0-9a-f]{12} parent [0-9a-f]{12} A: .*20260719080000_base\.sql",
         )
 
+    def test_remote_rejects_tree_identical_sync_with_reversed_parent_order(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        tree = self.fixture.git("rev-parse", f"{base}^{{tree}}")
+        head = self.fixture.git(
+            "commit-tree",
+            tree,
+            "-p",
+            base,
+            "-p",
+            root,
+            "-m",
+            "reverse ancestry-only sync",
+        )
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("trusted base as its second parent", output)
+
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
 
