@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from time import monotonic
-from typing import Any, Never, cast
+from typing import Any, Literal, Never, cast
 
 import pytest
 
@@ -17,6 +17,7 @@ from app.application.services.scheduler_invocation_deadline import (
     SCHEDULER_INVOCATION_SETTLEMENT_RESERVE,
     FailStop,
     SchedulerClaimedInvocation,
+    SchedulerConvergenceClaimResult,
     SchedulerInvocationBinding,
     SchedulerInvocationDeadline,
     SchedulerInvocationDeadlineExceeded,
@@ -24,6 +25,7 @@ from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationPermit,
     SchedulerInvocationPermitRevoked,
     _claim_scheduler_invocation_with_clock,
+    _converge_scheduler_definition_invocation_with_clock,
     require_scheduler_invocation_permit,
     run_with_scheduler_deadline,
 )
@@ -33,9 +35,11 @@ from app.domain.scheduler.models import (
     SCHEDULER_RETRYABLE_REASONS,
     ScheduledJobClaimReceiptV1,
     ScheduledJobClaimV1,
+    ScheduledJobConvergenceDefinitionV1,
     ScheduledJobDefinitionV1,
     ScheduledJobLeaseV1,
     ScheduledJobRunV1,
+    SchedulerDefinitionConvergenceReceiptV1,
     SchedulerInvariantError,
     SchedulerJobKey,
 )
@@ -47,6 +51,7 @@ _LEASE_TOKEN = "22222222-2222-4222-8222-222222222222"
 _HOLDER_ID = "33333333-3333-4333-8333-333333333333"
 _RELEASE_SHA = "a" * 40
 _PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "b" * 64
+_OTHER_PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "c" * 64
 
 
 class _Clock:
@@ -101,6 +106,8 @@ def _must_not_fail_stop(reason: str) -> Never:
 
 class _SchedulerPortStub:
     after_claim: Callable[[], None] | None
+    convergence_receipt: SchedulerDefinitionConvergenceReceiptV1 | None
+    converged_definitions: list[ScheduledJobDefinitionV1]
     receipt: ScheduledJobClaimReceiptV1
     release_sha: str
     persistence_authority: str
@@ -111,11 +118,14 @@ class _SchedulerPortStub:
         receipt: ScheduledJobClaimReceiptV1,
         *,
         after_claim: Callable[[], None] | None = None,
+        convergence_receipt: SchedulerDefinitionConvergenceReceiptV1 | None = None,
     ) -> None:
         self.release_sha = _RELEASE_SHA
         self.persistence_authority = _PERSISTENCE_AUTHORITY
         self.receipt = receipt
         self.after_claim = after_claim
+        self.convergence_receipt = convergence_receipt
+        self.converged_definitions = []
         self.received_outer_leases = []
 
     async def claim_due_job(
@@ -127,6 +137,20 @@ class _SchedulerPortStub:
         if self.after_claim is not None:
             self.after_claim()
         return self.receipt
+
+    async def converge_job_definition(
+        self,
+        definition: ScheduledJobDefinitionV1,
+        *,
+        outer_lease: WorkerLease,
+    ) -> SchedulerDefinitionConvergenceReceiptV1:
+        self.converged_definitions.append(definition)
+        self.received_outer_leases.append(outer_lease)
+        if self.after_claim is not None:
+            self.after_claim()
+        if self.convergence_receipt is None:
+            raise AssertionError("unexpected convergence")
+        return self.convergence_receipt
 
 
 class _RuntimeStub:
@@ -206,6 +230,30 @@ def _claim(
         run=run,
         lease=lease,
         observed_at=observed_at,
+    )
+
+
+def _convergence_receipt(
+    *,
+    definition: ScheduledJobDefinitionV1,
+    claim: ScheduledJobClaimV1 | None = None,
+) -> SchedulerDefinitionConvergenceReceiptV1:
+    status: Literal["claimed", "converged"] = "claimed" if claim is not None else "converged"
+    return SchedulerDefinitionConvergenceReceiptV1(
+        status=status,
+        definition=ScheduledJobConvergenceDefinitionV1(
+            definition_id="55555555-5555-4555-8555-555555555555",
+            account_id=_ACCOUNT_ID,
+            definition=definition,
+            revision=1,
+            next_due_at=_OBSERVED_AT + timedelta(seconds=definition.interval_seconds),
+            scheduler_state="ready",
+        ),
+        claim=claim,
+        active_run_id=claim.run.run_id if claim is not None else None,
+        next_eligible_at=None,
+        reason_code=None,
+        observed_at=_OBSERVED_AT,
     )
 
 
@@ -529,6 +577,22 @@ async def test_claim_rejects_runtime_port_or_identity_changes_after_rpc() -> Non
             monotonic_clock=_Clock(100.0),
         )
 
+    authority_port = _SchedulerPortStub(receipt)
+    runtime = _RuntimeStub(authority_port, _outer_lease())
+    authority_port.after_claim = lambda: setattr(
+        authority_port,
+        "persistence_authority",
+        _OTHER_PERSISTENCE_AUTHORITY,
+    )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_runtime_identity_changed",
+    ):
+        await _claim_scheduler_invocation_with_clock(
+            cast(Any, runtime),
+            monotonic_clock=_Clock(100.0),
+        )
+
     identity_port = _SchedulerPortStub(receipt)
     runtime = _RuntimeStub(identity_port, _outer_lease())
     identity_port.after_claim = lambda: setattr(runtime, "release_sha", "c" * 40)
@@ -563,6 +627,342 @@ async def test_claim_rejects_release_identity_mismatch() -> None:
 def test_raw_claim_and_deadline_issuance_helpers_are_not_exposed() -> None:
     assert not hasattr(deadline_module, "_begin_scheduler_claim_rpc")
     assert not hasattr(deadline_module, "_issue_scheduler_invocation")
+
+
+async def test_convergence_claim_is_bound_to_its_rpc_start_and_receipt() -> None:
+    clock = _Clock(100.0)
+    claim = _claim(lease_seconds=20)
+    receipt = _convergence_receipt(
+        definition=claim.definition,
+        claim=claim,
+    )
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        after_claim=lambda: setattr(clock, "value", 103.0),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(port, _outer_lease(lease_seconds=30))
+
+    result = await _converge_scheduler_definition_invocation_with_clock(
+        cast(Any, runtime),
+        claim.definition,
+        monotonic_clock=clock,
+    )
+
+    assert result.receipt == receipt
+    assert result.invocation is not None
+    assert result.invocation.claim == claim
+    assert result.invocation.deadline.rpc_started_monotonic == 100.0
+    assert result.invocation.deadline.monotonic_deadline == 114.0
+    assert port.converged_definitions == [claim.definition]
+    assert port.received_outer_leases == [_outer_lease(lease_seconds=30)]
+    assert runtime.integrity_checks == 2
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_result_is_immutable",
+    ):
+        result._invocation = None
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_result_is_not_copyable",
+    ):
+        copy.copy(result)
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_result_is_not_serializable",
+    ):
+        pickle.dumps(result)
+
+
+async def test_convergence_clock_failure_prevents_the_rpc() -> None:
+    def failed_clock() -> float:
+        raise RuntimeError("clock_failed")
+
+    definition = _definition("operations.commands")
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=_convergence_receipt(definition=definition),
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_clock_failed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, _RuntimeStub(port, _outer_lease())),
+            definition,
+            monotonic_clock=failed_clock,
+        )
+
+    assert port.converged_definitions == []
+    assert port.received_outer_leases == []
+
+
+async def test_converged_definition_returns_no_invocation() -> None:
+    definition = _definition("operations.commands")
+    receipt = _convergence_receipt(definition=definition)
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+
+    result = await _converge_scheduler_definition_invocation_with_clock(
+        cast(Any, _RuntimeStub(port, _outer_lease())),
+        definition,
+        monotonic_clock=_Clock(100.0),
+    )
+
+    assert result.receipt == receipt
+    assert result.invocation is None
+
+
+async def test_convergence_accepts_only_same_generation_outer_lease_renewal() -> None:
+    claim = _claim(lease_seconds=20)
+    captured = _outer_lease(lease_seconds=25)
+    renewed = replace(captured, expires_at=captured.expires_at + timedelta(seconds=5))
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=_convergence_receipt(
+            definition=claim.definition,
+            claim=claim,
+        ),
+    )
+    runtime = _RuntimeStub(port, captured)
+    port.after_claim = lambda: setattr(runtime, "outer_lease", renewed)
+
+    result = await _converge_scheduler_definition_invocation_with_clock(
+        cast(Any, runtime),
+        claim.definition,
+        monotonic_clock=_Clock(100.0),
+    )
+
+    assert result.invocation is not None
+    assert result.invocation.outer_lease == renewed
+    assert result.invocation.deadline.database_cutoff_at == (
+        _OBSERVED_AT + timedelta(seconds=14)
+    )
+
+
+async def test_convergence_rejects_a_receipt_outside_the_outer_lease() -> None:
+    definition = _definition("operations.commands")
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=_convergence_receipt(definition=definition),
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_outer_lease_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, _RuntimeStub(port, _outer_lease(lease_seconds=0.0))),
+            definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+
+async def test_convergence_rejects_definition_or_outer_generation_drift() -> None:
+    requested = _definition("operations.commands")
+    mismatched_receipt = _convergence_receipt(
+        definition=replace(requested, interval_seconds=3)
+    )
+    mismatched_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=mismatched_receipt,
+    )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_receipt_binding_mismatch",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, _RuntimeStub(mismatched_port, _outer_lease())),
+            requested,
+            monotonic_clock=_Clock(100.0),
+        )
+
+    receipt = _convergence_receipt(definition=requested)
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(port, _outer_lease())
+    port.after_claim = lambda: setattr(
+        runtime,
+        "outer_lease",
+        replace(_outer_lease(), fencing_token=8),
+    )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_outer_lease_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, runtime),
+            requested,
+            monotonic_clock=_Clock(100.0),
+        )
+
+
+async def test_convergence_rejects_runtime_port_or_identity_changes_after_rpc() -> None:
+    definition = _definition("operations.commands")
+    receipt = _convergence_receipt(definition=definition)
+    original_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    replacement_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(original_port, _outer_lease())
+    original_port.after_claim = lambda: setattr(
+        runtime,
+        "scheduler_port",
+        cast(Any, replacement_port),
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_runtime_port_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, runtime),
+            definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+    authority_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(authority_port, _outer_lease())
+    authority_port.after_claim = lambda: setattr(
+        authority_port,
+        "persistence_authority",
+        _OTHER_PERSISTENCE_AUTHORITY,
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_runtime_identity_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, runtime),
+            definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+    release_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(release_port, _outer_lease())
+    release_port.after_claim = lambda: setattr(release_port, "release_sha", "c" * 40)
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_runtime_identity_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, runtime),
+            definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+    identity_port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+    runtime = _RuntimeStub(identity_port, _outer_lease())
+    identity_port.after_claim = lambda: setattr(runtime, "release_sha", "c" * 40)
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_runtime_identity_changed",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, runtime),
+            definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+
+async def test_convergence_rejects_claim_release_identity_drift() -> None:
+    claim = _claim()
+    mismatched_claim = replace(
+        claim,
+        lease=replace(claim.lease, release_sha="c" * 40),
+    )
+    receipt = _convergence_receipt(
+        definition=mismatched_claim.definition,
+        claim=mismatched_claim,
+    )
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=receipt,
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_release_binding_is_invalid",
+    ):
+        await _converge_scheduler_definition_invocation_with_clock(
+            cast(Any, _RuntimeStub(port, _outer_lease())),
+            mismatched_claim.definition,
+            monotonic_clock=_Clock(100.0),
+        )
+
+
+async def test_convergence_result_rejects_public_self_minting() -> None:
+    claim = _claim()
+    claimed_receipt = _convergence_receipt(
+        definition=claim.definition,
+        claim=claim,
+    )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_result_is_not_issued",
+    ):
+        SchedulerConvergenceClaimResult(
+            receipt=claimed_receipt,
+            invocation=None,
+            _issuance=object(),
+        )
+
+    invocation = await _deadline(_Clock(100.0))
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_result_is_not_issued",
+    ):
+        SchedulerConvergenceClaimResult(
+            receipt=_convergence_receipt(definition=claim.definition),
+            invocation=invocation,
+            _issuance=object(),
+        )
+
+
+async def test_convergence_result_detects_object_level_tampering() -> None:
+    claim = _claim()
+    port = _SchedulerPortStub(
+        ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT),
+        convergence_receipt=_convergence_receipt(
+            definition=claim.definition,
+            claim=claim,
+        ),
+    )
+    result = await _converge_scheduler_definition_invocation_with_clock(
+        cast(Any, _RuntimeStub(port, _outer_lease())),
+        claim.definition,
+        monotonic_clock=_Clock(100.0),
+    )
+
+    object.__setattr__(result, "_invocation", None)
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_convergence_invocation_is_invalid",
+    ):
+        _ = result.receipt
 
 
 async def test_deadline_binds_the_complete_scheduler_invocation_identity() -> None:

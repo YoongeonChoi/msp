@@ -26,11 +26,15 @@ from app.domain.execution_v2.models import WorkerLease
 from app.domain.scheduler.models import (
     SCHEDULER_JOB_KEYS,
     ScheduledJobClaimV1,
+    ScheduledJobDefinitionV1,
+    SchedulerDefinitionConvergenceReceiptV1,
     SchedulerInvariantError,
     SchedulerJobKey,
     canonical_scheduler_claim,
     canonical_scheduler_claim_receipt,
+    canonical_scheduler_convergence_receipt,
     canonical_scheduler_datetime,
+    canonical_scheduler_definition,
 )
 
 MonotonicClock = Callable[[], float]
@@ -459,6 +463,87 @@ class SchedulerClaimedInvocation:
         return self._deadline
 
 
+class SchedulerConvergenceClaimResult:
+    """Canonical convergence receipt plus its optional one-shot invocation."""
+
+    __slots__ = ("_receipt", "_invocation", "_issuance")
+    _invocation: SchedulerClaimedInvocation | None
+    _issuance: _SchedulerInvocationIssuance
+    _receipt: SchedulerDefinitionConvergenceReceiptV1
+
+    def __init__(
+        self,
+        *,
+        receipt: SchedulerDefinitionConvergenceReceiptV1,
+        invocation: SchedulerClaimedInvocation | None,
+        _issuance: object,
+    ) -> None:
+        if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+            raise SchedulerInvariantError("scheduler_convergence_result_is_not_issued")
+        canonical_receipt = canonical_scheduler_convergence_receipt(receipt)
+        if canonical_receipt.status == "claimed":
+            if (
+                type(invocation) is not SchedulerClaimedInvocation
+                or canonical_receipt.claim is None
+            ):
+                raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+            invocation._assert_intact()
+            if invocation.claim != canonical_receipt.claim:
+                raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+        elif invocation is not None:
+            raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+        object.__setattr__(self, "_receipt", canonical_receipt)
+        object.__setattr__(self, "_invocation", invocation)
+        object.__setattr__(self, "_issuance", _SCHEDULER_INVOCATION_ISSUANCE)
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise SchedulerInvariantError("scheduler_convergence_result_is_not_serializable")
+
+    @property
+    def receipt(self) -> SchedulerDefinitionConvergenceReceiptV1:
+        self._assert_intact()
+        return self._receipt
+
+    @property
+    def invocation(self) -> SchedulerClaimedInvocation | None:
+        self._assert_intact()
+        return self._invocation
+
+    def _assert_intact(self) -> None:
+        try:
+            if self._issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+                raise SchedulerInvariantError("scheduler_convergence_result_is_not_issued")
+            receipt = canonical_scheduler_convergence_receipt(self._receipt)
+            invocation = self._invocation
+            if receipt.status == "claimed":
+                if type(invocation) is not SchedulerClaimedInvocation or receipt.claim is None:
+                    raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+                invocation._assert_intact()
+                if invocation.claim != receipt.claim:
+                    raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+            elif invocation is not None:
+                raise SchedulerInvariantError("scheduler_convergence_invocation_is_invalid")
+        except SchedulerInvariantError:
+            raise
+        except Exception:
+            raise SchedulerInvariantError("scheduler_convergence_result_is_invalid") from None
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulerDeadlineFailure:
     reason_code: str
@@ -726,6 +811,11 @@ async def _claim_scheduler_invocation_with_clock(
         runtime.persistence_authority,
     ) != runtime_identity:
         raise SchedulerInvariantError("scheduler_invocation_runtime_identity_changed")
+    if (
+        scheduler_port.release_sha != runtime_identity[2]
+        or scheduler_port.persistence_authority != runtime_identity[3]
+    ):
+        raise SchedulerInvariantError("scheduler_invocation_runtime_identity_changed")
     current_outer_lease = _refresh_same_generation_outer_lease(
         captured_outer_lease,
         canonical_scheduler_outer_lease(runtime.current_outer_lease()),
@@ -757,6 +847,119 @@ async def _claim_scheduler_invocation_with_clock(
     return SchedulerClaimedInvocation(
         deadline=deadline,
         scheduler_port=scheduler_port,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+
+
+async def converge_scheduler_definition_invocation(
+    runtime: SchedulerRuntimeCapability,
+    definition: ScheduledJobDefinitionV1,
+) -> SchedulerConvergenceClaimResult:
+    """Converge one definition and bind any drained claim to the same RPC."""
+
+    return await _converge_scheduler_definition_invocation_with_clock(
+        runtime,
+        definition,
+        monotonic_clock=monotonic,
+    )
+
+
+async def _converge_scheduler_definition_invocation_with_clock(
+    runtime: SchedulerRuntimeCapability,
+    definition: ScheduledJobDefinitionV1,
+    *,
+    monotonic_clock: MonotonicClock,
+) -> SchedulerConvergenceClaimResult:
+    canonical_definition = canonical_scheduler_definition(definition)
+    if not callable(monotonic_clock):
+        raise SchedulerInvariantError("scheduler_invocation_clock_is_invalid")
+    runtime.assert_intact()
+    scheduler_port = runtime.scheduler_port
+    runtime_identity = (
+        runtime.account_id,
+        runtime.holder_id,
+        runtime.release_sha,
+        runtime.persistence_authority,
+    )
+    captured_outer_lease = canonical_scheduler_outer_lease(runtime.current_outer_lease())
+    if (
+        captured_outer_lease.account_id != runtime.account_id
+        or captured_outer_lease.holder_id != runtime.holder_id
+        or scheduler_port.release_sha != runtime.release_sha
+        or scheduler_port.persistence_authority != runtime.persistence_authority
+    ):
+        raise SchedulerInvariantError("scheduler_invocation_runtime_identity_mismatch")
+    rpc_start = SchedulerClaimRpcStart(
+        monotonic_clock=monotonic_clock,
+        started_monotonic=_read_monotonic(monotonic_clock),
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+    raw_receipt = await scheduler_port.converge_job_definition(
+        canonical_definition,
+        outer_lease=captured_outer_lease,
+    )
+    receipt = canonical_scheduler_convergence_receipt(raw_receipt)
+    runtime.assert_intact()
+    if runtime.scheduler_port is not scheduler_port:
+        raise SchedulerInvariantError("scheduler_invocation_runtime_port_changed")
+    if (
+        runtime.account_id,
+        runtime.holder_id,
+        runtime.release_sha,
+        runtime.persistence_authority,
+    ) != runtime_identity:
+        raise SchedulerInvariantError("scheduler_invocation_runtime_identity_changed")
+    if (
+        scheduler_port.release_sha != runtime_identity[2]
+        or scheduler_port.persistence_authority != runtime_identity[3]
+    ):
+        raise SchedulerInvariantError("scheduler_invocation_runtime_identity_changed")
+    current_outer_lease = _refresh_same_generation_outer_lease(
+        captured_outer_lease,
+        canonical_scheduler_outer_lease(runtime.current_outer_lease()),
+        observed_at=receipt.observed_at,
+    )
+    if (
+        receipt.definition.account_id != runtime.account_id
+        or receipt.definition.job_key != canonical_definition.job_key
+        or (receipt.status == "converged" and receipt.definition.definition != canonical_definition)
+    ):
+        raise SchedulerInvariantError("scheduler_convergence_receipt_binding_mismatch")
+    claim = receipt.claim
+    if claim is None:
+        return SchedulerConvergenceClaimResult(
+            receipt=receipt,
+            invocation=None,
+            _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+        )
+    if claim.lease.release_sha != runtime.release_sha:
+        raise SchedulerInvariantError("scheduler_invocation_release_binding_is_invalid")
+    binding = SchedulerInvocationBinding(
+        claim=claim,
+        outer_lease=current_outer_lease,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+    database_cutoff_at = _database_cutoff_for_binding(binding)
+    monotonic_deadline = _convert_database_cutoff_to_monotonic(
+        claim_observed_at=binding._claim.observed_at,
+        database_cutoff_at=database_cutoff_at,
+        rpc_started_monotonic=rpc_start.started_monotonic,
+    )
+    deadline = SchedulerInvocationDeadline(
+        binding=binding,
+        database_cutoff_at=database_cutoff_at,
+        rpc_start=rpc_start,
+        monotonic_deadline=monotonic_deadline,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+    invocation = SchedulerClaimedInvocation(
+        deadline=deadline,
+        scheduler_port=scheduler_port,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+    return SchedulerConvergenceClaimResult(
+        receipt=receipt,
+        invocation=invocation,
         _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
     )
 
