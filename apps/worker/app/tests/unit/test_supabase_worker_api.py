@@ -222,15 +222,30 @@ async def test_worker_api_exposes_only_read_only_runtime_identity() -> None:
         assert adapter.current_release_sha == adapter.release_sha
         assert adapter.persistence_authority == expected_authority
         assert adapter.base_url == "https://example.supabase.co/rest/v1/rpc"
+        assert adapter.transport_is_managed is False
         assert not hasattr(adapter, "client")
         assert not hasattr(adapter, "headers")
+        assert not hasattr(adapter, "__dict__")
         for field, value in (
             ("release_sha", "b" * 40),
             ("persistence_authority", "supabase-worker-api:" + "f" * 64),
             ("base_url", "https://attacker.invalid/rest/v1/rpc"),
+            ("transport_is_managed", True),
+            ("_client", object()),
+            ("_managed_client", client),
         ):
             with pytest.raises(AttributeError):
                 setattr(adapter, field, value)
+        with pytest.raises(AttributeError):
+            delattr(adapter, "_client")
+
+
+async def test_worker_api_reports_owned_transport() -> None:
+    adapter = SupabaseWorkerApi(_enabled_settings(), release_sha="a" * 40)
+    try:
+        assert adapter.transport_is_managed is True
+    finally:
+        await adapter.close()
 
 
 async def test_worker_api_rejects_non_origin_supabase_url() -> None:

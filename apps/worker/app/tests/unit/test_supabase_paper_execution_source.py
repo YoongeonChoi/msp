@@ -92,16 +92,23 @@ async def test_paper_source_exposes_only_read_only_runtime_identity() -> None:
         assert source.release_sha == "a" * 40
         assert source.persistence_authority == expected_authority
         assert source.base_url == "https://example.supabase.co/rest/v1/rpc"
+        assert source.transport_is_managed is False
         assert not hasattr(source, "client")
         assert not hasattr(source, "headers")
+        assert not hasattr(source, "__dict__")
         for field, value in (
             ("account_id", "paper-secondary"),
             ("release_sha", "b" * 40),
             ("persistence_authority", "supabase-worker-api:" + "f" * 64),
             ("base_url", "https://attacker.invalid/rest/v1/rpc"),
+            ("transport_is_managed", True),
+            ("_client", object()),
+            ("_managed_client", client),
         ):
             with pytest.raises(AttributeError):
                 setattr(source, field, value)
+        with pytest.raises(AttributeError):
+            delattr(source, "_client")
 
 
 async def test_paper_source_rejects_non_origin_supabase_url() -> None:
@@ -128,6 +135,7 @@ async def test_paper_source_owned_client_disables_environment_proxy_discovery() 
         release_sha="a" * 40,
     )
     try:
+        assert source.transport_is_managed is True
         assert getattr(cast(Any, source)._client, "_trust_env", None) is False
     finally:
         await source.close()

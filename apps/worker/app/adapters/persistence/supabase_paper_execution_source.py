@@ -61,6 +61,37 @@ class SupabasePaperExecutionCommandSource:
     current account lease, fencing token, control epoch, and qualification.
     """
 
+    __slots__ = (
+        "_account_id",
+        "_release_sha",
+        "_persistence_authority",
+        "_base_url",
+        "_headers",
+        "_client",
+        "_managed_client",
+    )
+    _SEALED_RUNTIME_FIELDS = frozenset(
+        {
+            "_account_id",
+            "_release_sha",
+            "_persistence_authority",
+            "_base_url",
+            "_headers",
+            "_client",
+            "_managed_client",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS and hasattr(self, name):
+            raise AttributeError("paper_source_runtime_identity_is_read_only")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS:
+            raise AttributeError("paper_source_runtime_identity_is_read_only")
+        object.__delattr__(self, name)
+
     def __init__(
         self,
         settings: Settings,
@@ -103,12 +134,17 @@ class SupabasePaperExecutionCommandSource:
             "content-profile": "worker_api",
             "content-type": "application/json",
         }
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            timeout=10.0,
-            headers=self._headers,
-            trust_env=False,
-        )
+        if client is None:
+            managed_client = httpx.AsyncClient(
+                timeout=10.0,
+                headers=self._headers,
+                trust_env=False,
+            )
+            self._client = managed_client
+            self._managed_client: httpx.AsyncClient | None = managed_client
+        else:
+            self._client = client
+            self._managed_client = None
 
     @property
     def account_id(self) -> str:
@@ -126,9 +162,14 @@ class SupabasePaperExecutionCommandSource:
     def base_url(self) -> str:
         return self._base_url
 
+    @property
+    def transport_is_managed(self) -> bool:
+        return self._managed_client is not None and self._client is self._managed_client
+
     async def close(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        managed_client = self._managed_client
+        if managed_client is not None:
+            await managed_client.aclose()
 
     async def claim_available_paper_execution(
         self,

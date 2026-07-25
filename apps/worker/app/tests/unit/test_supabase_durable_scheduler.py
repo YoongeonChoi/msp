@@ -20,6 +20,9 @@ from app.adapters.persistence.supabase_durable_scheduler import (
     DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS,
     SupabaseDurableScheduler,
 )
+from app.adapters.persistence.supabase_durable_scheduler_wire import (
+    DurableSchedulerWireCodec,
+)
 from app.application.ports.durable_scheduler_port import (
     SchedulerMutationOutcomeUnknownError,
     SchedulerTransitionRejectedError,
@@ -282,7 +285,7 @@ async def test_adapter_rejects_disabled_definition_in_claim_response() -> None:
         release_sha=RELEASE_SHA,
         client=client,
     )
-    decoded_receipt = adapter.codec.decode_claim(response)
+    decoded_receipt = DurableSchedulerWireCodec().decode_claim(response)
     decoded_claim = decoded_receipt.claim
     assert decoded_claim is not None
     assert decoded_claim.definition.enabled is False
@@ -938,7 +941,8 @@ async def test_adapter_owned_client_disables_environment_proxy_discovery() -> No
         release_sha=RELEASE_SHA,
     )
     try:
-        assert getattr(adapter.client, "_trust_env", None) is False
+        assert adapter.transport_is_managed is True
+        assert getattr(cast(Any, adapter)._client, "_trust_env", None) is False
     finally:
         await adapter.close()
 
@@ -1126,16 +1130,24 @@ async def test_adapter_transport_origin_and_client_are_read_only() -> None:
     )
     try:
         original_url = adapter.base_url
-        original_client = adapter.client
         mutable_adapter = cast(Any, adapter)
 
         with pytest.raises(AttributeError):
             mutable_adapter.base_url = "https://attacker.invalid/rest/v1/rpc"
         with pytest.raises(AttributeError):
-            mutable_adapter.client = replacement
+            mutable_adapter.transport_is_managed = False
+        with pytest.raises(AttributeError):
+            mutable_adapter._client = replacement
+        with pytest.raises(AttributeError):
+            mutable_adapter._managed_client = replacement
 
         assert adapter.base_url == original_url
-        assert adapter.client is original_client
+        assert adapter.transport_is_managed is True
+        assert not hasattr(adapter, "client")
+        assert not hasattr(adapter, "codec")
+        assert not hasattr(adapter, "__dict__")
+        with pytest.raises(AttributeError):
+            delattr(adapter, "_client")
     finally:
         await replacement.aclose()
         await adapter.close()
