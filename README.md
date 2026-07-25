@@ -314,12 +314,12 @@ CAGR=(1+R_{total})^{365/d}-1
 
 여기서 `E_t`는 시점 `t`의 equity, `d`는 시작일과 종료일 사이의 calendar day 수입니다. `SharpeLike`는 `n<2`이거나 표본분산이 `0` 이하이면 `None`이며 무위험수익률을 차감하지 않습니다. `MDD`는 drawdown을 `0` 이하의 signed 값으로 보존합니다. CAGR은 `d<365`이면 `None`이고, 구현은 세 지표를 소수점 여섯 자리로 반올림합니다. certified dataset replay가 아직 없으므로 이 결과는 전략 승격이나 미래 수익의 증거가 아닙니다.
 
-## 5분 안전 Quickstart
+## 안전 Quickstart
 
 ### 사전 요구사항
 
 - Python 3.12 이상
-- Node.js 22.12 이상 권장과 npm
+- Node.js 22.13 이상인 22.x LTS 권장, 또는 24 이상과 npm
 - native Desktop을 실행할 때만 Rust stable과 [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
 
 실제 API key나 broker credential 없이 Worker mock one-shot과 Desktop 설정 화면을 확인할 수 있습니다.
@@ -367,7 +367,7 @@ npm --workspace apps/desktop run tauri -- dev
 
 ## Paper V2를 E2E로 실행하려면
 
-5분 Quickstart와 실제 control plane 구성은 의도적으로 분리돼 있습니다.
+안전 Quickstart와 실제 control plane 구성은 의도적으로 분리돼 있습니다.
 
 1. [Supabase Setup](docs/SUPABASE_SETUP.md)의 PG17 preflight와 checksum 검증을 통과합니다.
 2. migration과 fail-closed seed를 순서대로 적용합니다.
@@ -387,13 +387,17 @@ QA는 “코드가 존재한다”가 아니라 **커밋된 exact SHA에서 요�
 QA_{total}=\sum_{k=1}^{8} Score_k\times Weight_k
 ```
 
-아래 표는 PR #17을 통합한 exact source `02ba9be`의 평가를 이 README와
-scorecard publication commit이 required gate를 거쳐 `main`에 통합된 뒤 확정할
-**현행 engineering 점수**입니다. 그때 67개 ID 중 54개가 PASS, 13개가
-MISSING이며 `0c6b5f6`의 과거 기준선 `88.60`보다 `0.30`점 높습니다. publication
-전 `02ba9be` tree만 기계적으로 평가하면 DO-7이 빠진 `88.40`입니다. exact run
-ID, ID별 판정과 이 경계는 [QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)에
-고정합니다. 이 숫자는 Live 준비도와 무관합니다.
+아래 표는 제품 source `02ba9be`를 평가하고
+[PR #18](https://github.com/YoongeonChoi/msp/pull/18)의 publication receipt로 확정한
+**공개 engineering 기준선**입니다. publication 전 source tree만 기계적으로 평가한
+임시 값은 `88.40`이었고, scorecard가 required gate를 통과해 통합된 뒤 DO-7을 포함한
+공식 값이 `88.90`으로 확정됐습니다. 당시 67개 ID 중 54개가 PASS, 13개가
+MISSING이었습니다. 현재 `develop`의 구현이나 실행 중인 workflow를 이 점수에 미리
+합산하지 않습니다. 새 점수는 같은 exact SHA의 기능 검증과 필수
+CI·migration·security receipt를 모두 확인하고 scorecard publication까지 완료한 뒤에만
+확정합니다. exact run ID, ID별 판정과 채점 경계는
+[QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)에 고정합니다. 이 숫자는 Live
+준비도와 무관합니다.
 
 | 평가축                  |   가중치 | 기록 점수 | 핵심 점검 내용                                                     | 남은 핵심 항목                                   |
 | ----------------------- | -------: | --------: | ------------------------------------------------------------------ | ------------------------------------------------ |
@@ -419,6 +423,83 @@ ID, ID별 판정과 이 경계는 [QA Iteration Scorecard](docs/QA_ITERATION_SCO
 - [ ] Worker test, Ruff, strict mypy, Desktop test/E2E/build, Cargo와 migration replay를 실행한다.
 - [ ] 비밀 패턴, dependency, CodeQL, workflow 권한과 migration history를 검사한다.
 - [ ] exact SHA의 증거를 기록하고 기능별 점수를 다시 계산한다.
+
+### QA 판정 규칙
+
+체크박스는 기능 코드가 존재한다는 뜻이 아니라, 같은 exact commit SHA에서 요구사항별
+직접 검증과 필수 전체 gate가 모두 끝났다는 뜻입니다.
+
+- `[x] 완료`: 요구사항별 자동 테스트 또는 verifier가 성공했고, 같은 exact SHA의
+  CI·migration·security receipt까지 확인했다.
+- `[ ] 부분`: 구현이나 focused test 일부는 있지만 E2E, restart, fault, runtime wiring,
+  전체 gate 또는 exact-SHA receipt 중 하나라도 남아 있다.
+- `[ ] 미검증`: 직접 실행 증거가 없거나 다른 SHA의 과거 결과만 있다.
+- `N/A (external)`: 승인된 외부 환경이나 실제 운영 사용자가 필요한 항목이다.
+  숫자에서 제외할 수 있지만 PASS로 바꾸지는 않는다.
+
+하나의 묶음에 여러 요구사항이 있으면 모두 충족해야 완료입니다. 실패한 세부 조건을
+다른 성공 결과로 평균내지 않으며, 새 commit이 생기면 해당 범위의 체크박스를 비우고
+다시 검증합니다.
+
+### Durable scheduler 구현에 사용한 QA 체크리스트
+
+아래 항목은 `FC-7`, `OP-11`, `MA-7`을 PASS로 바꾸기 위한 완료 계약입니다.
+database migration만 통과해서는 완료가 아니며, Worker adapter·handler·runtime과
+정확한 GitHub receipt까지 같은 exact SHA에서 검증해야 합니다.
+
+- [ ] **SC-01 · 고정 작업과 RPC 표면** — `commands`, `execution`, `settlement`,
+  `reconciliation`, `outbox` 다섯 작업과 일곱 scheduler RPC만 허용하고, definition마다
+  `pending | leased | retry_wait` run이 최대 하나인지 확인한다.
+- [ ] **SC-02 · DB clock 권위** — due time, retry 가능 시각과 lease 만료를 caller clock이나
+  `asyncio.sleep`이 아니라 PostgreSQL clock으로 판정하고, lock 대기 뒤 시각을 다시
+  검사한다.
+- [ ] **SC-03 · 이중 lease 결속** — outer Worker lease의 account, holder, fencing token,
+  release SHA를 매 호출에 결속하고 inner lease가 outer lease보다 늦게 만료되지 않도록
+  검증한다.
+- [ ] **SC-04 · rolling-upgrade convergence** — definition 변경 시 `converged`,
+  `claimed`, `wait`, `manual_resolution`만 반환하고 recovery 과정이 새 cadence run을
+  만들지 않는지 확인한다.
+- [ ] **SC-05 · startup drain과 실행 barrier** — 새 outer fencing generation마다
+  command drain을 강제하고, settlement·reconciliation 상태가 안전하지 않으면 새
+  execution claim을 차단한다.
+- [ ] **SC-06 · 동시 claim과 stale writer 차단** — 경쟁 claim에서 winner가 정확히 하나인지,
+  duplicate claim, stale revision, 오래된 fencing token과 잘못된 release의 complete/fail이
+  상태를 바꾸지 않는지 검증한다.
+- [ ] **SC-07 · 비효과 작업의 retry budget** — command, reconciliation, outbox만 각 작업의
+  정확한 retry reason과 제한된 attempt·manual replay budget 안에서 재시도되는지 확인한다.
+- [ ] **SC-08 · 효과 작업의 unknown-effect 처리** — execution과 settlement는 scheduler가
+  자동 재시도하지 않고, 만료·취소·응답 유실을 unknown-effect dead letter로 보존하며
+  일반 replay를 허용하지 않는지 검증한다.
+- [ ] **SC-09 · reason-bound manual replay** — source revision, definition/failure digest,
+  failure reason, replay generation, request UUID와 명시적 확인을 CAS로 결속하고, source를
+  바꾸지 않은 새 child만 생성하는지 확인한다. 응답 유실 뒤 같은 semantic request만
+  복구할 수 있어야 한다.
+- [ ] **SC-10 · Worker persistence authority** — port와 adapter가 account, requested source,
+  release, definition과 receipt binding을 RPC 전후에 다시 확인하고, authority drift나
+  잘못된 성공 응답을 fail closed하는지 검증한다.
+- [ ] **SC-11 · handler deadline과 cancellation** — handler는 inner/outer lease 중 더 이른
+  시각에서 안전 여유를 뺀 hard deadline 안에서만 실행하고, safe job timeout과 effectful
+  unknown outcome을 서로 다른 오류로 처리한다. 외부 cancellation은 삼키거나 성공으로
+  settle하지 않아야 한다.
+- [ ] **SC-12 · runtime lifecycle** — startup convergence와 command drain, 한 cycle의 제한된
+  순차 claim, handler 밖 shared lock 해제, renewal·shutdown drain·lease release 순서를
+  검증하고 기존 in-memory sleep loop가 정상 runtime 권위로 남지 않는지 확인한다.
+- [ ] **SC-13 · migration·보안·exact-SHA 영수증** — fresh/populated upgrade, restart,
+  lock-wait, conflict-target atomic rollback, checksum, forced RLS, zero runtime table grant,
+  empty search path, trusted owner와 zero trading side effect를 검증한다. 같은 exact SHA의
+  Worker CI, migration-check, security gate가 모두 성공한 뒤에만 체크하고 점수표를
+  다시 계산한다.
+
+직접 증거는 다음 세 층으로 나눕니다.
+
+1. [Scheduler migration contract](apps/worker/app/tests/contract/test_durable_operations_scheduler_migration.py)는
+   migration, verifier와 workflow가 요구 계약을 계속 포함하는지 정적으로 고정합니다.
+2. [Scheduler database verifier](supabase/verify_durable_operations_scheduler.py)는 disposable
+   PostgreSQL 17.6에서 실제 DB 동작을 검증하며
+   `FINAL=PASS durable_operations_scheduler_verifier`로 끝나야 합니다.
+3. Worker port·adapter·handler·runtime focused test와 전체 Worker suite는 application
+   실행 경계를 검증합니다. 이 단계와 exact-SHA GitHub receipt가 없으면 DB verifier가
+   성공해도 scheduler 기능은 부분 완료입니다.
 
 Cyber Trusted Access가 필요한 hosted Supabase AAL2 사용자, 실제 alert/archive receiver, 실제 Toss read-only 호출, restore·soak·10거래일 운영은 숫자에서 `N/A (external)`로 제외합니다. 제외는 `PASS`가 아니며 binary stage gate도 바꾸지 않습니다. 전체 배점·ID·증거·다음 구현 순서는 [QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md)에서 확인할 수 있습니다.
 
@@ -475,6 +556,7 @@ python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
 python supabase/verify_kr_calendar_collection_job_store.py
 python supabase/verify_pit_daily_candle_collection_job_store.py
+python supabase/verify_durable_operations_scheduler.py
 ```
 
 `BASE_SHA`는 PR의 검증된 base commit, `HEAD_SHA`는 평가할 commit입니다. 로컬
