@@ -10,6 +10,9 @@ from app.domain.execution_v2.models import ExecutionInvariantError
 from app.domain.risk.value_objects import RiskInput
 
 if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
     from app.application.use_cases.run_execution_v2 import PaperExecutionV2Command
 
 
@@ -100,6 +103,7 @@ class PaperExecutionCommandSourcePort(Protocol):
         release_sha: str,
         now: datetime,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ClaimedPaperExecutionCommand | None:
         ...
 
@@ -108,6 +112,7 @@ class PaperExecutionCommandSourcePort(Protocol):
         claim: ClaimedPaperExecutionCommand,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCommandBundle:
         ...
 
@@ -123,6 +128,7 @@ class PaperExecutionCommandSourcePort(Protocol):
         outcome: PaperExecutionSourceOutcome,
         next_available_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionSourceCompletion:
         ...
 

@@ -287,6 +287,8 @@ class Settings(BaseSettings):
         ):
             raise ValueError("paper_source_input_requires_paper_worker_api_enablement")
         if self.execution_v2_worker_api_enabled:
+            if self.execution_v2_environment != "paper":
+                raise ValueError("worker_api_runtime_requires_paper_environment")
             try:
                 worker_id = UUID(self.execution_v2_worker_id or "")
             except ValueError as exc:
@@ -299,10 +301,7 @@ class Settings(BaseSettings):
                 5,
             }:
                 raise ValueError("execution_v2_worker_id_is_invalid")
-            expected_account_id = {
-                "paper": "paper-primary",
-                "contract_test": "contract-test-primary",
-            }[self.execution_v2_environment]
+            expected_account_id = "paper-primary"
             if self.execution_v2_account_id != expected_account_id:
                 raise ValueError("execution_v2_account_id_is_invalid")
             if self.worker_lease_renew_interval_sec * 2 >= self.worker_lease_ttl_sec:

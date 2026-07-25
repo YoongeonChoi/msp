@@ -4,12 +4,18 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 import httpx
 import pytest
 
+import app.application.use_cases.dispatch_alert_outbox as outbox_module
 from app.adapters.alerts.outbox_webhook_destination import OutboxWebhookDestination
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.dispatch_alert_outbox import (
     AlertOutboxDispatchResult,
     DispatchAlertOutbox,
@@ -50,6 +56,115 @@ async def test_dispatches_with_stable_receiver_dedupe_key_then_completes() -> No
     assert destination.dedupe_keys == [outbox.items[0].dedupe_key]
     assert outbox.completed == [(outbox.items[0].outbox_id, outbox.items[0].lease_token)]
     assert outbox.failed == []
+
+
+async def test_scheduled_outbox_propagates_authorization_to_every_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    outbox = FakeOutbox([_item(now)])
+    destination = FakeDestination()
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.outbox",
+    )
+    monkeypatch.setattr(
+        outbox_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    result = await DispatchAlertOutbox(
+        outbox,
+        destination,
+        worker_id="worker-a",
+        clock=lambda: now,
+    ).dispatch_scheduled(authorization)
+
+    assert result == AlertOutboxDispatchResult(1, 1, 0)
+    assert gate.calls == 4
+    assert outbox.scheduler_authorizations == [authorization, authorization]
+    assert destination.scheduler_authorizations == [authorization]
+
+
+async def test_scheduled_outbox_rejects_missing_authorization_before_claim() -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    outbox = FakeOutbox([_item(now)])
+    destination = FakeDestination()
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await DispatchAlertOutbox(
+            outbox,
+            destination,
+            worker_id="worker-a",
+            clock=lambda: now,
+        ).dispatch_scheduled(cast(SchedulerInvocationEffectAuthorization, None))
+
+    assert outbox.scheduler_authorizations == []
+    assert destination.scheduler_authorizations == []
+
+
+async def test_scheduled_outbox_revocation_before_claim_blocks_first_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    outbox = FakeOutbox([_item(now)])
+    destination = FakeDestination()
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.outbox",
+        revoke_at=1,
+    )
+    monkeypatch.setattr(
+        outbox_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await DispatchAlertOutbox(
+            outbox,
+            destination,
+            worker_id="worker-a",
+            clock=lambda: now,
+        ).dispatch_scheduled(authorization)
+
+    assert outbox.scheduler_authorizations == []
+    assert destination.scheduler_authorizations == []
+
+
+async def test_scheduled_outbox_mid_run_revocation_escapes_broad_exception_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    outbox = FakeOutbox([_item(now)])
+    destination = FakeDestination()
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.outbox",
+        revoke_at=3,
+    )
+    monkeypatch.setattr(
+        outbox_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await DispatchAlertOutbox(
+            outbox,
+            destination,
+            worker_id="worker-a",
+            clock=lambda: now,
+        ).dispatch_scheduled(authorization)
+
+    assert outbox.scheduler_authorizations == [authorization]
+    assert outbox.completed == []
+    assert outbox.failed == []
+    assert destination.scheduler_authorizations == []
 
 
 async def test_delivery_failure_is_safely_recorded_for_retry() -> None:
@@ -189,8 +304,11 @@ async def test_arbitrary_destination_error_text_is_not_persisted() -> None:
             claimed: ClaimedDeliveryOutboxItem,
             *,
             dedupe_key: str,
+            scheduler_authorization: (
+                SchedulerInvocationEffectAuthorization | None
+            ) = None,
         ) -> OutboxDeliveryReceipt:
-            del claimed, dedupe_key
+            del claimed, dedupe_key, scheduler_authorization
             raise OperationsInvariantError(sensitive_marker)
 
     result = await DispatchAlertOutbox(
@@ -338,15 +456,20 @@ class FakeDestination:
     def __init__(self, *, error: Exception | None = None) -> None:
         self.error = error
         self.dedupe_keys: list[str] = []
+        self.scheduler_authorizations: list[
+            SchedulerInvocationEffectAuthorization | None
+        ] = []
 
     async def deliver_outbox_item(
         self,
         item: ClaimedDeliveryOutboxItem,
         *,
         dedupe_key: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OutboxDeliveryReceipt:
         del item
         self.dedupe_keys.append(dedupe_key)
+        self.scheduler_authorizations.append(scheduler_authorization)
         if self.error is not None:
             raise self.error
         return OutboxDeliveryReceipt(
@@ -367,6 +490,9 @@ class FakeOutbox:
         self.completed: list[tuple[str, str]] = []
         self.failed: list[tuple[str, str, str]] = []
         self.retry_delays: list[timedelta] = []
+        self.scheduler_authorizations: list[
+            SchedulerInvocationEffectAuthorization | None
+        ] = []
 
     async def claim_delivery_outbox(
         self,
@@ -375,8 +501,10 @@ class FakeOutbox:
         now: datetime,
         limit: int,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedDeliveryOutboxItem, ...]:
         del worker_id, now, limit, lease_ttl
+        self.scheduler_authorizations.append(scheduler_authorization)
         return tuple(self.items)
 
     async def complete_outbox_delivery(
@@ -388,8 +516,10 @@ class FakeOutbox:
         now: datetime,
         external_receipt_id: str,
         external_receipt_sha256: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CompletedOutboxDelivery:
         del worker_id, external_receipt_id, external_receipt_sha256
+        self.scheduler_authorizations.append(scheduler_authorization)
         if self.completion_error is not None:
             raise self.completion_error
         self.completed.append((outbox_id, lease_token))
@@ -404,8 +534,10 @@ class FakeOutbox:
         now: datetime,
         error_code: str,
         retry_after: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> FailedOutboxDelivery:
         del worker_id
+        self.scheduler_authorizations.append(scheduler_authorization)
         self.failed.append((outbox_id, lease_token, error_code))
         self.retry_delays.append(retry_after)
         return FailedOutboxDelivery(outbox_id, "pending", now)
@@ -452,3 +584,34 @@ def _signed_generic_response(
         key=key,
         acknowledged_at=TEST_ACK_NOW,
     )
+
+
+class FakeSchedulerAuthorizationGate:
+    def __init__(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        expected_job_key: str,
+        revoke_at: int | None = None,
+    ) -> None:
+        self.authorization = authorization
+        self.expected_job_key = expected_job_key
+        self.revoke_at = revoke_at
+        self.calls = 0
+
+    def __call__(
+        self,
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is self.authorization
+        assert expected_job_key == self.expected_job_key
+        self.calls += 1
+        if self.calls == self.revoke_at:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return self.authorization
+
+
+def _authorization() -> SchedulerInvocationEffectAuthorization:
+    return cast(SchedulerInvocationEffectAuthorization, object())

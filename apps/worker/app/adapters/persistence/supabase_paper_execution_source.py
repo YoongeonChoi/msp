@@ -4,7 +4,7 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
 
 import httpx
@@ -14,6 +14,13 @@ from app.application.ports.paper_execution_command_source_port import (
     PaperExecutionCommandBundle,
     PaperExecutionSourceCompletion,
     PaperExecutionSourceOutcome,
+)
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
+from app.application.services.scheduler_invocation_deadline import (
+    require_scheduler_invocation_effect_authorization,
 )
 from app.application.use_cases.run_execution_v2 import PaperExecutionV2Command
 from app.config import Settings
@@ -31,6 +38,11 @@ from app.domain.trading.entities import AccountState, BotSettings, Quote, Signal
 from app.infrastructure.release_metadata import worker_release_metadata
 from app.infrastructure.supabase_headers import supabase_api_headers
 
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
+
 PaperSourceRpc = Literal[
     "claim_paper_execution_v1",
     "load_claimed_paper_execution_bundle_v1",
@@ -47,6 +59,9 @@ PAPER_SOURCE_RPC_ALLOWLIST: frozenset[str] = frozenset(
 _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ACCOUNT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+_EXECUTION_SCHEDULER_JOB_KEY: Literal["operations.execution"] = (
+    "operations.execution"
+)
 
 
 class SupabasePaperExecutionCommandSource:
@@ -56,6 +71,37 @@ class SupabasePaperExecutionCommandSource:
     account is fixed at construction and the database still requires the
     current account lease, fencing token, control epoch, and qualification.
     """
+
+    __slots__ = (
+        "_account_id",
+        "_release_sha",
+        "_persistence_authority",
+        "_base_url",
+        "_headers",
+        "_client",
+        "_managed_client",
+    )
+    _SEALED_RUNTIME_FIELDS = frozenset(
+        {
+            "_account_id",
+            "_release_sha",
+            "_persistence_authority",
+            "_base_url",
+            "_headers",
+            "_client",
+            "_managed_client",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS and hasattr(self, name):
+            raise AttributeError("paper_source_runtime_identity_is_read_only")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS:
+            raise AttributeError("paper_source_runtime_identity_is_read_only")
+        object.__delattr__(self, name)
 
     def __init__(
         self,
@@ -81,21 +127,60 @@ class SupabasePaperExecutionCommandSource:
             or _SHA_RE.fullmatch(resolved_release_sha) is None
         ):
             raise ExecutionInvariantError("paper_source_release_sha_is_missing")
+        try:
+            authority = persistence_authority_fingerprint(
+                namespace="supabase-worker-api",
+                origin=settings.supabase_url,
+                profile="worker_api",
+            )
+        except ValueError:
+            raise ExecutionInvariantError("paper_source_origin_is_invalid") from None
         secret = settings.supabase_secret_key.get_secret_value()
-        self.account_id = account_id
-        self.release_sha = resolved_release_sha.lower()
-        self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
-        self.headers = supabase_api_headers(secret) | {
+        self._account_id = account_id
+        self._release_sha = resolved_release_sha.lower()
+        self._persistence_authority: PersistenceAuthority = authority
+        self._base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
+        self._headers = supabase_api_headers(secret) | {
             "accept-profile": "worker_api",
             "content-profile": "worker_api",
             "content-type": "application/json",
         }
-        self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=10.0, headers=self.headers)
+        if client is None:
+            managed_client = httpx.AsyncClient(
+                timeout=10.0,
+                headers=self._headers,
+                trust_env=False,
+            )
+            self._client = managed_client
+            self._managed_client: httpx.AsyncClient | None = managed_client
+        else:
+            self._client = client
+            self._managed_client = None
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def release_sha(self) -> str:
+        return self._release_sha
+
+    @property
+    def persistence_authority(self) -> PersistenceAuthority:
+        return self._persistence_authority
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def transport_is_managed(self) -> bool:
+        return self._managed_client is not None and self._client is self._managed_client
 
     async def close(self) -> None:
-        if self._owns_client:
-            await self.client.aclose()
+        managed_client = self._managed_client
+        if managed_client is not None:
+            await managed_client.aclose()
 
     async def claim_available_paper_execution(
         self,
@@ -104,6 +189,7 @@ class SupabasePaperExecutionCommandSource:
         release_sha: str,
         now: datetime,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ClaimedPaperExecutionCommand | None:
         _require_uuid_input(worker_id, "worker_id")
         self._require_current_release(release_sha)
@@ -117,6 +203,12 @@ class SupabasePaperExecutionCommandSource:
                 "p_now": _isoformat(now),
                 "p_lease_seconds": ttl_seconds,
             },
+            scheduler_authorization=scheduler_authorization,
+            expected_job_key=(
+                _EXECUTION_SCHEDULER_JOB_KEY
+                if scheduler_authorization is not None
+                else None
+            ),
         )
         row = _optional_singleton_row(value)
         if row is None:
@@ -157,6 +249,7 @@ class SupabasePaperExecutionCommandSource:
         claim: ClaimedPaperExecutionCommand,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCommandBundle:
         self._require_claim_binding(claim)
         row = _singleton_row(
@@ -171,6 +264,12 @@ class SupabasePaperExecutionCommandSource:
                     "p_release_sha": self.release_sha,
                     "p_now": _isoformat(now),
                 },
+                scheduler_authorization=scheduler_authorization,
+                expected_job_key=(
+                    _EXECUTION_SCHEDULER_JOB_KEY
+                    if scheduler_authorization is not None
+                    else None
+                ),
             )
         )
         _require_exact_keys(row, {"bundle"})
@@ -195,6 +294,7 @@ class SupabasePaperExecutionCommandSource:
         outcome: PaperExecutionSourceOutcome,
         next_available_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionSourceCompletion:
         _require_uuid_input(command_id, "command_id")
         _require_uuid_input(claim_token, "claim_token")
@@ -227,6 +327,12 @@ class SupabasePaperExecutionCommandSource:
                     ),
                     "p_reason_code": reason_code,
                 },
+                scheduler_authorization=scheduler_authorization,
+                expected_job_key=(
+                    _EXECUTION_SCHEDULER_JOB_KEY
+                    if scheduler_authorization is not None
+                    else None
+                ),
             )
         )
         _require_exact_keys(
@@ -268,13 +374,31 @@ class SupabasePaperExecutionCommandSource:
         if claim.release_sha != self.release_sha:
             raise ExecutionInvariantError("paper_source_claim_release_mismatch")
 
-    async def _rpc(self, rpc: PaperSourceRpc, payload: JsonObject) -> object:
+    async def _rpc(
+        self,
+        rpc: PaperSourceRpc,
+        payload: JsonObject,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+        expected_job_key: Literal["operations.execution"] | None,
+    ) -> object:
         if rpc not in PAPER_SOURCE_RPC_ALLOWLIST:
             raise ExecutionInvariantError("paper_source_rpc_is_not_allowed")
+        if (scheduler_authorization is None) != (expected_job_key is None):
+            raise ExecutionInvariantError(
+                "paper_source_scheduler_authorization_pair_is_invalid"
+            )
+        if expected_job_key not in {None, _EXECUTION_SCHEDULER_JOB_KEY}:
+            raise ExecutionInvariantError("paper_source_scheduler_job_key_is_invalid")
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
-                headers=self.headers,
+            if scheduler_authorization is not None:
+                require_scheduler_invocation_effect_authorization(
+                    scheduler_authorization,
+                    expected_job_key=_EXECUTION_SCHEDULER_JOB_KEY,
+                )
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
+                headers=self._headers,
                 json=payload,
             )
             response.raise_for_status()

@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from typing import cast
 
 import pytest
 
+import app.application.use_cases.mature_cash_settlements as settlement_module
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.mature_cash_settlements import MatureCashSettlements
 from app.domain.execution_v2.cash_settlement import (
     CashSettlementClaim,
@@ -42,6 +48,122 @@ async def test_maturity_completes_one_due_claim() -> None:
     assert result.replayed == 0
     assert port.completed == [port.claims[0].obligation_id]
     assert port.failed == []
+
+
+async def test_scheduled_maturity_propagates_authorization_to_every_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = FakeSettlementPort(claims=(_claim(1),))
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.settlement",
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    result = await MatureCashSettlements(
+        port,
+        account_id="paper-primary",
+        environment="paper",
+        holder_id=WORKER_ID,
+        release_sha="a" * 40,
+        lease_provider=_lease,
+        clock=lambda: NOW,
+    ).run_scheduled(authorization)
+
+    assert result.completed == 1
+    assert gate.calls == 4
+    assert port.scheduler_authorizations == [
+        authorization,
+        authorization,
+        authorization,
+    ]
+
+
+async def test_scheduled_maturity_rejects_missing_authorization_before_claim() -> None:
+    port = FakeSettlementPort(claims=(_claim(1),))
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await MatureCashSettlements(
+            port,
+            account_id="paper-primary",
+            environment="paper",
+            holder_id=WORKER_ID,
+            release_sha="a" * 40,
+            lease_provider=_lease,
+            clock=lambda: NOW,
+        ).run_scheduled(cast(SchedulerInvocationEffectAuthorization, None))
+
+    assert not port.claim_called
+    assert port.scheduler_authorizations == []
+
+
+async def test_scheduled_maturity_revocation_before_claim_blocks_first_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = FakeSettlementPort(claims=(_claim(1),))
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.settlement",
+        revoke_at=1,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await MatureCashSettlements(
+            port,
+            account_id="paper-primary",
+            environment="paper",
+            holder_id=WORKER_ID,
+            release_sha="a" * 40,
+            lease_provider=_lease,
+            clock=lambda: NOW,
+        ).run_scheduled(authorization)
+
+    assert not port.claim_called
+    assert port.scheduler_authorizations == []
+
+
+async def test_scheduled_maturity_mid_run_revocation_blocks_following_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = FakeSettlementPort(claims=(_claim(1),))
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.settlement",
+        revoke_at=3,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await MatureCashSettlements(
+            port,
+            account_id="paper-primary",
+            environment="paper",
+            holder_id=WORKER_ID,
+            release_sha="a" * 40,
+            lease_provider=_lease,
+            clock=lambda: NOW,
+        ).run_scheduled(authorization)
+
+    assert port.claim_called
+    assert port.completed == []
+    assert port.failed == []
+    assert port.scheduler_authorizations == [authorization]
 
 
 async def test_maturity_schedules_only_proven_retryable_completion_failure() -> None:
@@ -131,12 +253,21 @@ class FakeSettlementPort:
     completed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     claim_called: bool = False
+    scheduler_authorizations: list[
+        SchedulerInvocationEffectAuthorization | None
+    ] = field(default_factory=list)
 
     async def claim_cash_settlement_batch(
         self, **kwargs: object
     ) -> tuple[CashSettlementClaim, ...]:
         assert kwargs["fencing_token"] == 7
         assert kwargs["limit"] == 1
+        self.scheduler_authorizations.append(
+            cast(
+                SchedulerInvocationEffectAuthorization | None,
+                kwargs.get("scheduler_authorization"),
+            )
+        )
         if self.claim_called:
             return ()
         self.claim_called = True
@@ -147,7 +278,12 @@ class FakeSettlementPort:
         claim: CashSettlementClaim,
         **kwargs: object,
     ) -> CashSettlementReceipt:
-        del kwargs
+        self.scheduler_authorizations.append(
+            cast(
+                SchedulerInvocationEffectAuthorization | None,
+                kwargs.get("scheduler_authorization"),
+            )
+        )
         if self.fail_completion:
             raise CashSettlementCompletionRetryableError(
                 "settlement_projection_conflict"
@@ -171,6 +307,12 @@ class FakeSettlementPort:
         **kwargs: object,
     ) -> CashSettlementFailureReceipt:
         assert kwargs["error_code"] == "settlement_projection_conflict"
+        self.scheduler_authorizations.append(
+            cast(
+                SchedulerInvocationEffectAuthorization | None,
+                kwargs.get("scheduler_authorization"),
+            )
+        )
         self.failed.append(claim.obligation_id)
         return CashSettlementFailureReceipt(
             obligation_id=claim.obligation_id,
@@ -249,3 +391,34 @@ def _lease() -> WorkerLease:
         acquired_at=NOW - timedelta(seconds=1),
         expires_at=NOW + timedelta(seconds=30),
     )
+
+
+class FakeSchedulerAuthorizationGate:
+    def __init__(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        expected_job_key: str,
+        revoke_at: int | None = None,
+    ) -> None:
+        self.authorization = authorization
+        self.expected_job_key = expected_job_key
+        self.revoke_at = revoke_at
+        self.calls = 0
+
+    def __call__(
+        self,
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is self.authorization
+        assert expected_job_key == self.expected_job_key
+        self.calls += 1
+        if self.calls == self.revoke_at:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return self.authorization
+
+
+def _authorization() -> SchedulerInvocationEffectAuthorization:
+    return cast(SchedulerInvocationEffectAuthorization, object())

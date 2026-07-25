@@ -28,6 +28,10 @@ PostgreSQL version, `migration-checksums.v1.json`, preflight SHA-256 및 실행 
 기본 경로를 사용해야 합니다. `psql`과 runner는 별도 session이므로 actual runner의
 `current_user`/`current_schemas(false)` 시작 receipt가 없거나 session override를
 배제할 수 없으면 실행을 중단합니다.
+`20260724210000`부터 forced-RLS scheduler 객체의 직접 owner는 runtime role이
+아니면서 `rolsuper` 또는 `rolbypassrls` 중 하나를 직접 가져야 합니다. role
+membership은 `BYPASSRLS`를 상속하지 않으므로 sanitized owner 속성 receipt가 없으면
+배포를 중단하며, hosted role을 즉석에서 승격해 우회하지 않습니다.
 자세한 판정·실행·postflight 절차는 `docs/SUPABASE_SETUP.md`를 따릅니다.
 
 SQL migration 순서:
@@ -79,7 +83,11 @@ SQL migration 순서:
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
 46. `20260719090000_pit_daily_candle_collection_job_store.sql`
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
-48. `seed.sql` (로컬 non-live 기본값만)
+48. `20260724210000_durable_operations_scheduler.sql`
+49. `20260724234500_durable_scheduler_conflict_target.sql`
+50. `20260725090000_durable_scheduler_budget_policy.sql`
+51. `20260725235840_durable_scheduler_heartbeat_contract.sql`
+52. `seed.sql` (로컬 non-live 기본값만)
 
 Desktop은 authenticated user와 publishable key만 사용합니다. Worker만 server-side secret key를 사용합니다.
 
@@ -100,6 +108,7 @@ python supabase/verify_pit_calendar_observation_store.py
 python supabase/verify_pit_calendar_as_of_reader.py
 python supabase/verify_kr_calendar_collection_job_store.py
 python supabase/verify_pit_daily_candle_collection_job_store.py
+python supabase/verify_durable_operations_scheduler.py
 python supabase/verify_hosted_live_readiness.py
 python supabase/verify_hosted_live_enable_flow.py \
   --confirm-staging-project "$SUPABASE_STAGING_PROJECT_REF"
@@ -111,7 +120,7 @@ python supabase/verify_hosted_live_enable_flow.py \
 반환합니다.
 Docker의 새 `postgres:17-alpine`에서 pgcrypto가 없는 raw DB와
 `extensions.pgcrypto`가 선설치된 Supabase-like DB에 preflight를 적용한 뒤 `0001`부터
-`20260723162000_desktop_operations_sensitive_projection_gate.sql`까지 적용하는
+`20260725235840_durable_scheduler_heartbeat_contract.sql`까지 적용하는
 clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는 상태를 pgcrypto가
 `public`인 legacy와 `extensions`인 Supabase-like legacy로 각각 재현해 preflight 후
 전체 tail을 적용하고, 운영 row가 채워진 `0023` 상태에서 `0024` 직후와 전체 tail
@@ -119,6 +128,34 @@ clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는
 컨테이너도 실행해
 `anon`/`authenticated`/`service_role` RPC 경계를 확인합니다. 추가로 다음을
 검증합니다.
+
+`20260724234500_durable_scheduler_conflict_target.sql`은 기존 scheduler migration을
+수정하지 않는 append-only 교정입니다. `ensure` routine의 `RETURNS TABLE` 출력 변수
+`account_id`/`job_key`와 `ON CONFLICT (account_id, job_key)` 열이 모호해지는 경로를
+검증된 UNIQUE constraint 이름으로 바꾸고, 같은 upsert 형태를 가진 `converge`
+routine도 동일하게 정규화합니다. migration 내부에서는 constraint identity와 각
+함수의 exact legacy fragment 1개를 선행 조건으로 고정하고, 교체 뒤 owner 보존,
+`SECURITY DEFINER`, volatility, empty `search_path`를 확인합니다. 이 내부 guard가
+실패하면 두 함수 교체 전체가 transaction으로 롤백됩니다. 별도 disposable verifier는
+commit 전후 OID·ACL·source SHA와 constraint metadata도 비교해 배포 증거를 거부하지만,
+그 사후 비교 자체가 이미 commit된 운영 migration을 자동 롤백하지는 않습니다.
+
+`20260725090000_durable_scheduler_budget_policy.sql`은 job별 retry/replay 예산을
+Worker 사전 검증이 아니라 PostgreSQL의 validated CHECK constraint로도 강제합니다.
+`operations.execution`과 `operations.settlement`은 정확히 1회 시도와 0회 수동
+재실행만 허용하고, commands/reconciliation/outbox는 최대 3회 시도와 최대 1회
+수동 재실행만 허용합니다. migration은 테이블을 잠근 뒤 기존 위반 row가 하나라도
+있으면 SQLSTATE `23514`로 전체 transaction을 중단하며 값을 임의 보정하지 않습니다.
+따라서 실패 시 해당 definition의 운영 근거를 검토하고 명시적으로 수렴시킨 후 다시
+적용해야 합니다.
+
+`20260725235840_durable_scheduler_heartbeat_contract.sql`은 내구성 스케줄러의
+정확한 5개 job 성공 시각을 heartbeat, dead-man snapshot, Desktop runtime health가
+같은 의미로 읽도록 수렴시킵니다. rolling deploy 중에는 기존
+`independent_scheduler_running` 형식도 계속 허용하지만, 새
+`durable_scheduler_running` 문서는 다섯 job key의 정확한 집합과 최근 timezone-aware
+timestamp를 요구합니다. 함수 owner·`SECURITY DEFINER`·빈 `search_path`와 최소
+EXECUTE grant도 migration 내부 postcondition으로 다시 검증합니다.
 
 - exposed `api`/`worker_api` 함수가 모두 `SECURITY INVOKER`인지와 정확한 worker
   RPC allowlist
@@ -131,6 +168,16 @@ clean-install 경로를 검증합니다. 또한 `0015`까지 데이터가 있는
   정지, reconciliation claim별 release/fencing token 재검증
 - Desktop snapshot의 auditor 전용 audit/reconciliation SELECT 차단, viewer의 exact
   empty-array projection, auditor의 known evidence positive control
+- DB clock이 소유하는 고정 운영 job 5종의 definition/run/inner lease, 현재 outer
+  worker lease와 release/fencing 결속, restart 시 command 선행 barrier, 단일 active
+  run, desired digest의 4상태 typed convergence, rolling upgrade 중 기존 run만
+  recovery하는 no-new-cadence 경계, bounded retry/dead-letter와 reason-bound manual replay
+- settlement/reconciliation이 missing·disabled·blocked·expired인 동안 신규 execution
+  차단, 기존 expired execution의 terminal cleanup과 command/reconciliation/outbox
+  recovery progress는 계속되는 우선순위 경계
+- execution/settlement lease expiry의 자동·수동 replay 금지, command/reconciliation/
+  outbox에만 허용한 좁은 retry matrix, response-loss 뒤 새 outer lease에서도 exact
+  request ID로 immutable replay 생성 영수증을 회수하는 takeover 경계
 - 50건을 넘는 reconciliation keyset drain과 signal-only Realtime publication
 - 검증되지 않은 시가를 원가/0으로 보정하지 않는 snapshot 계약
 - 기존 public order/position을 신규 private 원장에 합산하지 않는 upgrade 격리

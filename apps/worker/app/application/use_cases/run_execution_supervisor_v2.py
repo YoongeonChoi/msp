@@ -13,6 +13,10 @@ from app.application.ports.paper_execution_command_source_port import (
     PaperExecutionSourceOutcome,
 )
 from app.application.services.risk_service import RiskService
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.application.use_cases.run_execution_v2 import (
     ExecutionV2RunOutcome,
     PaperExecutionV2Command,
@@ -31,6 +35,20 @@ class PaperExecutionRunner(Protocol):
     async def resume_existing_paper(
         self,
         command: PaperExecutionV2Command,
+    ) -> ExecutionV2RunOutcome:
+        ...
+
+    async def execute_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionV2RunOutcome:
+        ...
+
+    async def resume_existing_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
     ) -> ExecutionV2RunOutcome:
         ...
 
@@ -78,6 +96,31 @@ class RunExecutionSupervisorV2:
         self.lease_ttl = lease_ttl
 
     async def run_once(self, *, max_items: int = 25) -> ExecutionSupervisorV2RunResult:
+        return await self._run_once(
+            max_items=max_items,
+            scheduler_authorization=None,
+        )
+
+    async def run_scheduled(
+        self,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        max_items: int = 25,
+    ) -> ExecutionSupervisorV2RunResult:
+        authorization = _require_execution_scheduler_authorization(
+            scheduler_authorization
+        )
+        return await self._run_once(
+            max_items=max_items,
+            scheduler_authorization=authorization,
+        )
+
+    async def _run_once(
+        self,
+        *,
+        max_items: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> ExecutionSupervisorV2RunResult:
         if (
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
@@ -96,12 +139,24 @@ class RunExecutionSupervisorV2:
 
         while claimed < max_items:
             claim_now = self._now()
-            claim = await self.source.claim_available_paper_execution(
-                worker_id=self.worker_id,
-                release_sha=self.current_release_sha,
-                now=claim_now,
-                lease_ttl=self.lease_ttl,
-            )
+            if scheduler_authorization is None:
+                claim = await self.source.claim_available_paper_execution(
+                    worker_id=self.worker_id,
+                    release_sha=self.current_release_sha,
+                    now=claim_now,
+                    lease_ttl=self.lease_ttl,
+                )
+            else:
+                authorization = _require_execution_scheduler_authorization(
+                    scheduler_authorization
+                )
+                claim = await self.source.claim_available_paper_execution(
+                    worker_id=self.worker_id,
+                    release_sha=self.current_release_sha,
+                    now=claim_now,
+                    lease_ttl=self.lease_ttl,
+                    scheduler_authorization=authorization,
+                )
             if claim is None:
                 break
             claimed += 1
@@ -111,10 +166,21 @@ class RunExecutionSupervisorV2:
             self._validate_claim(claim, now=claim_now)
 
             try:
-                bundle = await self.source.load_claimed_paper_execution_bundle(
-                    claim,
-                    now=self._now(),
-                )
+                load_now = self._now()
+                if scheduler_authorization is None:
+                    bundle = await self.source.load_claimed_paper_execution_bundle(
+                        claim,
+                        now=load_now,
+                    )
+                else:
+                    authorization = _require_execution_scheduler_authorization(
+                        scheduler_authorization
+                    )
+                    bundle = await self.source.load_claimed_paper_execution_bundle(
+                        claim,
+                        now=load_now,
+                        scheduler_authorization=authorization,
+                    )
                 self._validate_bundle(claim, bundle, now=self._now())
             except ExecutionInvariantError as exc:
                 try:
@@ -123,6 +189,7 @@ class RunExecutionSupervisorV2:
                         outcome="manual",
                         next_available_at=None,
                         reason_code=_safe_reason(exc.safe_message),
+                        scheduler_authorization=scheduler_authorization,
                     )
                 except Exception:
                     failed += 1
@@ -143,6 +210,7 @@ class RunExecutionSupervisorV2:
                             outcome="complete",
                             next_available_at=None,
                             reason_code="risk_service_rejected_candidate",
+                            scheduler_authorization=scheduler_authorization,
                         )
                     except Exception:
                         failed += 1
@@ -158,6 +226,7 @@ class RunExecutionSupervisorV2:
                             outcome="manual",
                             next_available_at=None,
                             reason_code=_safe_reason(exc.safe_message),
+                            scheduler_authorization=scheduler_authorization,
                         )
                     except Exception:
                         failed += 1
@@ -165,13 +234,35 @@ class RunExecutionSupervisorV2:
                         manual += 1
                     continue
                 new_candidates += 1
-                execute = self.execution.execute_paper
+                execute_new = True
             else:
                 resumed += 1
-                execute = self.execution.resume_existing_paper
+                execute_new = False
 
             try:
-                outcome = await execute(bundle.command)
+                if scheduler_authorization is None:
+                    if execute_new:
+                        outcome = await self.execution.execute_paper(bundle.command)
+                    else:
+                        outcome = await self.execution.resume_existing_paper(
+                            bundle.command
+                        )
+                else:
+                    authorization = _require_execution_scheduler_authorization(
+                        scheduler_authorization
+                    )
+                    if execute_new:
+                        outcome = await self.execution.execute_scheduled_paper(
+                            bundle.command,
+                            authorization,
+                        )
+                    else:
+                        outcome = (
+                            await self.execution.resume_existing_scheduled_paper(
+                                bundle.command,
+                                authorization,
+                            )
+                        )
             except Exception:
                 # Do not acknowledge an ambiguous execution boundary. The source
                 # lease expires and a durable replay starts from the DB checkpoint.
@@ -189,6 +280,7 @@ class RunExecutionSupervisorV2:
                         outcome="reschedule",
                         next_available_at=next_available_at,
                         reason_code="paper_execution_waiting_for_next_eligible_bar",
+                        scheduler_authorization=scheduler_authorization,
                     )
                     rescheduled += 1
                 elif outcome.status == "quarantined":
@@ -199,6 +291,7 @@ class RunExecutionSupervisorV2:
                         reason_code=_safe_reason(
                             outcome.reason_code or "paper_execution_quarantined"
                         ),
+                        scheduler_authorization=scheduler_authorization,
                     )
                     manual += 1
                 else:
@@ -211,6 +304,7 @@ class RunExecutionSupervisorV2:
                             if outcome.status == "duplicate_semantic_intent"
                             else "paper_execution_completed"
                         ),
+                        scheduler_authorization=scheduler_authorization,
                     )
                     completed += 1
             except Exception:
@@ -303,18 +397,37 @@ class RunExecutionSupervisorV2:
         outcome: PaperExecutionSourceOutcome,
         next_available_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> PaperExecutionSourceCompletion:
-        completion = await self.source.complete_or_reschedule_paper_execution(
-            command_id=claim.command_id,
-            claim_token=claim.claim_token,
-            expected_revision=claim.source_revision,
-            worker_id=self.worker_id,
-            release_sha=self.current_release_sha,
-            now=self._now(),
-            outcome=outcome,
-            next_available_at=next_available_at,
-            reason_code=reason_code,
-        )
+        completion_now = self._now()
+        if scheduler_authorization is None:
+            completion = await self.source.complete_or_reschedule_paper_execution(
+                command_id=claim.command_id,
+                claim_token=claim.claim_token,
+                expected_revision=claim.source_revision,
+                worker_id=self.worker_id,
+                release_sha=self.current_release_sha,
+                now=completion_now,
+                outcome=outcome,
+                next_available_at=next_available_at,
+                reason_code=reason_code,
+            )
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            completion = await self.source.complete_or_reschedule_paper_execution(
+                command_id=claim.command_id,
+                claim_token=claim.claim_token,
+                expected_revision=claim.source_revision,
+                worker_id=self.worker_id,
+                release_sha=self.current_release_sha,
+                now=completion_now,
+                outcome=outcome,
+                next_available_at=next_available_at,
+                reason_code=reason_code,
+                scheduler_authorization=authorization,
+            )
         expected_state = {
             "complete": "complete",
             "reschedule": "pending",
@@ -353,3 +466,12 @@ def _next_available_at(
 def _safe_reason(value: str) -> str:
     normalized = value.strip()
     return (normalized or "paper_execution_invariant_failed")[:120]
+
+
+def _require_execution_scheduler_authorization(
+    value: object,
+) -> SchedulerInvocationEffectAuthorization:
+    return require_scheduler_invocation_effect_authorization(
+        value,
+        expected_job_key="operations.execution",
+    )

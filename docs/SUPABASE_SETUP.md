@@ -27,8 +27,13 @@ Before any repository migration runner on PostgreSQL 17:
    both preflight and replay. Its persistent role/database default must resolve
    `public` as the first effective non-system schema. Client/session overrides,
    including `PGOPTIONS`, URI `options`, and runner-side `SET search_path`, are
-   prohibited. In that profile, immediately before the migration runner,
-   execute:
+   prohibited. The durable scheduler tail also requires that the role which
+   directly owns the new forced-RLS tables and security-definer routines has
+   `rolsuper=true` or `rolbypassrls=true`; role membership does not inherit
+   `BYPASSRLS`. Record a sanitized `current_user`, `rolsuper`, and
+   `rolbypassrls` receipt and stop if the direct owner contract is not met.
+   Do not grant this capability ad hoc during a hosted deployment. In that
+   approved profile, immediately before the migration runner, execute:
 
    ```bash
    psql -X -v ON_ERROR_STOP=1 \
@@ -123,7 +128,11 @@ guarantee. Any ambiguous state stops the release.
 45. `20260719080000_kr_calendar_collection_job_inspection.sql`
 46. `20260719090000_pit_daily_candle_collection_job_store.sql`
 47. `20260723162000_desktop_operations_sensitive_projection_gate.sql`
-48. `seed.sql`
+48. `20260724210000_durable_operations_scheduler.sql`
+49. `20260724234500_durable_scheduler_conflict_target.sql`
+50. `20260725090000_durable_scheduler_budget_policy.sql`
+51. `20260725235840_durable_scheduler_heartbeat_contract.sql`
+52. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -237,6 +246,62 @@ The timestamp migrations extend that boundary in this order:
   roles receive exact empty arrays for both fields. The migration leaves the
   identifier-free reconciliation health signal available to minimum-status
   viewers and reasserts the invoker/definer and execute-grant contracts.
+- `20260724210000_durable_operations_scheduler.sql` adds the private durable
+  cadence boundary for exactly five operations jobs: commands, execution,
+  settlement, reconciliation, and outbox. Database time owns due and expiry
+  decisions; each inner run lease is capped by and bound to the current outer
+  Worker account, holder, fencing token, and release SHA. One nonterminal run
+  is allowed per definition. Commands must complete once in the current outer
+  lease generation before execution can be claimed, including after restart;
+  settlement and reconciliation must also exist, remain enabled and ready, and
+  have no expired lease awaiting classification. The typed convergence RPC
+  installs a desired digest only after the prior run is quiescent, may claim an
+  existing non-effectful recovery run, and never creates an old-definition
+  cadence run.
+  Only command, reconciliation, and outbox polling failures may consume the
+  bounded automatic retry budget. Execution and settlement expiry is an
+  immutable dead letter and cannot be manually replayed without a future
+  evidence-backed resolution contract. Manual replay for eligible jobs creates
+  a new child run; it never mutates the source dead letter, and the exact request
+  ID can recover the creation receipt after Worker takeover. No scheduler RPC
+  accepts caller time, module names, function names, or executable payloads.
+- `20260724234500_durable_scheduler_conflict_target.sql` is an append-only
+  compatibility correction for the two scheduler definition upsert routines.
+  The original `ensure` routine exposes `account_id` and `job_key` as PL/pgSQL
+  output variables, which makes its original column-list
+  `ON CONFLICT (account_id, job_key)` target ambiguous when PostgreSQL first
+  plans the INSERT. The `converge` routine does not expose those output names;
+  it is normalized in the same correction because it uses the matching upsert
+  shape. The migration resolves the already-validated unique constraint by name
+  and requires exactly one legacy fragment in each exact `regprocedure`. Its
+  transactional postconditions prove that owner is preserved and that the
+  security-definer flag, volatility, and empty search path remain canonical.
+  They do not claim to reject arbitrary unrelated source drift or an already-
+  drifted owner that still has replacement authority.
+
+  The disposable PostgreSQL verifier separately snapshots function OID, owner,
+  ACL, security metadata, source SHA-256, and constraint identity before and
+  after the populated upgrade. A mismatch fails the verification evidence; that
+  post-commit comparison does not automatically roll back an already committed
+  hosted migration. Its negative fixture changes the first function to one
+  legacy fragment and the second to two, requires SQLSTATE `23514`, and proves
+  that the first replacement is rolled back when the second function fails
+  inside the same migration transaction. This migration does not add an RPC,
+  table, grant, cadence job, or trading authority.
+- `20260725090000_durable_scheduler_budget_policy.sql` adds the authoritative
+  job-specific retry/replay budget CHECK without changing the RPC surface.
+  Execution and settlement require `max_attempts=1` and
+  `max_manual_replays=0`; commands, reconciliation, and outbox allow at most
+  three attempts and one manual replay. The migration takes an exclusive table
+  lock, rejects any populated row outside that policy with SQLSTATE `23514`,
+  and never rewrites an unsafe value into a guessed safe value. Resolve and
+  document any rejected definition before retrying the migration.
+- `20260725235840_durable_scheduler_heartbeat_contract.sql` makes the durable
+  five-job success document authoritative across heartbeat admission,
+  dead-man projection, and Desktop worker freshness. It keeps the legacy
+  independent-stage format readable during rolling deployment, rejects
+  missing, extra, null, or stale durable job timestamps, and preserves the
+  existing function ownership and least-privilege execution boundary.
 
 ## Required project configuration
 

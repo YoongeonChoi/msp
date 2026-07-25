@@ -11,6 +11,10 @@ from app.application.ports.execution_reconciliation_port import (
     ExecutionReconciliationPort,
     PreDispatchFailurePort,
 )
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.domain.common.time import now_utc
 from app.domain.execution_v2.models import (
     ExecutionInvariantError,
@@ -77,6 +81,26 @@ class ReconcileExecutionV2:
         self.lease_ttl = lease_ttl
 
     async def run_once(self, *, max_items: int = 500) -> ExecutionReconciliationRunResult:
+        return await self._run_once(max_items=max_items, authorization=None)
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        max_items: int = 500,
+    ) -> ExecutionReconciliationRunResult:
+        _require_reconciliation_effect(authorization)
+        return await self._run_once(
+            max_items=max_items,
+            authorization=authorization,
+        )
+
+    async def _run_once(
+        self,
+        *,
+        max_items: int,
+        authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> ExecutionReconciliationRunResult:
         if (
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
@@ -95,17 +119,32 @@ class ReconcileExecutionV2:
             page_limit = min(50, max_items - claimed_count)
             claimed_at = self._now()
             lease = self._current_lease(claimed_at)
-            page = await self.port.claim_execution_reconciliation_batch(
-                account_id=self.account_id,
-                worker_id=self.worker_id,
-                release_sha=self.current_release_sha,
-                fencing_token=lease.fencing_token,
-                now=claimed_at,
-                limit=page_limit,
-                after_priority=cursor[0] if cursor is not None else None,
-                after_intent_id=cursor[1] if cursor is not None else None,
-                lease_ttl=self.lease_ttl,
-            )
+            if authorization is None:
+                page = await self.port.claim_execution_reconciliation_batch(
+                    account_id=self.account_id,
+                    worker_id=self.worker_id,
+                    release_sha=self.current_release_sha,
+                    fencing_token=lease.fencing_token,
+                    now=claimed_at,
+                    limit=page_limit,
+                    after_priority=cursor[0] if cursor is not None else None,
+                    after_intent_id=cursor[1] if cursor is not None else None,
+                    lease_ttl=self.lease_ttl,
+                )
+            else:
+                _require_reconciliation_effect(authorization)
+                page = await self.port.claim_execution_reconciliation_batch(
+                    account_id=self.account_id,
+                    worker_id=self.worker_id,
+                    release_sha=self.current_release_sha,
+                    fencing_token=lease.fencing_token,
+                    now=claimed_at,
+                    limit=page_limit,
+                    after_priority=cursor[0] if cursor is not None else None,
+                    after_intent_id=cursor[1] if cursor is not None else None,
+                    lease_ttl=self.lease_ttl,
+                    scheduler_authorization=authorization,
+                )
             if not page:
                 break
             page_cursors = tuple(item.cursor for item in page)
@@ -128,10 +167,18 @@ class ReconcileExecutionV2:
             for claim in page:
                 seen.add(claim.intent_id)
                 try:
-                    decision = await self.handler.reconcile_claim(
-                        claim,
-                        now=self._now(),
-                    )
+                    if authorization is None:
+                        decision = await self.handler.reconcile_claim(
+                            claim,
+                            now=self._now(),
+                        )
+                    else:
+                        _require_reconciliation_effect(authorization)
+                        decision = await self.handler.reconcile_claim(
+                            claim,
+                            now=self._now(),
+                            scheduler_authorization=authorization,
+                        )
                 except Exception as exc:
                     decision = ExecutionReconciliationDecision(
                         "manual",
@@ -139,16 +186,34 @@ class ReconcileExecutionV2:
                     )
                 if not decision.completion_persisted:
                     try:
-                        completion = await self.port.complete_execution_reconciliation(
-                            intent_id=claim.intent_id,
-                            worker_id=self.worker_id,
-                            release_sha=claim.lease_release_sha,
-                            fencing_token=claim.lease_fencing_token,
-                            now=self._now(),
-                            outcome=decision.outcome,
-                            next_reconcile_at=decision.next_reconcile_at,
-                            reason_code=decision.reason_code,
-                        )
+                        if authorization is None:
+                            completion = (
+                                await self.port.complete_execution_reconciliation(
+                                    intent_id=claim.intent_id,
+                                    worker_id=self.worker_id,
+                                    release_sha=claim.lease_release_sha,
+                                    fencing_token=claim.lease_fencing_token,
+                                    now=self._now(),
+                                    outcome=decision.outcome,
+                                    next_reconcile_at=decision.next_reconcile_at,
+                                    reason_code=decision.reason_code,
+                                )
+                            )
+                        else:
+                            _require_reconciliation_effect(authorization)
+                            completion = (
+                                await self.port.complete_execution_reconciliation(
+                                    intent_id=claim.intent_id,
+                                    worker_id=self.worker_id,
+                                    release_sha=claim.lease_release_sha,
+                                    fencing_token=claim.lease_fencing_token,
+                                    now=self._now(),
+                                    outcome=decision.outcome,
+                                    next_reconcile_at=decision.next_reconcile_at,
+                                    reason_code=decision.reason_code,
+                                    scheduler_authorization=authorization,
+                                )
+                            )
                         if completion.intent_id != claim.intent_id:
                             raise ExecutionInvariantError(
                                 "reconciliation_completion_identity_mismatch"
@@ -236,6 +301,7 @@ class FailClosedExecutionReconciliationHandler:
         claim: ExecutionReconciliationClaim,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExecutionReconciliationDecision:
         if claim.lease_release_sha != self.current_release_sha:
             raise ExecutionInvariantError(
@@ -252,15 +318,28 @@ class FailClosedExecutionReconciliationHandler:
                 if claim.intent_release_sha == self.current_release_sha
                 else "worker_restart_before_dispatch_release_takeover"
             )
-            result = await self.recovery.fail_reserved_intent_pre_dispatch(
-                intent_id=claim.intent_id,
-                worker_id=self.worker_id,
-                fencing_token=claim.lease_fencing_token,
-                control_epoch=claim.control_epoch,
-                release_sha=self.current_release_sha,
-                now=now,
-                reason_code=reason_code,
-            )
+            if scheduler_authorization is None:
+                result = await self.recovery.fail_reserved_intent_pre_dispatch(
+                    intent_id=claim.intent_id,
+                    worker_id=self.worker_id,
+                    fencing_token=claim.lease_fencing_token,
+                    control_epoch=claim.control_epoch,
+                    release_sha=self.current_release_sha,
+                    now=now,
+                    reason_code=reason_code,
+                )
+            else:
+                _require_reconciliation_effect(scheduler_authorization)
+                result = await self.recovery.fail_reserved_intent_pre_dispatch(
+                    intent_id=claim.intent_id,
+                    worker_id=self.worker_id,
+                    fencing_token=claim.lease_fencing_token,
+                    control_epoch=claim.control_epoch,
+                    release_sha=self.current_release_sha,
+                    now=now,
+                    reason_code=reason_code,
+                    scheduler_authorization=scheduler_authorization,
+                )
             if result.intent_id != claim.intent_id:
                 raise ExecutionInvariantError("pre_dispatch_failure_identity_mismatch")
             if result.state != "complete" or result.reason_code != reason_code:
@@ -282,15 +361,28 @@ class FailClosedExecutionReconciliationHandler:
                     next_reconcile_at=min(next_full_minute(now), claim.expires_at),
                 )
             reason_code = "paper_day_limit_remainder_expired_after_recovery"
-            expiry_result = await self.recovery.expire_paper_intent_remainder(
-                intent_id=claim.intent_id,
-                worker_id=self.worker_id,
-                fencing_token=claim.lease_fencing_token,
-                control_epoch=claim.control_epoch,
-                release_sha=self.current_release_sha,
-                now=now,
-                reason_code=reason_code,
-            )
+            if scheduler_authorization is None:
+                expiry_result = await self.recovery.expire_paper_intent_remainder(
+                    intent_id=claim.intent_id,
+                    worker_id=self.worker_id,
+                    fencing_token=claim.lease_fencing_token,
+                    control_epoch=claim.control_epoch,
+                    release_sha=self.current_release_sha,
+                    now=now,
+                    reason_code=reason_code,
+                )
+            else:
+                _require_reconciliation_effect(scheduler_authorization)
+                expiry_result = await self.recovery.expire_paper_intent_remainder(
+                    intent_id=claim.intent_id,
+                    worker_id=self.worker_id,
+                    fencing_token=claim.lease_fencing_token,
+                    control_epoch=claim.control_epoch,
+                    release_sha=self.current_release_sha,
+                    now=now,
+                    reason_code=reason_code,
+                    scheduler_authorization=scheduler_authorization,
+                )
             if (
                 expiry_result.intent_id != claim.intent_id
                 or expiry_result.state != "complete"
@@ -309,3 +401,12 @@ class FailClosedExecutionReconciliationHandler:
             "manual",
             f"{claim.environment}_dispatch_replay_evidence_unavailable",
         )
+
+
+def _require_reconciliation_effect(
+    authorization: object,
+) -> SchedulerInvocationEffectAuthorization:
+    return require_scheduler_invocation_effect_authorization(
+        authorization,
+        expected_job_key="operations.reconciliation",
+    )

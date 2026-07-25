@@ -6,13 +6,18 @@ from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Never
+from typing import Literal, Never, cast
 from uuid import UUID, uuid4
 
 import pytest
 
+import app.application.use_cases.run_execution_v2 as execution_module
 from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernelV2
 from app.application.services.paper_execution_v2 import DeterministicPaperExecutionSimulator
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.run_execution_v2 import (
     PaperExecutionV2Command,
     RunExecutionV2,
@@ -291,6 +296,132 @@ async def test_bounded_partial_resume_never_reserves_a_new_intent() -> None:
     assert durable.record_calls == [1, 2]
 
 
+async def test_scheduled_execute_revalidates_before_every_durable_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _command()
+    durable = CrashInjectingDurablePort("never")
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    validations: list[object] = []
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        validations.append(value)
+        return authorization
+
+    monkeypatch.setattr(
+        execution_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+
+    outcome = await RunExecutionV2(
+        durable_port=durable,
+    ).execute_scheduled_paper(command, authorization)
+
+    assert outcome.status == "completed"
+    assert len(validations) == 5
+    assert durable.scheduler_authorizations == [authorization] * 4
+    assert durable.record_calls == [1, 2]
+
+
+async def test_scheduled_resume_revalidates_before_every_durable_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _command()
+    durable = CrashInjectingDurablePort("never")
+    durable.reserved = True
+    durable.persisted_intent_id = command.intent.id
+    durable.active_fencing_token = command.intent.lease_fencing_token
+    durable.observations[1] = ExecutionObservation.create(
+        intent_id=command.intent.id,
+        sequence=1,
+        status="open",
+        observed_at=command.intent.eligible_at,
+        provider_order_id=f"paper:{command.intent.id}",
+        provider_execution_id=None,
+        cumulative_quantity=0,
+        cumulative_gross_krw=0,
+        cumulative_commission_krw=0,
+        cumulative_tax_krw=0,
+    )
+    resumed_command = replace(
+        command,
+        dispatch_at=command.bars[1].completed_at,
+        evaluated_at=command.bars[1].completed_at,
+    )
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    validations: list[object] = []
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        validations.append(value)
+        return authorization
+
+    monkeypatch.setattr(
+        execution_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+
+    outcome = await RunExecutionV2(
+        durable_port=durable,
+    ).resume_existing_scheduled_paper(resumed_command, authorization)
+
+    assert outcome.status == "completed"
+    assert len(validations) == 5
+    assert durable.scheduler_authorizations == [authorization] * 4
+    assert durable.record_calls == [2, 3]
+
+
+async def test_scheduled_execute_blocks_next_effect_after_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _command()
+    durable = CrashInjectingDurablePort("never")
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    validation_count = 0
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        nonlocal validation_count
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        validation_count += 1
+        if validation_count == 4:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return authorization
+
+    monkeypatch.setattr(
+        execution_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await RunExecutionV2(
+            durable_port=durable,
+        ).execute_scheduled_paper(command, authorization)
+
+    assert durable.reservation_states == ["created"]
+    assert durable.dispatch_marker_writes == 1
+    assert durable.record_calls == []
+    assert durable.scheduler_authorizations == [authorization, authorization]
+
+
 async def test_bounded_open_resume_resequences_fills_without_new_reservation() -> None:
     command = _command()
     durable = CrashInjectingDurablePort("never")
@@ -534,8 +665,10 @@ class SemanticDuplicateDurablePort:
     async def reserve_order_intent(
         self,
         intent: ExecutionIntent,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OrderIntentReservationResult:
-        del intent
+        del intent, scheduler_authorization
         return OrderIntentReservationResult(
             state="semantic_duplicate",
             intent_id=str(UUID(int=99)),
@@ -548,8 +681,9 @@ class SemanticDuplicateDurablePort:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> None:
-        del intent, now
+        del intent, now, scheduler_authorization
         self.dispatch_marker_writes += 1
 
     async def load_paper_execution_checkpoint(
@@ -557,8 +691,9 @@ class SemanticDuplicateDurablePort:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCheckpoint:
-        del now
+        del now, scheduler_authorization
         return PaperExecutionCheckpoint(
             intent_id=intent.id,
             attempt_id=str(UUID(int=101)),
@@ -588,8 +723,16 @@ class SemanticDuplicateDurablePort:
         accounting_transaction: AccountingTransaction | None = None,
         intent_release_sha: str,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ObservationRecordResult:
-        del intent, observation, accounting_transaction, intent_release_sha, now
+        del (
+            intent,
+            observation,
+            accounting_transaction,
+            intent_release_sha,
+            now,
+            scheduler_authorization,
+        )
         raise AssertionError("semantic duplicate must not record observations")
 
 
@@ -597,8 +740,10 @@ class MismatchedExistingReplayDurablePort(SemanticDuplicateDurablePort):
     async def reserve_order_intent(
         self,
         intent: ExecutionIntent,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OrderIntentReservationResult:
-        del intent
+        del intent, scheduler_authorization
         return OrderIntentReservationResult(
             state="existing_replay",
             intent_id=str(UUID(int=99)),
@@ -624,6 +769,7 @@ class CrashInjectingDurablePort:
         self.control_epoch = 1
         self.execution_enabled = True
         self.corrupt_checkpoint_history = False
+        self.scheduler_authorizations: list[object | None] = []
 
     @property
     def current_release_sha(self) -> str:
@@ -632,7 +778,10 @@ class CrashInjectingDurablePort:
     async def reserve_order_intent(
         self,
         intent: ExecutionIntent,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OrderIntentReservationResult:
+        self.scheduler_authorizations.append(scheduler_authorization)
         if self.persisted_intent_id is None:
             self.persisted_intent_id = intent.id
             self.active_fencing_token = intent.lease_fencing_token
@@ -660,7 +809,9 @@ class CrashInjectingDurablePort:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> None:
+        self.scheduler_authorizations.append(scheduler_authorization)
         if not self.execution_enabled or intent.gate_epoch != self.control_epoch:
             raise ExecutionInvariantError("execution_control_stale_or_disabled")
         self.dispatch_times.append(now)
@@ -673,7 +824,9 @@ class CrashInjectingDurablePort:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCheckpoint:
+        self.scheduler_authorizations.append(scheduler_authorization)
         del now
         if not self.execution_enabled or intent.gate_epoch != self.control_epoch:
             raise ExecutionInvariantError("execution_control_stale_or_disabled")
@@ -726,7 +879,9 @@ class CrashInjectingDurablePort:
         accounting_transaction: AccountingTransaction | None = None,
         intent_release_sha: str,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ObservationRecordResult:
+        self.scheduler_authorizations.append(scheduler_authorization)
         del now
         if intent_release_sha != self.current_release_sha:
             raise ExecutionInvariantError("worker_api_observation_origin_release_mismatch")

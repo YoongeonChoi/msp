@@ -584,12 +584,22 @@ test.describe("operations RPC safety boundary", () => {
 
     await requestButton.click();
     await confirmNativeDialog(page, "회계 조정 요청 확인", "요청 전송");
+    await expect
+      .poll(
+        () => ({
+          unknownGrants: captured.unknownGrants.length,
+          unknownRequests: captured.unknownRequests.length
+        }),
+        {
+          message: "unknown-resolution request RPCs should complete before the UI receipt",
+          timeout: 15_000
+        }
+      )
+      .toEqual({ unknownGrants: 1, unknownRequests: 1 });
     await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText(
       "독립 승인, Worker 적용, 회계 반영 전에는 완료가 아닙니다",
       { timeout: 15_000 }
     );
-    expect(captured.unknownGrants).toHaveLength(1);
-    expect(captured.unknownRequests).toHaveLength(1);
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
     expect(rpcArgument(captured.unknownGrants[0], "request_payload")).toMatchObject({
@@ -1240,7 +1250,11 @@ function snapshotCommandHash(): string {
 async function confirmNativeDialog(page: Page, title: string, confirmLabel: string): Promise<void> {
   const dialog = page.getByRole("dialog", { name: title });
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: confirmLabel, exact: true }).press("Enter");
+  const cancelButton = dialog.getByRole("button", { name: "취소", exact: true });
+  await expect(cancelButton).toBeFocused();
+  const confirmButton = dialog.getByRole("button", { name: confirmLabel, exact: true });
+  await expect(confirmButton).toBeEnabled();
+  await confirmButton.press("Enter");
   await expect(dialog).toHaveCount(0);
 }
 

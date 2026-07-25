@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
 
+import app.application.use_cases.run_execution_supervisor_v2 as supervisor_module
 from app.adapters.persistence.unavailable_paper_execution_source import (
     UnavailablePaperExecutionCommandSource,
 )
@@ -20,6 +21,10 @@ from app.application.ports.paper_execution_command_source_port import (
     PaperExecutionSourceState,
 )
 from app.application.services.risk_service import RiskService
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.run_execution_supervisor_v2 import (
     ExecutionSupervisorV2RunResult,
     RunExecutionSupervisorV2,
@@ -180,6 +185,122 @@ async def test_missing_durable_source_is_an_explicit_fail_closed_error() -> None
             clock=lambda: now,
         ).run_once()
 
+    with pytest.raises(
+        ExecutionInvariantError,
+        match="paper_execution_source_unavailable",
+    ):
+        await UnavailablePaperExecutionCommandSource().claim_available_paper_execution(
+            worker_id=WORKER_ID,
+            release_sha=RELEASE_SHA,
+            now=now,
+            lease_ttl=timedelta(seconds=30),
+            scheduler_authorization=cast(
+                SchedulerInvocationEffectAuthorization,
+                object(),
+            ),
+        )
+
+
+async def test_scheduled_run_revalidates_and_propagates_execution_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, risk_input, _resume = _commands()
+    now = command.evaluated_at
+    source = FakePaperExecutionSource(
+        command,
+        risk_input,
+        resume_command=None,
+        available_at=now,
+    )
+    execution = FakeExecutionRunner([ExecutionV2RunOutcome("completed", None)])
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    validations: list[object] = []
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        validations.append(value)
+        return authorization
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+
+    result = await RunExecutionSupervisorV2(
+        source,
+        execution,
+        RecordingRiskService(),
+        worker_id=WORKER_ID,
+        current_release_sha=RELEASE_SHA,
+        clock=lambda: now,
+    ).run_scheduled(authorization)
+
+    assert result == ExecutionSupervisorV2RunResult(1, 1, 0, 1, 0, 0, 0)
+    assert len(validations) == 6
+    assert source.scheduler_authorizations == [
+        authorization,
+        authorization,
+        authorization,
+        authorization,
+    ]
+    assert execution.scheduled_authorizations == [authorization]
+    assert execution.execute_calls == [command]
+
+
+async def test_scheduled_run_blocks_runner_after_authority_is_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, risk_input, _resume = _commands()
+    now = command.evaluated_at
+    source = FakePaperExecutionSource(
+        command,
+        risk_input,
+        resume_command=None,
+        available_at=now,
+    )
+    execution = FakeExecutionRunner([ExecutionV2RunOutcome("completed", None)])
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    validation_count = 0
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        nonlocal validation_count
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        validation_count += 1
+        if validation_count == 4:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return authorization
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await RunExecutionSupervisorV2(
+            source,
+            execution,
+            RecordingRiskService(),
+            worker_id=WORKER_ID,
+            current_release_sha=RELEASE_SHA,
+            clock=lambda: now,
+        ).run_scheduled(authorization)
+
+    assert execution.execute_calls == []
+    assert execution.scheduled_authorizations == []
+    assert source.settlements == []
+
 
 class RecordingRiskService(RiskService):
     def __init__(self) -> None:
@@ -196,6 +317,7 @@ class FakeExecutionRunner:
         self.outcomes = outcomes
         self.execute_calls: list[PaperExecutionV2Command] = []
         self.resume_calls: list[PaperExecutionV2Command] = []
+        self.scheduled_authorizations: list[object] = []
 
     async def execute_paper(
         self,
@@ -210,6 +332,22 @@ class FakeExecutionRunner:
     ) -> ExecutionV2RunOutcome:
         self.resume_calls.append(command)
         return self.outcomes.pop(0)
+
+    async def execute_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionV2RunOutcome:
+        self.scheduled_authorizations.append(scheduler_authorization)
+        return await self.execute_paper(command)
+
+    async def resume_existing_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionV2RunOutcome:
+        self.scheduled_authorizations.append(scheduler_authorization)
+        return await self.resume_existing_paper(command)
 
 
 @dataclass
@@ -228,6 +366,10 @@ class FakePaperExecutionSource:
     active_claim: ClaimedPaperExecutionCommand | None = field(init=False, default=None)
     claim_tokens: list[str] = field(init=False, default_factory=list)
     settlements: list[dict[str, object]] = field(init=False, default_factory=list)
+    scheduler_authorizations: list[object | None] = field(
+        init=False,
+        default_factory=list,
+    )
 
     async def claim_available_paper_execution(
         self,
@@ -236,7 +378,9 @@ class FakePaperExecutionSource:
         release_sha: str,
         now: datetime,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ClaimedPaperExecutionCommand | None:
+        self.scheduler_authorizations.append(scheduler_authorization)
         if self.state != "pending" or self.available_at > now:
             return None
         token = str(uuid4())
@@ -262,8 +406,10 @@ class FakePaperExecutionSource:
         claim: ClaimedPaperExecutionCommand,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCommandBundle:
         del now
+        self.scheduler_authorizations.append(scheduler_authorization)
         assert claim == self.active_claim
         return PaperExecutionCommandBundle(
             command=self.command,
@@ -282,8 +428,10 @@ class FakePaperExecutionSource:
         outcome: PaperExecutionSourceOutcome,
         next_available_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionSourceCompletion:
         del now
+        self.scheduler_authorizations.append(scheduler_authorization)
         assert self.active_claim is not None
         assert command_id == self.command_id
         assert claim_token == self.active_claim.claim_token

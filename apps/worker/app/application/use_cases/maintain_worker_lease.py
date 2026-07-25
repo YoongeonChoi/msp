@@ -91,6 +91,11 @@ class MaintainWorkerLease:
         self.current = None
         return released
 
+    def current_lease(self) -> WorkerLease | None:
+        """Return this manager's lease through a provenance-checkable method."""
+
+        return self.current
+
     def _validate_identity(self, lease: WorkerLease) -> None:
         if lease.account_id != self.account_id or lease.holder_id != self.holder_id:
             raise ExecutionInvariantError("worker_lease_identity_mismatch")

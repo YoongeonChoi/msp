@@ -959,6 +959,26 @@ def test_pit_daily_candle_collection_worker_rpcs_are_exactly_allowlisted() -> No
     )
 
 
+def test_durable_scheduler_worker_rpcs_are_exactly_allowlisted() -> None:
+    module = _module()
+    expected = {
+        "ensure_scheduler_job_definition",
+        "converge_scheduler_job_definition",
+        "claim_due_scheduler_job",
+        "complete_scheduler_job_run",
+        "fail_scheduler_job_run",
+        "inspect_scheduler_dead_letter",
+        "replay_scheduler_dead_letter",
+    }
+
+    scheduler_rpcs = {
+        name
+        for name in module.WORKER_API_ALLOWLIST
+        if "scheduler" in name
+    }
+    assert scheduler_rpcs == expected
+
+
 def test_worker_api_execute_cannot_be_granted_to_authenticated(
     tmp_path: Path,
 ) -> None:

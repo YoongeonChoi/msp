@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 from app.domain.common.json import JsonObject
 from app.domain.operations.models import (
@@ -20,6 +25,7 @@ class OperationCommandPort(Protocol):
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedOperationCommand, ...]:
         ...
 
@@ -36,5 +42,6 @@ class OperationCommandPort(Protocol):
         now: datetime,
         result_summary: JsonObject,
         failure_code: str | None = None,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OperationCommandAcknowledgement:
         ...

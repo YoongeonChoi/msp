@@ -24,7 +24,7 @@ app/tests/         Unit, integration, contract tests
 | V2 execution kernel | `app/application/use_cases/run_execution_v2.py`, `app/adapters/persistence/supabase_worker_api.py` |
 | Deterministic paper fills | `app/application/services/paper_execution_v2.py` |
 | Local contract simulator | `app/adapters/broker/contract_test_broker.py` |
-| Operations command loop | `app/application/use_cases/run_operations_v2.py` |
+| Durable operations scheduler | `app/application/services/durable_scheduler_loop.py`, `app/application/use_cases/run_durable_scheduler.py` |
 | Strategy scoring | `app/application/services/signal_service.py` |
 | Provider ports | `app/application/ports/` |
 | Provider mocks | `app/adapters/*/*_mock.py` |

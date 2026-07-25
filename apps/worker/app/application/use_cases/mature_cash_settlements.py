@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import Literal
 
 from app.application.ports.cash_settlement_port import CashSettlementPort
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.domain.common.time import now_utc
 from app.domain.execution_v2.cash_settlement import (
     CashSettlementClaim,
@@ -55,18 +59,50 @@ class MatureCashSettlements:
         self.clock = clock
 
     async def run_once(self) -> CashSettlementRunResult:
+        return await self._run(scheduler_authorization=None)
+
+    async def run_scheduled(
+        self,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> CashSettlementRunResult:
+        authorization = require_scheduler_invocation_effect_authorization(
+            scheduler_authorization,
+            expected_job_key="operations.settlement",
+        )
+        return await self._run(scheduler_authorization=authorization)
+
+    async def _run(
+        self,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> CashSettlementRunResult:
         claimed = completed = replayed = retried = dead_lettered = failed = 0
         for _ in range(_MAX_SETTLEMENTS_PER_RUN):
             claim_time = self._now()
             lease = self._current_lease(claim_time)
-            claims = await self.port.claim_cash_settlement_batch(
-                account_id=self.account_id,
-                holder_id=self.holder_id,
-                release_sha=self.release_sha,
-                fencing_token=lease.fencing_token,
-                now=claim_time,
-                limit=1,
-            )
+            if scheduler_authorization is None:
+                claims = await self.port.claim_cash_settlement_batch(
+                    account_id=self.account_id,
+                    holder_id=self.holder_id,
+                    release_sha=self.release_sha,
+                    fencing_token=lease.fencing_token,
+                    now=claim_time,
+                    limit=1,
+                )
+            else:
+                authorization = require_scheduler_invocation_effect_authorization(
+                    scheduler_authorization,
+                    expected_job_key="operations.settlement",
+                )
+                claims = await self.port.claim_cash_settlement_batch(
+                    account_id=self.account_id,
+                    holder_id=self.holder_id,
+                    release_sha=self.release_sha,
+                    fencing_token=lease.fencing_token,
+                    now=claim_time,
+                    limit=1,
+                    scheduler_authorization=authorization,
+                )
             if len(claims) > 1:
                 raise ExecutionInvariantError(
                     "cash_settlement_claim_batch_is_not_singleton"
@@ -87,18 +123,34 @@ class MatureCashSettlements:
                     claim,
                     lease,
                     operation_time,
+                    scheduler_authorization=scheduler_authorization,
                 )
             except CashSettlementCompletionRetryableError as exc:
                 failure_time = self._now()
                 lease = self._current_lease(failure_time)
-                failure = await self.port.fail_cash_settlement_attempt(
-                    claim,
-                    holder_id=self.holder_id,
-                    release_sha=self.release_sha,
-                    fencing_token=lease.fencing_token,
-                    now=failure_time,
-                    error_code=exc.failure_code,
-                )
+                if scheduler_authorization is None:
+                    failure = await self.port.fail_cash_settlement_attempt(
+                        claim,
+                        holder_id=self.holder_id,
+                        release_sha=self.release_sha,
+                        fencing_token=lease.fencing_token,
+                        now=failure_time,
+                        error_code=exc.failure_code,
+                    )
+                else:
+                    authorization = require_scheduler_invocation_effect_authorization(
+                        scheduler_authorization,
+                        expected_job_key="operations.settlement",
+                    )
+                    failure = await self.port.fail_cash_settlement_attempt(
+                        claim,
+                        holder_id=self.holder_id,
+                        release_sha=self.release_sha,
+                        fencing_token=lease.fencing_token,
+                        now=failure_time,
+                        error_code=exc.failure_code,
+                        scheduler_authorization=authorization,
+                    )
                 failed += 1
                 if failure.replayed:
                     replayed += 1
@@ -124,24 +176,52 @@ class MatureCashSettlements:
         claim: CashSettlementClaim,
         lease: WorkerLease,
         operation_time: datetime,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> CashSettlementReceipt:
         try:
+            if scheduler_authorization is None:
+                return await self.port.complete_cash_settlement(
+                    claim,
+                    holder_id=self.holder_id,
+                    release_sha=self.release_sha,
+                    fencing_token=lease.fencing_token,
+                    now=operation_time,
+                )
+            authorization = require_scheduler_invocation_effect_authorization(
+                scheduler_authorization,
+                expected_job_key="operations.settlement",
+            )
             return await self.port.complete_cash_settlement(
                 claim,
                 holder_id=self.holder_id,
                 release_sha=self.release_sha,
                 fencing_token=lease.fencing_token,
                 now=operation_time,
+                scheduler_authorization=authorization,
             )
         except CashSettlementCompletionAmbiguousError:
             replay_time = self._now()
             replay_lease = self._current_lease(replay_time)
+            if scheduler_authorization is None:
+                return await self.port.complete_cash_settlement(
+                    claim,
+                    holder_id=self.holder_id,
+                    release_sha=self.release_sha,
+                    fencing_token=replay_lease.fencing_token,
+                    now=replay_time,
+                )
+            authorization = require_scheduler_invocation_effect_authorization(
+                scheduler_authorization,
+                expected_job_key="operations.settlement",
+            )
             return await self.port.complete_cash_settlement(
                 claim,
                 holder_id=self.holder_id,
                 release_sha=self.release_sha,
                 fencing_token=replay_lease.fencing_token,
                 now=replay_time,
+                scheduler_authorization=authorization,
             )
 
     def _current_lease(self, now: datetime) -> WorkerLease:

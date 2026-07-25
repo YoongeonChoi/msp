@@ -10,6 +10,14 @@ from uuid import UUID
 
 import httpx
 
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.config import Settings
 from app.domain.common.json import JsonObject, JsonValue
 from app.domain.execution_v2.cash_settlement import (
@@ -60,6 +68,7 @@ from app.domain.operations.models import (
     RecordedWorkerHeartbeat,
     WorkerHeartbeatStatus,
 )
+from app.domain.scheduler.models import SchedulerJobKey
 from app.infrastructure.release_metadata import worker_release_metadata
 from app.infrastructure.supabase_headers import supabase_api_headers
 
@@ -127,6 +136,35 @@ class SupabaseWorkerApi:
     disabled unless the explicit V2 worker API runtime flag is enabled.
     """
 
+    __slots__ = (
+        "_release_sha",
+        "_persistence_authority",
+        "_base_url",
+        "_headers",
+        "_client",
+        "_managed_client",
+    )
+    _SEALED_RUNTIME_FIELDS = frozenset(
+        {
+            "_release_sha",
+            "_persistence_authority",
+            "_base_url",
+            "_headers",
+            "_client",
+            "_managed_client",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS and hasattr(self, name):
+            raise AttributeError("worker_api_runtime_identity_is_read_only")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self._SEALED_RUNTIME_FIELDS:
+            raise AttributeError("worker_api_runtime_identity_is_read_only")
+        object.__delattr__(self, name)
+
     def __init__(
         self,
         settings: Settings,
@@ -136,7 +174,8 @@ class SupabaseWorkerApi:
     ) -> None:
         if not settings.execution_v2_enabled or not settings.execution_v2_worker_api_enabled:
             raise ExecutionInvariantError("execution_v2_worker_api_is_not_enabled")
-        if not settings.supabase_url or settings.supabase_secret_key is None:
+        supabase_url = settings.supabase_url
+        if not supabase_url or settings.supabase_secret_key is None:
             raise ExecutionInvariantError("execution_v2_worker_api_credentials_are_missing")
         resolved_release_sha = release_sha or worker_release_metadata().get("release_sha")
         if (
@@ -144,24 +183,61 @@ class SupabaseWorkerApi:
             or _SHA_RE.fullmatch(resolved_release_sha) is None
         ):
             raise ExecutionInvariantError("execution_v2_worker_api_release_sha_is_missing")
+        try:
+            authority = persistence_authority_fingerprint(
+                namespace="supabase-worker-api",
+                origin=supabase_url,
+                profile=WORKER_API_SCHEMA,
+            )
+        except ValueError:
+            raise ExecutionInvariantError(
+                "execution_v2_worker_api_origin_is_invalid"
+            ) from None
         secret = settings.supabase_secret_key.get_secret_value()
-        self.release_sha = resolved_release_sha.lower()
-        self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
-        self.headers = supabase_api_headers(secret) | {
+        self._release_sha = resolved_release_sha.lower()
+        self._persistence_authority: PersistenceAuthority = authority
+        self._base_url = supabase_url.rstrip("/") + "/rest/v1/rpc"
+        self._headers = supabase_api_headers(secret) | {
             "accept-profile": WORKER_API_SCHEMA,
             "content-profile": WORKER_API_SCHEMA,
             "content-type": "application/json",
         }
-        self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=10.0, headers=self.headers)
+        if client is None:
+            managed_client = httpx.AsyncClient(
+                timeout=10.0,
+                headers=self._headers,
+                trust_env=False,
+            )
+            self._client = managed_client
+            self._managed_client: httpx.AsyncClient | None = managed_client
+        else:
+            self._client = client
+            self._managed_client = None
 
     async def close(self) -> None:
-        if self._owns_client:
-            await self.client.aclose()
+        managed_client = self._managed_client
+        if managed_client is not None:
+            await managed_client.aclose()
+
+    @property
+    def release_sha(self) -> str:
+        return self._release_sha
 
     @property
     def current_release_sha(self) -> str:
-        return self.release_sha
+        return self._release_sha
+
+    @property
+    def persistence_authority(self) -> PersistenceAuthority:
+        return self._persistence_authority
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def transport_is_managed(self) -> bool:
+        return self._managed_client is not None and self._client is self._managed_client
 
     async def acquire_worker_lease(
         self,
@@ -179,7 +255,13 @@ class SupabaseWorkerApi:
             "p_ttl_seconds": ttl_seconds,
             "p_release_sha": self.release_sha,
         }
-        row = _singleton_row(await self._rpc("acquire_worker_lease", payload))
+        row = _singleton_row(
+            await self._rpc(
+                "acquire_worker_lease",
+                payload,
+                scheduler_authorization=None,
+            )
+        )
         _require_exact_keys(
             row,
             {"account_id", "holder_id", "fencing_token", "acquired_at", "expires_at"},
@@ -202,7 +284,13 @@ class SupabaseWorkerApi:
             "p_ttl_seconds": ttl_seconds,
             "p_release_sha": self.release_sha,
         }
-        row = _singleton_row(await self._rpc("renew_worker_lease", payload))
+        row = _singleton_row(
+            await self._rpc(
+                "renew_worker_lease",
+                payload,
+                scheduler_authorization=None,
+            )
+        )
         _require_exact_keys(
             row,
             {"account_id", "holder_id", "fencing_token", "acquired_at", "expires_at"},
@@ -232,6 +320,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_release_sha": self.release_sha,
                 },
+                scheduler_authorization=None,
             )
         )
         _require_exact_keys(
@@ -274,44 +363,44 @@ class SupabaseWorkerApi:
             if details.get("checkpoint") not in {
                 "cycle_completed",
                 "operations_completed",
-                "independent_scheduler_running",
+                "durable_scheduler_running",
             }:
                 raise ExecutionInvariantError("worker_api_completed_heartbeat_checkpoint_invalid")
             completed_at = details.get("completed_at")
             if not isinstance(completed_at, str):
                 raise ExecutionInvariantError("worker_api_completed_heartbeat_time_invalid")
-            if details.get("checkpoint") == "independent_scheduler_running":
-                stage_times = details.get("stage_last_completed_at")
-                if not isinstance(stage_times, dict) or set(stage_times) != {
-                    "commands",
-                    "execution",
-                    "settlement",
-                    "reconciliation",
-                    "outbox",
+            if details.get("checkpoint") == "durable_scheduler_running":
+                job_times = details.get("job_last_succeeded_at")
+                if not isinstance(job_times, dict) or set(job_times) != {
+                    "operations.commands",
+                    "operations.execution",
+                    "operations.settlement",
+                    "operations.reconciliation",
+                    "operations.outbox",
                 }:
                     raise ExecutionInvariantError(
-                        "worker_api_scheduler_heartbeat_stages_invalid"
+                        "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                     )
-                for value in stage_times.values():
+                for value in job_times.values():
                     if not isinstance(value, str):
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         )
                     try:
-                        stage_time = datetime.fromisoformat(value)
+                        job_time = datetime.fromisoformat(value)
                     except ValueError as exc:
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         ) from exc
                     if (
-                        stage_time.tzinfo is None
-                        or stage_time.utcoffset() is None
+                        job_time.tzinfo is None
+                        or job_time.utcoffset() is None
                         or not now - timedelta(hours=1)
-                        <= stage_time
+                        <= job_time
                         <= now + timedelta(seconds=30)
                     ):
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         )
             try:
                 completed_time = datetime.fromisoformat(completed_at)
@@ -337,6 +426,7 @@ class SupabaseWorkerApi:
                     "p_now": heartbeat_time,
                     "p_release_sha": self.release_sha,
                 },
+                scheduler_authorization=None,
             )
         )
         _require_exact_keys(row, {"heartbeat_id", "created_at"})
@@ -348,6 +438,8 @@ class SupabaseWorkerApi:
     async def reserve_order_intent(
         self,
         intent: ExecutionIntent,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OrderIntentReservationResult:
         payload: JsonObject = {
             "p_intent_id": intent.id,
@@ -380,7 +472,13 @@ class SupabaseWorkerApi:
             "p_fencing_token": intent.lease_fencing_token,
             "p_release_sha": self.release_sha,
         }
-        row = _singleton_row(await self._rpc("reserve_order_intent", payload))
+        row = _singleton_row(
+            await self._rpc(
+                "reserve_order_intent",
+                payload,
+                scheduler_authorization=scheduler_authorization,
+            )
+        )
         _require_exact_keys(row, {"reserved", "intent_id", "reservation_id", "reason_code"})
         reserved = _required_bool(row, "reserved")
         returned_intent_id = _required_uuid_text(row, "intent_id")
@@ -410,6 +508,7 @@ class SupabaseWorkerApi:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> None:
         request_sha256 = _contract_request_sha256(intent)
         payload: JsonObject = {
@@ -423,7 +522,13 @@ class SupabaseWorkerApi:
             "p_request_sha256": request_sha256,
             "p_client_order_key": intent.semantic_key,
         }
-        row = _singleton_row(await self._rpc("mark_dispatch_started", payload))
+        row = _singleton_row(
+            await self._rpc(
+                "mark_dispatch_started",
+                payload,
+                scheduler_authorization=scheduler_authorization,
+            )
+        )
         _require_exact_keys(row, {"attempt_id", "prepared_at", "reason_code"})
         _required_uuid_text(row, "attempt_id")
         _required_datetime(row, "prepared_at")
@@ -434,6 +539,7 @@ class SupabaseWorkerApi:
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCheckpoint:
         if intent.environment != "paper":
             raise ExecutionInvariantError(
@@ -451,6 +557,7 @@ class SupabaseWorkerApi:
                     "p_release_sha": self.release_sha,
                     "p_now": _isoformat(now),
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -568,6 +675,7 @@ class SupabaseWorkerApi:
         accounting_transaction: AccountingTransaction | None = None,
         intent_release_sha: str | None = None,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ObservationRecordResult:
         if intent_release_sha != self.release_sha:
             raise ExecutionInvariantError(
@@ -624,7 +732,13 @@ class SupabaseWorkerApi:
             "p_fencing_token": intent.lease_fencing_token,
             "p_accounting_postings": postings,
         }
-        row = _singleton_row(await self._rpc("record_execution_observation", payload))
+        row = _singleton_row(
+            await self._rpc(
+                "record_execution_observation",
+                payload,
+                scheduler_authorization=scheduler_authorization,
+            )
+        )
         _require_exact_keys(
             row,
             {"observation_id", "inserted", "quarantined", "reason_code"},
@@ -648,6 +762,7 @@ class SupabaseWorkerApi:
         after_priority: int | None,
         after_intent_id: str | None,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ExecutionReconciliationClaim, ...]:
         _require_nonempty_input_text(account_id, "account_id")
         _require_uuid_input(worker_id, "worker_id")
@@ -690,6 +805,7 @@ class SupabaseWorkerApi:
                     "p_release_sha": self.release_sha,
                     "p_fencing_token": fencing_token,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         expected = {
@@ -917,6 +1033,7 @@ class SupabaseWorkerApi:
         release_sha: str,
         now: datetime,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PreDispatchFailureResult:
         _require_uuid_input(intent_id, "intent_id")
         _require_uuid_input(worker_id, "worker_id")
@@ -949,6 +1066,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_reason_code": reason_code,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -981,6 +1099,7 @@ class SupabaseWorkerApi:
         release_sha: str,
         now: datetime,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExpiredPaperIntentResult:
         _require_uuid_input(intent_id, "intent_id")
         _require_uuid_input(worker_id, "worker_id")
@@ -1013,6 +1132,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_reason_code": reason_code,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -1054,6 +1174,7 @@ class SupabaseWorkerApi:
         outcome: ReconciliationOutcome,
         next_reconcile_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExecutionReconciliationCompletion:
         _require_uuid_input(intent_id, "intent_id")
         _require_uuid_input(worker_id, "worker_id")
@@ -1090,6 +1211,7 @@ class SupabaseWorkerApi:
                     ),
                     "p_reason_code": reason_code,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(row, {"intent_id", "state", "next_reconcile_at"})
@@ -1109,6 +1231,7 @@ class SupabaseWorkerApi:
         now: datetime,
         limit: int,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedDeliveryOutboxItem, ...]:
         _require_nonempty_input_text(worker_id, "worker_id")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -1125,6 +1248,7 @@ class SupabaseWorkerApi:
                     "p_limit": limit,
                     "p_lease_seconds": lease_seconds,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         expected = {
@@ -1174,6 +1298,7 @@ class SupabaseWorkerApi:
         now: datetime,
         external_receipt_id: str,
         external_receipt_sha256: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CompletedOutboxDelivery:
         _require_uuid_input(outbox_id, "outbox_id")
         _require_nonempty_input_text(worker_id, "worker_id")
@@ -1191,6 +1316,7 @@ class SupabaseWorkerApi:
                     "p_external_receipt_id": external_receipt_id,
                     "p_external_receipt_sha256": external_receipt_sha256,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(row, {"outbox_id", "status", "delivered_at"})
@@ -1211,6 +1337,7 @@ class SupabaseWorkerApi:
         now: datetime,
         error_code: str,
         retry_after: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> FailedOutboxDelivery:
         _require_uuid_input(outbox_id, "outbox_id")
         _require_nonempty_input_text(worker_id, "worker_id")
@@ -1232,6 +1359,7 @@ class SupabaseWorkerApi:
                     "p_error_code": error_code,
                     "p_retry_after_seconds": retry_after_seconds,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(row, {"outbox_id", "status", "available_at"})
@@ -1253,6 +1381,7 @@ class SupabaseWorkerApi:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedOperationCommand, ...]:
         _require_nonempty_input_text(account_id, "account_id")
         _require_uuid_input(holder_id, "holder_id")
@@ -1277,6 +1406,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_limit": limit,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         expected = {
@@ -1338,6 +1468,7 @@ class SupabaseWorkerApi:
         now: datetime,
         result_summary: JsonObject,
         failure_code: str | None = None,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OperationCommandAcknowledgement:
         _require_uuid_input(command_id, "command_id")
         if phase not in {"applied", "failed"}:
@@ -1383,6 +1514,7 @@ class SupabaseWorkerApi:
                     "p_result_summary": result_summary,
                     "p_failure_code": failure_code,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -1418,6 +1550,7 @@ class SupabaseWorkerApi:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[UnknownResolutionCandidate, ...]:
         _validate_unknown_resolution_actor(
             account_id=account_id,
@@ -1440,6 +1573,7 @@ class SupabaseWorkerApi:
                     "result_limit": limit,
                     "observed_at": _isoformat(now),
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         expected_keys = {
@@ -1512,6 +1646,7 @@ class SupabaseWorkerApi:
         candidate: UnknownResolutionCandidate,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionClaim:
         _validate_unknown_resolution_actor(
             account_id=candidate.account_id,
@@ -1533,6 +1668,7 @@ class SupabaseWorkerApi:
                     "expected_work_revision": candidate.work_revision,
                     "claimed_at": _isoformat(now),
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -1582,6 +1718,7 @@ class SupabaseWorkerApi:
         *,
         now: datetime,
         replay: bool,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionApplicationReceipt:
         _validate_unknown_resolution_actor(
             account_id=claim.account_id,
@@ -1612,6 +1749,7 @@ class SupabaseWorkerApi:
                 "expected_control_epoch": claim.expected_control_epoch,
                 "applied_at": _isoformat(now),
             },
+            scheduler_authorization=scheduler_authorization,
         )
         try:
             row = _singleton_row(raw_result)
@@ -1720,6 +1858,7 @@ class SupabaseWorkerApi:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[CashSettlementClaim, ...]:
         _require_nonempty_input_text(account_id, "cash_settlement_account_id")
         _validate_cash_settlement_actor(
@@ -1741,6 +1880,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_limit": limit,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         claims: list[CashSettlementClaim] = []
@@ -1799,6 +1939,7 @@ class SupabaseWorkerApi:
         release_sha: str,
         fencing_token: int,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CashSettlementReceipt:
         _validate_cash_settlement_actor(
             holder_id=holder_id,
@@ -1817,6 +1958,7 @@ class SupabaseWorkerApi:
                 "p_fencing_token": fencing_token,
                 "p_now": _isoformat(now),
             },
+            scheduler_authorization=scheduler_authorization,
         )
         try:
             row = _singleton_row(raw_result)
@@ -1878,6 +2020,7 @@ class SupabaseWorkerApi:
         fencing_token: int,
         now: datetime,
         error_code: CashSettlementFailureCode,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CashSettlementFailureReceipt:
         _validate_cash_settlement_actor(
             holder_id=holder_id,
@@ -1904,6 +2047,7 @@ class SupabaseWorkerApi:
                     "p_now": _isoformat(now),
                     "p_error_code": error_code,
                 },
+                scheduler_authorization=scheduler_authorization,
             )
         )
         _require_exact_keys(
@@ -1958,12 +2102,18 @@ class SupabaseWorkerApi:
             "fail_cash_settlement_attempt",
         ],
         payload: JsonObject,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> object:
+        _require_scheduler_transport_authorization(
+            scheduler_authorization,
+            rpc=rpc,
+        )
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if rpc == "complete_cash_settlement":
@@ -2000,14 +2150,20 @@ class SupabaseWorkerApi:
             "apply_unknown_resolution_v2",
         ],
         payload: JsonObject,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> object:
         if rpc not in WORKER_API_RPC_ALLOWLIST:
             raise ExecutionInvariantError("worker_api_rpc_is_not_allowed")
+        _require_scheduler_transport_authorization(
+            scheduler_authorization,
+            rpc=rpc,
+        )
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             if rpc == "apply_unknown_resolution_v2":
@@ -2026,19 +2182,89 @@ class SupabaseWorkerApi:
                 "worker_api_unknown_resolution_response_is_invalid"
             ) from exc
 
-    async def _rpc(self, rpc: WorkerApiRpc, payload: JsonObject) -> object:
+    async def _rpc(
+        self,
+        rpc: WorkerApiRpc,
+        payload: JsonObject,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> object:
         if rpc not in WORKER_API_RPC_ALLOWLIST:
             raise ExecutionInvariantError("worker_api_rpc_is_not_allowed")
+        _require_scheduler_transport_authorization(
+            scheduler_authorization,
+            rpc=rpc,
+        )
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
                 json=payload,
-                headers=self.headers,
+                headers=self._headers,
             )
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise ExecutionInvariantError("worker_api_rpc_failed_or_returned_invalid_json") from exc
+
+
+def _require_scheduler_transport_authorization(
+    authorization: SchedulerInvocationEffectAuthorization | None,
+    *,
+    rpc: WorkerApiRpc,
+) -> None:
+    if authorization is None:
+        return
+    job_key = _scheduler_job_key_for_rpc(rpc)
+    if job_key is None:
+        raise ExecutionInvariantError(
+            "worker_api_scheduler_authorization_is_not_allowed_for_rpc"
+        )
+    require_scheduler_invocation_effect_authorization(
+        authorization,
+        expected_job_key=job_key,
+    )
+
+
+def _scheduler_job_key_for_rpc(rpc: WorkerApiRpc) -> SchedulerJobKey | None:
+    match rpc:
+        case (
+            "reserve_order_intent"
+            | "mark_dispatch_started"
+            | "load_paper_execution_checkpoint"
+            | "record_execution_observation"
+        ):
+            return "operations.execution"
+        case (
+            "claim_execution_reconciliation_batch"
+            | "fail_reserved_intent_pre_dispatch"
+            | "expire_paper_intent_remainder"
+            | "complete_execution_reconciliation"
+            | "list_unknown_resolution_v2"
+            | "claim_unknown_resolution_v2"
+            | "apply_unknown_resolution_v2"
+        ):
+            return "operations.reconciliation"
+        case (
+            "claim_cash_settlement_batch"
+            | "complete_cash_settlement"
+            | "fail_cash_settlement_attempt"
+        ):
+            return "operations.settlement"
+        case (
+            "claim_delivery_outbox"
+            | "complete_outbox_delivery"
+            | "fail_outbox_delivery"
+        ):
+            return "operations.outbox"
+        case "claim_operation_command_batch" | "acknowledge_operation_command":
+            return "operations.commands"
+        case (
+            "acquire_worker_lease"
+            | "renew_worker_lease"
+            | "release_worker_lease"
+            | "record_worker_heartbeat"
+        ):
+            return None
 
 
 def _contract_request_sha256(intent: ExecutionIntent) -> str:

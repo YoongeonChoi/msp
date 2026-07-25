@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import Protocol
 
 from app.application.ports.unknown_resolution_port import UnknownResolutionPort
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.application.use_cases.reconcile_execution_v2 import (
     ExecutionReconciliationRunResult,
 )
@@ -68,17 +72,43 @@ class ApplyUnknownExecutionResolutionsV2:
         self.clock = clock
 
     async def run_once(self) -> UnknownResolutionRunResult:
+        return await self._run_once(None)
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> UnknownResolutionRunResult:
+        _require_reconciliation_effect(authorization)
+        return await self._run_once(authorization)
+
+    async def _run_once(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> UnknownResolutionRunResult:
         listed_at = self._now()
         lease = self._current_lease(listed_at)
-        candidates = await self.port.list_unknown_resolution_candidates(
-            account_id=self.account_id,
-            environment=self.environment,
-            holder_id=self.holder_id,
-            release_sha=self.release_sha,
-            fencing_token=lease.fencing_token,
-            now=listed_at,
-            limit=_MAX_UNKNOWN_RESOLUTIONS_PER_RUN,
-        )
+        if authorization is None:
+            candidates = await self.port.list_unknown_resolution_candidates(
+                account_id=self.account_id,
+                environment=self.environment,
+                holder_id=self.holder_id,
+                release_sha=self.release_sha,
+                fencing_token=lease.fencing_token,
+                now=listed_at,
+                limit=_MAX_UNKNOWN_RESOLUTIONS_PER_RUN,
+            )
+        else:
+            _require_reconciliation_effect(authorization)
+            candidates = await self.port.list_unknown_resolution_candidates(
+                account_id=self.account_id,
+                environment=self.environment,
+                holder_id=self.holder_id,
+                release_sha=self.release_sha,
+                fencing_token=lease.fencing_token,
+                now=listed_at,
+                limit=_MAX_UNKNOWN_RESOLUTIONS_PER_RUN,
+                scheduler_authorization=authorization,
+            )
         if len(candidates) > _MAX_UNKNOWN_RESOLUTIONS_PER_RUN:
             raise ExecutionInvariantError("unknown_resolution_list_exceeds_run_bound")
         if any(
@@ -104,10 +134,18 @@ class ApplyUnknownExecutionResolutionsV2:
                         newly_claimed=False,
                     )
                 else:
-                    claim = await self.port.claim_unknown_resolution(
-                        candidate,
-                        now=claim_time,
-                    )
+                    if authorization is None:
+                        claim = await self.port.claim_unknown_resolution(
+                            candidate,
+                            now=claim_time,
+                        )
+                    else:
+                        _require_reconciliation_effect(authorization)
+                        claim = await self.port.claim_unknown_resolution(
+                            candidate,
+                            now=claim_time,
+                            scheduler_authorization=authorization,
+                        )
                     self._validate_claim(
                         candidate,
                         claim,
@@ -121,6 +159,7 @@ class ApplyUnknownExecutionResolutionsV2:
                 receipt = await self._apply_with_exact_post_state_replay(
                     claim,
                     apply_time,
+                    authorization,
                 )
                 self._validate_receipt(claim, receipt)
                 applied += 1
@@ -142,13 +181,23 @@ class ApplyUnknownExecutionResolutionsV2:
         self,
         claim: UnknownResolutionClaim,
         apply_time: datetime,
+        authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> UnknownResolutionApplicationReceipt:
         try:
-            receipt = await self.port.apply_unknown_resolution(
-                claim,
-                now=apply_time,
-                replay=False,
-            )
+            if authorization is None:
+                receipt = await self.port.apply_unknown_resolution(
+                    claim,
+                    now=apply_time,
+                    replay=False,
+                )
+            else:
+                _require_reconciliation_effect(authorization)
+                receipt = await self.port.apply_unknown_resolution(
+                    claim,
+                    now=apply_time,
+                    replay=False,
+                    scheduler_authorization=authorization,
+                )
             if receipt.inserted is not True:
                 raise UnknownResolutionApplyAmbiguousError
             return receipt
@@ -156,11 +205,20 @@ class ApplyUnknownExecutionResolutionsV2:
             replay_time = self._now()
             replay_lease = self._current_lease(replay_time)
             self._require_same_fence(claim.lease_fencing_token, replay_lease)
-            receipt = await self.port.apply_unknown_resolution(
-                claim,
-                now=replay_time,
-                replay=True,
-            )
+            if authorization is None:
+                receipt = await self.port.apply_unknown_resolution(
+                    claim,
+                    now=replay_time,
+                    replay=True,
+                )
+            else:
+                _require_reconciliation_effect(authorization)
+                receipt = await self.port.apply_unknown_resolution(
+                    claim,
+                    now=replay_time,
+                    replay=True,
+                    scheduler_authorization=authorization,
+                )
             if receipt.inserted is not False:
                 raise UnknownResolutionApplyAmbiguousError from None
             return receipt
@@ -260,9 +318,19 @@ class ApplyUnknownExecutionResolutionsV2:
 class ExecutionReconciliationRunner(Protocol):
     async def run_once(self) -> ExecutionReconciliationRunResult: ...
 
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionReconciliationRunResult: ...
+
 
 class UnknownResolutionRunner(Protocol):
     async def run_once(self) -> UnknownResolutionRunResult: ...
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> UnknownResolutionRunResult: ...
 
 
 class RunExecutionReconciliationStageV2:
@@ -283,15 +351,36 @@ class RunExecutionReconciliationStageV2:
         self.generic = generic
 
     async def run_once(self) -> ExecutionReconciliationRunResult:
+        return await self._run_once(None)
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionReconciliationRunResult:
+        _require_reconciliation_effect(authorization)
+        return await self._run_once(authorization)
+
+    async def _run_once(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> ExecutionReconciliationRunResult:
         failures: list[str] = []
         unknown_result = UnknownResolutionRunResult(0, 0, 0, 0, 0, 0)
         generic_result = ExecutionReconciliationRunResult(0, 0, 0, 0)
         try:
-            unknown_result = await self.unknown.run_once()
+            if authorization is None:
+                unknown_result = await self.unknown.run_once()
+            else:
+                _require_reconciliation_effect(authorization)
+                unknown_result = await self.unknown.run_scheduled(authorization)
         except Exception as exc:
             failures.append(f"unknown:{type(exc).__name__}")
         try:
-            generic_result = await self.generic.run_once()
+            if authorization is None:
+                generic_result = await self.generic.run_once()
+            else:
+                _require_reconciliation_effect(authorization)
+                generic_result = await self.generic.run_scheduled(authorization)
         except Exception as exc:
             failures.append(f"generic:{type(exc).__name__}")
         if failures:
@@ -335,4 +424,13 @@ def _resume_claim(candidate: UnknownResolutionCandidate) -> UnknownResolutionCla
         holder_id=candidate.holder_id,
         release_sha=candidate.release_sha,
         lease_fencing_token=candidate.lease_fencing_token,
+    )
+
+
+def _require_reconciliation_effect(
+    authorization: object,
+) -> SchedulerInvocationEffectAuthorization:
+    return require_scheduler_invocation_effect_authorization(
+        authorization,
+        expected_job_key="operations.reconciliation",
     )

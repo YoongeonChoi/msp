@@ -32,6 +32,8 @@ on:
       - "supabase/verify_pit_calendar_as_of_reader.py"
       - "supabase/verify_kr_calendar_collection_job_store.py"
       - "supabase/verify_pit_daily_candle_collection_job_store.py"
+      - "supabase/verify_durable_operations_scheduler.py"
+      - "apps/worker/app/tests/contract/test_durable_operations_scheduler_migration.py"
       - ".github/scripts/repository_safety.py"
       - ".github/scripts/migration_history_guard.py"
       - ".github/scripts/test_migration_safety_guards.py"
@@ -70,6 +72,8 @@ on:
       - "supabase/verify_pit_calendar_as_of_reader.py"
       - "supabase/verify_kr_calendar_collection_job_store.py"
       - "supabase/verify_pit_daily_candle_collection_job_store.py"
+      - "supabase/verify_durable_operations_scheduler.py"
+      - "apps/worker/app/tests/contract/test_durable_operations_scheduler_migration.py"
       - ".github/scripts/repository_safety.py"
       - ".github/scripts/migration_history_guard.py"
       - ".github/scripts/test_migration_safety_guards.py"
@@ -167,6 +171,8 @@ jobs:
         run: python supabase/verify_kr_calendar_collection_job_store.py
       - name: Verify durable PIT daily-candle collection jobs
         run: python supabase/verify_pit_daily_candle_collection_job_store.py
+      - name: Verify durable operations scheduler
+        run: python supabase/verify_durable_operations_scheduler.py
       - name: Check singleton paper safety seed
         shell: python
         run: |

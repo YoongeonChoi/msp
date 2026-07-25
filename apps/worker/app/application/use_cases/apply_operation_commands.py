@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.application.ports.operation_command_port import OperationCommandPort
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.domain.common.time import now_utc
 from app.domain.execution_v2.models import ExecutionInvariantError, WorkerLease
 
@@ -45,18 +49,59 @@ class ApplyOperationCommands:
         self.clock = clock
 
     async def run_once(self, *, limit: int = 25) -> OperationCommandRunResult:
+        return await self._run(
+            limit=limit,
+            scheduler_authorization=None,
+        )
+
+    async def run_scheduled(
+        self,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        limit: int = 25,
+    ) -> OperationCommandRunResult:
+        authorization = require_scheduler_invocation_effect_authorization(
+            scheduler_authorization,
+            expected_job_key="operations.commands",
+        )
+        return await self._run(
+            limit=limit,
+            scheduler_authorization=authorization,
+        )
+
+    async def _run(
+        self,
+        *,
+        limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> OperationCommandRunResult:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 25:
             raise ExecutionInvariantError("operation_command_limit_is_invalid")
         claimed_at = self._now()
         lease = self._current_lease(claimed_at)
-        commands = await self.port.claim_operation_command_batch(
-            account_id=self.account_id,
-            holder_id=self.holder_id,
-            release_sha=self.current_release_sha,
-            fencing_token=lease.fencing_token,
-            now=claimed_at,
-            limit=limit,
-        )
+        if scheduler_authorization is None:
+            commands = await self.port.claim_operation_command_batch(
+                account_id=self.account_id,
+                holder_id=self.holder_id,
+                release_sha=self.current_release_sha,
+                fencing_token=lease.fencing_token,
+                now=claimed_at,
+                limit=limit,
+            )
+        else:
+            authorization = require_scheduler_invocation_effect_authorization(
+                scheduler_authorization,
+                expected_job_key="operations.commands",
+            )
+            commands = await self.port.claim_operation_command_batch(
+                account_id=self.account_id,
+                holder_id=self.holder_id,
+                release_sha=self.current_release_sha,
+                fencing_token=lease.fencing_token,
+                now=claimed_at,
+                limit=limit,
+                scheduler_authorization=authorization,
+            )
         if any(command.account_id != self.account_id for command in commands):
             raise ExecutionInvariantError("operation_command_account_scope_mismatch")
         applied = 0
@@ -66,21 +111,43 @@ class ApplyOperationCommands:
             try:
                 applied_at = self._now()
                 lease = self._current_lease(applied_at)
-                acknowledgement = await self.port.acknowledge_operation_command(
-                    command_id=command.command_id,
-                    phase="applied",
-                    account_id=self.account_id,
-                    holder_id=self.holder_id,
-                    release_sha=self.current_release_sha,
-                    fencing_token=lease.fencing_token,
-                    expected_revision=command.revision,
-                    now=applied_at,
-                    result_summary={
-                        "schema_version": 1,
-                        "command_type": command.command_type,
-                        "claimed_revision": command.revision,
-                    },
-                )
+                if scheduler_authorization is None:
+                    acknowledgement = await self.port.acknowledge_operation_command(
+                        command_id=command.command_id,
+                        phase="applied",
+                        account_id=self.account_id,
+                        holder_id=self.holder_id,
+                        release_sha=self.current_release_sha,
+                        fencing_token=lease.fencing_token,
+                        expected_revision=command.revision,
+                        now=applied_at,
+                        result_summary={
+                            "schema_version": 1,
+                            "command_type": command.command_type,
+                            "claimed_revision": command.revision,
+                        },
+                    )
+                else:
+                    authorization = require_scheduler_invocation_effect_authorization(
+                        scheduler_authorization,
+                        expected_job_key="operations.commands",
+                    )
+                    acknowledgement = await self.port.acknowledge_operation_command(
+                        command_id=command.command_id,
+                        phase="applied",
+                        account_id=self.account_id,
+                        holder_id=self.holder_id,
+                        release_sha=self.current_release_sha,
+                        fencing_token=lease.fencing_token,
+                        expected_revision=command.revision,
+                        now=applied_at,
+                        result_summary={
+                            "schema_version": 1,
+                            "command_type": command.command_type,
+                            "claimed_revision": command.revision,
+                        },
+                        scheduler_authorization=authorization,
+                    )
                 if acknowledgement.command_id != command.command_id:
                     raise ExecutionInvariantError("operation_ack_identity_mismatch")
                 if acknowledgement.state != "applied":
@@ -90,26 +157,55 @@ class ApplyOperationCommands:
                 try:
                     failed_at = self._now()
                     lease = self._current_lease(failed_at)
-                    failure_acknowledgement = (
-                        await self.port.acknowledge_operation_command(
-                            command_id=command.command_id,
-                            phase="failed",
-                            account_id=self.account_id,
-                            holder_id=self.holder_id,
-                            release_sha=self.current_release_sha,
-                            fencing_token=lease.fencing_token,
-                            expected_revision=command.revision,
-                            now=failed_at,
-                            result_summary={
-                                "schema_version": 1,
-                                "command_type": command.command_type,
-                                "claimed_revision": command.revision,
-                                "failure_stage": "atomic_apply_ack",
-                                "error_type": type(exc).__name__,
-                            },
-                            failure_code=_safe_command_failure_code(exc),
+                    if scheduler_authorization is None:
+                        failure_acknowledgement = (
+                            await self.port.acknowledge_operation_command(
+                                command_id=command.command_id,
+                                phase="failed",
+                                account_id=self.account_id,
+                                holder_id=self.holder_id,
+                                release_sha=self.current_release_sha,
+                                fencing_token=lease.fencing_token,
+                                expected_revision=command.revision,
+                                now=failed_at,
+                                result_summary={
+                                    "schema_version": 1,
+                                    "command_type": command.command_type,
+                                    "claimed_revision": command.revision,
+                                    "failure_stage": "atomic_apply_ack",
+                                    "error_type": type(exc).__name__,
+                                },
+                                failure_code=_safe_command_failure_code(exc),
+                            )
                         )
-                    )
+                    else:
+                        authorization = (
+                            require_scheduler_invocation_effect_authorization(
+                                scheduler_authorization,
+                                expected_job_key="operations.commands",
+                            )
+                        )
+                        failure_acknowledgement = (
+                            await self.port.acknowledge_operation_command(
+                                command_id=command.command_id,
+                                phase="failed",
+                                account_id=self.account_id,
+                                holder_id=self.holder_id,
+                                release_sha=self.current_release_sha,
+                                fencing_token=lease.fencing_token,
+                                expected_revision=command.revision,
+                                now=failed_at,
+                                result_summary={
+                                    "schema_version": 1,
+                                    "command_type": command.command_type,
+                                    "claimed_revision": command.revision,
+                                    "failure_stage": "atomic_apply_ack",
+                                    "error_type": type(exc).__name__,
+                                },
+                                failure_code=_safe_command_failure_code(exc),
+                                scheduler_authorization=authorization,
+                            )
+                        )
                     if failure_acknowledgement.command_id != command.command_id:
                         raise ExecutionInvariantError("operation_failure_ack_identity_mismatch")
                     if failure_acknowledgement.state != "failed":

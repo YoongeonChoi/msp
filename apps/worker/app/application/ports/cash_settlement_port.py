@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 from app.domain.execution_v2.cash_settlement import (
     CashSettlementClaim,
@@ -21,6 +26,7 @@ class CashSettlementPort(Protocol):
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[CashSettlementClaim, ...]:
         ...
 
@@ -32,6 +38,7 @@ class CashSettlementPort(Protocol):
         release_sha: str,
         fencing_token: int,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CashSettlementReceipt:
         ...
 
@@ -44,5 +51,6 @@ class CashSettlementPort(Protocol):
         fencing_token: int,
         now: datetime,
         error_code: CashSettlementFailureCode,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CashSettlementFailureReceipt:
         ...

@@ -10,6 +10,10 @@ from app.application.ports.execution_kernel_port import (
     ExecutionKernelPort,
 )
 from app.application.services.paper_execution_v2 import DeterministicPaperExecutionSimulator
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.domain.execution_v2.models import (
     TERMINAL_EXECUTION_STATUSES,
     ExecutionCostSchedule,
@@ -115,7 +119,26 @@ class RunExecutionV2:
     ) -> ExecutionV2RunOutcome:
         if self.durable_port is None:
             return await self._execute_in_memory(command)
-        return await self._execute_durable(command)
+        return await self._execute_durable(command, scheduler_authorization=None)
+
+    async def execute_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionV2RunOutcome:
+        """Execute a durable Paper command under one exact scheduler authority."""
+
+        if self.durable_port is None:
+            raise ExecutionInvariantError(
+                "paper_scheduled_execution_requires_durable_port"
+            )
+        authorization = _require_execution_scheduler_authorization(
+            scheduler_authorization
+        )
+        return await self._execute_durable(
+            command,
+            scheduler_authorization=authorization,
+        )
 
     async def resume_existing_paper(
         self,
@@ -127,12 +150,50 @@ class RunExecutionV2:
         reservation RPC and therefore cannot create a new intent.
         """
 
+        return await self._resume_existing_paper(
+            command,
+            scheduler_authorization=None,
+        )
+
+    async def resume_existing_scheduled_paper(
+        self,
+        command: PaperExecutionV2Command,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionV2RunOutcome:
+        """Resume a durable Paper command under one exact scheduler authority."""
+
         if self.durable_port is None:
             raise ExecutionInvariantError("paper_resume_requires_durable_port")
-        checkpoint = await self.durable_port.load_paper_execution_checkpoint(
-            command.intent,
-            now=command.evaluated_at,
+        authorization = _require_execution_scheduler_authorization(
+            scheduler_authorization
         )
+        return await self._resume_existing_paper(
+            command,
+            scheduler_authorization=authorization,
+        )
+
+    async def _resume_existing_paper(
+        self,
+        command: PaperExecutionV2Command,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
+    ) -> ExecutionV2RunOutcome:
+        if self.durable_port is None:
+            raise ExecutionInvariantError("paper_resume_requires_durable_port")
+        if scheduler_authorization is None:
+            checkpoint = await self.durable_port.load_paper_execution_checkpoint(
+                command.intent,
+                now=command.evaluated_at,
+            )
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            checkpoint = await self.durable_port.load_paper_execution_checkpoint(
+                command.intent,
+                now=command.evaluated_at,
+                scheduler_authorization=authorization,
+            )
         if checkpoint.is_terminal:
             return ExecutionV2RunOutcome(
                 "completed",
@@ -143,14 +204,25 @@ class RunExecutionV2:
             raise ExecutionInvariantError(
                 "paper_resume_requires_persisted_open_or_partial"
             )
-        await self.durable_port.mark_dispatch_started(
-            command.intent,
-            now=command.evaluated_at,
-        )
+        if scheduler_authorization is None:
+            await self.durable_port.mark_dispatch_started(
+                command.intent,
+                now=command.evaluated_at,
+            )
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            await self.durable_port.mark_dispatch_started(
+                command.intent,
+                now=command.evaluated_at,
+                scheduler_authorization=authorization,
+            )
         return await self._simulate_and_record_durable(
             command,
             command.intent,
             checkpoint,
+            scheduler_authorization=scheduler_authorization,
         )
 
     async def _execute_in_memory(
@@ -182,9 +254,20 @@ class RunExecutionV2:
     async def _execute_durable(
         self,
         command: PaperExecutionV2Command,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> ExecutionV2RunOutcome:
         assert self.durable_port is not None
-        reservation = await self.durable_port.reserve_order_intent(command.intent)
+        if scheduler_authorization is None:
+            reservation = await self.durable_port.reserve_order_intent(command.intent)
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            reservation = await self.durable_port.reserve_order_intent(
+                command.intent,
+                scheduler_authorization=authorization,
+            )
         if reservation.state == "semantic_duplicate":
             if reservation.intent_id == command.intent.id:
                 raise ExecutionInvariantError(
@@ -203,26 +286,46 @@ class RunExecutionV2:
         ):
             raise ExecutionInvariantError("durable_replay_intent_mismatch")
         persisted_intent = command.intent
-        await self.durable_port.mark_dispatch_started(
-            persisted_intent,
-            now=(
-                command.dispatch_at
-                if reservation.state == "created"
-                else command.evaluated_at
-            ),
-        )
-        checkpoint = (
-            None
+        dispatch_at = (
+            command.dispatch_at
             if reservation.state == "created"
-            else await self.durable_port.load_paper_execution_checkpoint(
+            else command.evaluated_at
+        )
+        if scheduler_authorization is None:
+            await self.durable_port.mark_dispatch_started(
+                persisted_intent,
+                now=dispatch_at,
+            )
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            await self.durable_port.mark_dispatch_started(
+                persisted_intent,
+                now=dispatch_at,
+                scheduler_authorization=authorization,
+            )
+        if reservation.state == "created":
+            checkpoint = None
+        elif scheduler_authorization is None:
+            checkpoint = await self.durable_port.load_paper_execution_checkpoint(
                 persisted_intent,
                 now=command.evaluated_at,
             )
-        )
+        else:
+            authorization = _require_execution_scheduler_authorization(
+                scheduler_authorization
+            )
+            checkpoint = await self.durable_port.load_paper_execution_checkpoint(
+                persisted_intent,
+                now=command.evaluated_at,
+                scheduler_authorization=authorization,
+            )
         return await self._simulate_and_record_durable(
             command,
             persisted_intent,
             checkpoint,
+            scheduler_authorization=scheduler_authorization,
         )
 
     async def _simulate_and_record_durable(
@@ -230,6 +333,8 @@ class RunExecutionV2:
         command: PaperExecutionV2Command,
         persisted_intent: ExecutionIntent,
         checkpoint: PaperExecutionCheckpoint | None,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None,
     ) -> ExecutionV2RunOutcome:
         assert self.durable_port is not None
         if checkpoint is not None and checkpoint.is_terminal:
@@ -275,13 +380,30 @@ class RunExecutionV2:
             else self.durable_port.current_release_sha
         )
         for observation in result.observations[prefix_length:]:
-            record_result = await self.durable_port.record_execution_observation(
-                persisted_intent,
-                observation,
-                accounting_transaction=transactions_by_sequence.get(observation.sequence),
-                intent_release_sha=intent_release_sha,
-                now=command.evaluated_at,
-            )
+            if scheduler_authorization is None:
+                record_result = await self.durable_port.record_execution_observation(
+                    persisted_intent,
+                    observation,
+                    accounting_transaction=transactions_by_sequence.get(
+                        observation.sequence
+                    ),
+                    intent_release_sha=intent_release_sha,
+                    now=command.evaluated_at,
+                )
+            else:
+                authorization = _require_execution_scheduler_authorization(
+                    scheduler_authorization
+                )
+                record_result = await self.durable_port.record_execution_observation(
+                    persisted_intent,
+                    observation,
+                    accounting_transaction=transactions_by_sequence.get(
+                        observation.sequence
+                    ),
+                    intent_release_sha=intent_release_sha,
+                    now=command.evaluated_at,
+                    scheduler_authorization=authorization,
+                )
             if record_result.quarantined:
                 return ExecutionV2RunOutcome(
                     "quarantined",
@@ -295,6 +417,15 @@ class RunExecutionV2:
                     reason_code=observation.reason or "unknown_requires_manual_check",
                 )
         return ExecutionV2RunOutcome(_paper_result_status(result), result)
+
+
+def _require_execution_scheduler_authorization(
+    value: object,
+) -> SchedulerInvocationEffectAuthorization:
+    return require_scheduler_invocation_effect_authorization(
+        value,
+        expected_job_key="operations.execution",
+    )
 
 
 def _paper_result_status(

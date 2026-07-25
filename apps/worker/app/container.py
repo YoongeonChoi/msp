@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 from app.adapters.ai.openai_client import OpenAIClient
@@ -21,23 +21,23 @@ from app.adapters.news.naver_news_client import NaverNewsClient
 from app.adapters.news.naver_news_mock import NaverNewsMock
 from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernelV2
 from app.adapters.persistence.sql_repository import InMemoryRepository
+from app.adapters.persistence.supabase_durable_scheduler import (
+    SupabaseDurableScheduler,
+)
 from app.adapters.persistence.supabase_paper_execution_source import (
     SupabasePaperExecutionCommandSource,
 )
 from app.adapters.persistence.supabase_repository import SupabaseRepository
 from app.adapters.persistence.supabase_worker_api import SupabaseWorkerApi
-from app.adapters.persistence.unavailable_paper_execution_source import (
-    UnavailablePaperExecutionCommandSource,
-)
 from app.application.ports.ai_port import AIPort
 from app.application.ports.broker_port import BrokerPort
 from app.application.ports.fundamentals_port import FundamentalsPort
 from app.application.ports.market_data_port import MarketDataPort
 from app.application.ports.news_port import NewsPort
+from app.application.services.durable_scheduler_loop import DurableSchedulerLoop
 from app.application.services.execution_service import ExecutionService
 from app.application.services.feature_service import FeatureService
 from app.application.services.health_service import HealthService
-from app.application.services.operations_loop import OperationsLoop
 from app.application.services.order_reconciliation_service import OrderReconciliationService
 from app.application.services.portfolio_service import PortfolioReadPort, PortfolioService
 from app.application.services.risk_service import RiskService
@@ -58,12 +58,15 @@ from app.application.use_cases.run_execution_supervisor_v2 import (
     RunExecutionSupervisorV2,
 )
 from app.application.use_cases.run_execution_v2 import RunExecutionV2
-from app.application.use_cases.run_operations_v2 import RunOperationsV2
 from app.application.use_cases.run_trading_cycle import RunTradingCycle
 from app.config import Settings
 from app.domain.trading.entities import BotSettings
 from app.infrastructure.authenticated_webhook import ReceiverAckKeyRing
 from app.infrastructure.graceful_shutdown import ShutdownFlag
+from app.infrastructure.scheduler_fail_stop import fail_stop_scheduler_process
+from app.infrastructure.scheduler_runtime_capability_factory import (
+    create_supabase_durable_scheduler_facade,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,22 +86,33 @@ class Container:
 
 @dataclass(slots=True)
 class OperationsV2Runtime:
-    operations_loop: OperationsLoop
+    scheduler_loop: DurableSchedulerLoop
     worker_api: SupabaseWorkerApi
+    scheduler: SupabaseDurableScheduler
     destination: OutboxWebhookDestination | UnavailableOutboxDestination
     run_execution_v2: RunExecutionV2
-    execution_source: SupabasePaperExecutionCommandSource | UnavailablePaperExecutionCommandSource
+    execution_source: SupabasePaperExecutionCommandSource
+    _closed: bool = field(default=False, init=False, repr=False)
 
     async def close(self) -> None:
-        try:
-            if isinstance(self.execution_source, SupabasePaperExecutionCommandSource):
-                await self.execution_source.close()
-        finally:
+        if self._closed:
+            return
+        self._closed = True
+        failures: list[BaseException] = []
+        close_operations = [self.execution_source.close]
+        destination_close = getattr(self.destination, "close", None)
+        if callable(destination_close):
+            close_operations.append(destination_close)
+        close_operations.extend((self.scheduler.close, self.worker_api.close))
+        for close in close_operations:
             try:
-                if isinstance(self.destination, OutboxWebhookDestination):
-                    await self.destination.close()
-            finally:
-                await self.worker_api.close()
+                await close()
+            except BaseException as exc:
+                failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("operations_v2_runtime_close_failed", failures)
 
 
 def build_container(settings: Settings, shutdown: ShutdownFlag) -> Container:
@@ -256,6 +270,8 @@ def build_operations_v2_runtime(
 ) -> OperationsV2Runtime:
     if not settings.execution_v2_worker_api_enabled:
         raise ValueError("operations_v2_runtime_requires_worker_api_enablement")
+    if settings.execution_v2_environment != "paper":
+        raise ValueError("worker_api_runtime_requires_paper_environment")
     worker_id = settings.execution_v2_worker_id
     if worker_id is None:
         raise ValueError("operations_v2_runtime_requires_worker_id")
@@ -273,16 +289,14 @@ def build_operations_v2_runtime(
         if alert_webhook is not None
         else UnavailableOutboxDestination()
     )
-    execution_source: (
-        SupabasePaperExecutionCommandSource | UnavailablePaperExecutionCommandSource
-    ) = (
-        SupabasePaperExecutionCommandSource(
-            settings,
-            account_id=account_id,
-            release_sha=worker_api.release_sha,
-        )
-        if settings.execution_v2_environment == "paper"
-        else UnavailablePaperExecutionCommandSource()
+    execution_source = SupabasePaperExecutionCommandSource(
+        settings,
+        account_id=account_id,
+        release_sha=worker_api.release_sha,
+    )
+    scheduler = SupabaseDurableScheduler(
+        settings,
+        release_sha=worker_api.release_sha,
     )
     run_execution_v2 = RunExecutionV2(durable_port=worker_api)
     lease_manager = MaintainWorkerLease(
@@ -291,22 +305,30 @@ def build_operations_v2_runtime(
         holder_id=worker_id,
         ttl=timedelta(seconds=settings.worker_lease_ttl_sec),
     )
-    run_operations = RunOperationsV2(
-        ApplyOperationCommands(
-            worker_api,
-            account_id=account_id,
-            holder_id=worker_id,
-            current_release_sha=worker_api.release_sha,
-            lease_provider=lambda: lease_manager.current,
-        ),
-        RunExecutionSupervisorV2(
-            execution_source,
-            run_execution_v2,
-            RiskService(),
-            worker_id=worker_id,
-            current_release_sha=worker_api.release_sha,
-        ),
-        MatureCashSettlements(
+    commands = ApplyOperationCommands(
+        worker_api,
+        account_id=account_id,
+        holder_id=worker_id,
+        current_release_sha=worker_api.release_sha,
+        lease_provider=lambda: lease_manager.current,
+    )
+    execution = RunExecutionSupervisorV2(
+        execution_source,
+        run_execution_v2,
+        RiskService(),
+        worker_id=worker_id,
+        current_release_sha=worker_api.release_sha,
+    )
+    settlement = MatureCashSettlements(
+        worker_api,
+        account_id=account_id,
+        environment=settings.execution_v2_environment,
+        holder_id=worker_id,
+        release_sha=worker_api.release_sha,
+        lease_provider=lambda: lease_manager.current,
+    )
+    reconciliation = RunExecutionReconciliationStageV2(
+        ApplyUnknownExecutionResolutionsV2(
             worker_api,
             account_id=account_id,
             environment=settings.execution_v2_environment,
@@ -314,44 +336,57 @@ def build_operations_v2_runtime(
             release_sha=worker_api.release_sha,
             lease_provider=lambda: lease_manager.current,
         ),
-        RunExecutionReconciliationStageV2(
-            ApplyUnknownExecutionResolutionsV2(
+        ReconcileExecutionV2(
+            worker_api,
+            FailClosedExecutionReconciliationHandler(
                 worker_api,
-                account_id=account_id,
-                environment=settings.execution_v2_environment,
-                holder_id=worker_id,
-                release_sha=worker_api.release_sha,
-                lease_provider=lambda: lease_manager.current,
-            ),
-            ReconcileExecutionV2(
-                worker_api,
-                FailClosedExecutionReconciliationHandler(
-                    worker_api,
-                    worker_id=worker_id,
-                    current_release_sha=worker_api.release_sha,
-                ),
-                account_id=account_id,
                 worker_id=worker_id,
                 current_release_sha=worker_api.release_sha,
-                lease_provider=lambda: lease_manager.current,
             ),
-        ),
-        DispatchAlertOutbox(
-            worker_api,
-            destination,
+            account_id=account_id,
             worker_id=worker_id,
+            current_release_sha=worker_api.release_sha,
+            lease_provider=lambda: lease_manager.current,
         ),
-        heartbeat=worker_api,
+    )
+    outbox = DispatchAlertOutbox(
+        worker_api,
+        destination,
         worker_id=worker_id,
     )
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=scheduler,
+        worker_api=worker_api,
+        lease_manager=lease_manager,
+        commands=commands,
+        execution=execution,
+        settlement=settlement,
+        reconciliation=reconciliation,
+        outbox=outbox,
+        settings=settings,
+        fail_stop=fail_stop_scheduler_process,
+    )
     return OperationsV2Runtime(
-        operations_loop=OperationsLoop(
-            settings,
-            shutdown,
-            run_operations,
+        scheduler_loop=DurableSchedulerLoop(
+            facade,
             lease_manager,
+            worker_api,
+            worker_id=worker_id,
+            shutdown=shutdown,
+            run_once=settings.run_once,
+            poll_interval_sec=min(
+                settings.operations_command_interval_sec,
+                settings.operations_execution_interval_sec,
+                settings.operations_settlement_interval_sec,
+                settings.operations_reconciliation_interval_sec,
+                settings.operations_outbox_interval_sec,
+            ),
+            heartbeat_interval_sec=settings.operations_heartbeat_interval_sec,
+            lease_renew_interval_sec=settings.worker_lease_renew_interval_sec,
+            max_convergence_steps=16,
         ),
         worker_api=worker_api,
+        scheduler=scheduler,
         destination=destination,
         run_execution_v2=run_execution_v2,
         execution_source=execution_source,

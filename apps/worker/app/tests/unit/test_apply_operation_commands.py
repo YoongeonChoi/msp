@@ -1,9 +1,14 @@
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
 
+import app.application.use_cases.apply_operation_commands as commands_module
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.apply_operation_commands import (
     ApplyOperationCommands,
     OperationCommandRunResult,
@@ -53,6 +58,121 @@ async def test_claimed_command_is_applied_through_atomic_postcondition_ack() -> 
         "command_type": "pause_paper",
         "claimed_revision": 4,
     }
+
+
+async def test_scheduled_command_propagates_authorization_to_every_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeOperationCommandPort(_command(now, command_type="pause_paper"))
+    holder_id = str(uuid4())
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.commands",
+    )
+    monkeypatch.setattr(
+        commands_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    result = await ApplyOperationCommands(
+        port,
+        account_id="paper-primary",
+        holder_id=holder_id,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now, holder_id=holder_id),
+        clock=lambda: now,
+    ).run_scheduled(authorization)
+
+    assert result == OperationCommandRunResult(1, 1)
+    assert gate.calls == 3
+    assert port.scheduler_authorizations == [authorization, authorization]
+
+
+async def test_scheduled_command_rejects_missing_authorization_before_claim() -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeOperationCommandPort(_command(now, command_type="pause_paper"))
+    holder_id = str(uuid4())
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await ApplyOperationCommands(
+            port,
+            account_id="paper-primary",
+            holder_id=holder_id,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: _lease(now, holder_id=holder_id),
+            clock=lambda: now,
+        ).run_scheduled(cast(SchedulerInvocationEffectAuthorization, None))
+
+    assert port.claim_gate is None
+    assert port.scheduler_authorizations == []
+
+
+async def test_scheduled_command_revocation_before_claim_blocks_first_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeOperationCommandPort(_command(now, command_type="pause_paper"))
+    holder_id = str(uuid4())
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.commands",
+        revoke_at=1,
+    )
+    monkeypatch.setattr(
+        commands_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await ApplyOperationCommands(
+            port,
+            account_id="paper-primary",
+            holder_id=holder_id,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: _lease(now, holder_id=holder_id),
+            clock=lambda: now,
+        ).run_scheduled(authorization)
+
+    assert port.claim_gate is None
+    assert port.scheduler_authorizations == []
+
+
+async def test_scheduled_command_mid_run_revocation_escapes_broad_exception_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeOperationCommandPort(_command(now, command_type="pause_paper"))
+    holder_id = str(uuid4())
+    authorization = _authorization()
+    gate = FakeSchedulerAuthorizationGate(
+        authorization,
+        expected_job_key="operations.commands",
+        revoke_at=3,
+    )
+    monkeypatch.setattr(
+        commands_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await ApplyOperationCommands(
+            port,
+            account_id="paper-primary",
+            holder_id=holder_id,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: _lease(now, holder_id=holder_id),
+            clock=lambda: now,
+        ).run_scheduled(authorization)
+
+    assert port.claim_gate is not None
+    assert port.ack_phase is None
+    assert port.scheduler_authorizations == [authorization]
 
 
 async def test_poison_command_is_failed_without_starving_following_command() -> None:
@@ -186,6 +306,9 @@ class FakeOperationCommandPort:
         self.result_summary: JsonObject | None = None
         self.claim_gate: tuple[str, str, str, int] | None = None
         self.ack_gate: tuple[str, str, str, int, int] | None = None
+        self.scheduler_authorizations: list[
+            SchedulerInvocationEffectAuthorization | None
+        ] = []
 
     async def claim_operation_command_batch(
         self,
@@ -196,8 +319,10 @@ class FakeOperationCommandPort:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedOperationCommand, ...]:
         del now, limit
+        self.scheduler_authorizations.append(scheduler_authorization)
         self.claim_gate = (account_id, holder_id, release_sha, fencing_token)
         return (self.command,)
 
@@ -214,8 +339,10 @@ class FakeOperationCommandPort:
         now: datetime,
         result_summary: JsonObject,
         failure_code: str | None = None,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OperationCommandAcknowledgement:
         del failure_code
+        self.scheduler_authorizations.append(scheduler_authorization)
         self.ack_phase = phase
         self.ack_gate = (
             account_id,
@@ -259,8 +386,10 @@ class PoisonAwareOperationCommandPort:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedOperationCommand, ...]:
         del account_id, holder_id, release_sha, fencing_token, now, limit
+        del scheduler_authorization
         return self.commands
 
     async def acknowledge_operation_command(
@@ -276,9 +405,10 @@ class PoisonAwareOperationCommandPort:
         now: datetime,
         result_summary: JsonObject,
         failure_code: str | None = None,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OperationCommandAcknowledgement:
         del account_id, holder_id, release_sha, fencing_token, expected_revision
-        del result_summary
+        del result_summary, scheduler_authorization
         self.calls.append((command_id, phase, failure_code))
         if command_id == self.poison_id and phase == "applied":
             raise RuntimeError("poison_command")
@@ -321,3 +451,34 @@ def _lease(now: datetime, *, holder_id: str) -> WorkerLease:
         acquired_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=30),
     )
+
+
+class FakeSchedulerAuthorizationGate:
+    def __init__(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        expected_job_key: str,
+        revoke_at: int | None = None,
+    ) -> None:
+        self.authorization = authorization
+        self.expected_job_key = expected_job_key
+        self.revoke_at = revoke_at
+        self.calls = 0
+
+    def __call__(
+        self,
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is self.authorization
+        assert expected_job_key == self.expected_job_key
+        self.calls += 1
+        if self.calls == self.revoke_at:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return self.authorization
+
+
+def _authorization() -> SchedulerInvocationEffectAuthorization:
+    return cast(SchedulerInvocationEffectAuthorization, object())

@@ -7,11 +7,16 @@ import hmac
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
+import app.infrastructure.authenticated_webhook as authenticated_webhook_module
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.infrastructure.authenticated_webhook import (
     AuthenticatedWebhookError,
     AuthenticatedWebhookTransport,
@@ -24,6 +29,132 @@ CURRENT_KEY = b"c" * 32
 PREVIOUS_KEY = b"p" * 32
 CURRENT_KEY_B64 = base64.b64encode(CURRENT_KEY).decode("ascii")
 PREVIOUS_KEY_B64 = base64.b64encode(PREVIOUS_KEY).decode("ascii")
+
+
+async def test_scheduler_authorization_is_revalidated_immediately_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    binding = {"message": "authorization-check"}
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: object,
+    ) -> None:
+        assert value is authorization
+        assert expected_job_key == "operations.outbox"
+        events.append("validated")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        events.append("sent")
+        return _signed_response(
+            request,
+            body=b"",
+            context="outbox",
+            binding=binding,
+            key_id="current",
+            key=CURRENT_KEY,
+            acknowledged_at=_epoch(NOW),
+            status_code=204,
+        )
+
+    monkeypatch.setattr(
+        authenticated_webhook_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await AuthenticatedWebhookTransport(
+            "https://alerts.example.test/events",
+            key_ring=_key_ring(),
+            client=client,
+            clock=lambda: NOW,
+        ).post_json(
+            context="outbox",
+            payload={"message": "authorization-check"},
+            binding=binding,
+            scheduler_authorization=authorization,
+        )
+
+    assert response.status_code == 204
+    assert events == ["validated", "validated", "sent", "validated"]
+
+
+@pytest.mark.parametrize("reason", ["binding_mismatch", "handler_exit"])
+async def test_wrong_or_revoked_scheduler_authorization_blocks_send(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    requests = 0
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+
+    def reject_authorization(
+        _value: object,
+        *,
+        expected_job_key: object,
+    ) -> None:
+        assert expected_job_key == "operations.outbox"
+        raise SchedulerInvocationPermitRevoked(reason)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500, request=request)
+
+    monkeypatch.setattr(
+        authenticated_webhook_module,
+        "require_scheduler_invocation_effect_authorization",
+        reject_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(SchedulerInvocationPermitRevoked, match=reason):
+            await AuthenticatedWebhookTransport(
+                "https://alerts.example.test/events",
+                key_ring=_key_ring(),
+                client=client,
+                clock=lambda: NOW,
+            ).post_json(
+                context="outbox",
+                payload={"message": "authorization-check"},
+                binding={"message": "authorization-check"},
+                scheduler_authorization=authorization,
+            )
+
+    assert requests == 0
+
+
+@pytest.mark.parametrize("context", ["legacy_alert", "dead_man"])
+async def test_scheduler_authorization_is_reserved_for_outbox_context(
+    context: object,
+) -> None:
+    requests = 0
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(
+            AuthenticatedWebhookError,
+            match="authenticated_webhook_scheduler_authorization_context_is_invalid",
+        ):
+            await AuthenticatedWebhookTransport(
+                "https://alerts.example.test/events",
+                key_ring=_key_ring(),
+                client=client,
+                clock=lambda: NOW,
+            ).post_json(
+                context=cast(Any, context),
+                payload={"message": "authorization-check"},
+                binding={"message": "authorization-check"},
+                scheduler_authorization=authorization,
+            )
+
+    assert requests == 0
 
 
 @pytest.mark.parametrize(

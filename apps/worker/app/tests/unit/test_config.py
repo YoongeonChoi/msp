@@ -82,6 +82,21 @@ def test_worker_api_requires_explicit_execution_v2_enablement() -> None:
         Settings(EXECUTION_V2_WORKER_API_ENABLED=True)
 
 
+def test_worker_api_runtime_requires_paper_environment() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="worker_api_runtime_requires_paper_environment",
+    ):
+        Settings(
+            MOCK_PROVIDERS=True,
+            EXECUTION_V2_ENABLED=True,
+            EXECUTION_V2_ENVIRONMENT="contract_test",
+            EXECUTION_V2_WORKER_API_ENABLED=True,
+            EXECUTION_V2_WORKER_ID="00000000-0000-4000-8000-000000000001",
+            EXECUTION_V2_ACCOUNT_ID="contract-test-primary",
+        )
+
+
 def test_paper_resume_input_requires_paper_worker_api_enablement() -> None:
     with pytest.raises(
         ValidationError,

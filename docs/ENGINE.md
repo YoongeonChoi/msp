@@ -42,7 +42,12 @@ The required post-`0024` engine/database tail is
 `20260714160105_operations_runtime_scheduler.sql`,
 `20260714161511_unknown_execution_resolution_v2.sql`, and
 `20260714165910_unknown_resolution_desktop_projection.sql`, followed by
-`20260715020752_kst_trading_date_convergence.sql`.
+`20260715020752_kst_trading_date_convergence.sql`. The durable cadence boundary
+is established by `20260724210000_durable_operations_scheduler.sql`, corrected
+by `20260724234500_durable_scheduler_conflict_target.sql`, and capped at the
+database boundary by `20260725090000_durable_scheduler_budget_policy.sql` after
+the intervening evidence, calendar, and Desktop projection migrations
+documented in [Supabase Setup](SUPABASE_SETUP.md).
 
 ## Paper execution v1
 
@@ -107,11 +112,38 @@ second accounting mutation.
 
 ## Independent operations scheduler
 
-Continuous operations run command, execution, settlement, reconciliation, and
-outbox stages on independent bounded cadences and publish each stage's last
-completion in the Worker heartbeat. A failed or unacknowledged command blocks
-new execution and settlement for that pass; reconciliation and outbox still run
-to preserve recovery and delivery progress.
+Continuous operations use exactly five fixed durable definitions: command,
+execution, settlement, reconciliation, and outbox. PostgreSQL time owns every
+due, retry, and expiry decision. Process sleep is only bounded polling
+backpressure; it is never the cadence source of truth. One definition can have
+at most one pending, leased, or retry-wait run, and each inner lease is capped
+by the current account-level outer lease and bound to its holder, fencing token,
+and release SHA.
+
+Startup first calls the typed definition-convergence boundary. `converged`
+means the requested digest is installed and no active run remains; `claimed`
+can lease only an already persisted command, reconciliation, or outbox recovery
+run; `wait` carries a database-clock eligibility instant; and
+`manual_resolution` leaves uncertain effects blocked. Convergence never creates
+a cadence run and never auto-claims execution or settlement. Only after the
+safe definitions converge may the normal claim path create a due run.
+
+A command result is successful only when both `failed=0` and
+`unacknowledged=0`. New execution additionally requires that command success in
+the current outer fencing generation and enabled, ready settlement and
+reconciliation recovery planes with no expired lease awaiting classification.
+A failed command therefore blocks new execution. Settlement still matures
+already captured obligations, while reconciliation and outbox continue recovery
+and delivery progress; they are not treated as permission to create a new
+order.
+
+Scheduler-level automatic retry is limited to the exact allowlisted transient
+reason for command, reconciliation, or outbox polling. Execution and settlement
+are never automatically retried. If either lease expires, the run becomes an
+immutable dead letter and generic replay remains forbidden until a separate,
+evidence-backed resolution contract is approved. Eligible non-effectful replay
+creates a new child run under an exact source revision/digest/reason/generation
+compare-and-swap and never mutates its source.
 
 ## State and recovery rules
 

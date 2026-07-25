@@ -7,6 +7,7 @@ import structlog
 from app.bootstrap import bootstrap, bootstrap_operations_v2
 from app.config import Settings, load_settings
 from app.domain.common.errors import KnownFailClosedError
+from app.infrastructure.scheduler_fail_stop import SchedulerProcessFailStop
 
 logger = structlog.get_logger()
 
@@ -16,11 +17,24 @@ async def async_main(settings: Settings | None = None) -> None:
     if resolved_settings.execution_v2_worker_api_enabled:
         runtime = bootstrap_operations_v2(resolved_settings)
         try:
-            await runtime.operations_loop.run()
-        except Exception:
-            logger.exception("operations_v2_runtime_failed")
+            try:
+                await runtime.scheduler_loop.run()
+            except SchedulerProcessFailStop as exc:
+                logger.critical("durable_scheduler_fail_stop", reason=exc.reason)
+                raise
+            except Exception:
+                logger.exception("operations_v2_runtime_failed")
+                raise
+        except BaseException as primary_failure:
+            try:
+                await runtime.close()
+            except BaseException as cleanup_failure:
+                primary_failure.add_note(
+                    "operations runtime cleanup also failed: "
+                    f"{type(cleanup_failure).__name__}"
+                )
             raise
-        finally:
+        else:
             await runtime.close()
         return
 

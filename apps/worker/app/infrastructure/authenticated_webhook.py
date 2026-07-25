@@ -18,6 +18,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
+
 ReceiverAckContext = Literal["legacy_alert", "outbox", "dead_man"]
 
 _PROTOCOL = "kr-auto-trading-lab.receiver-ack.v1"
@@ -173,7 +178,10 @@ class AuthenticatedWebhookTransport:
         self._target = validate_webhook_target(webhook_url)
         self._key_ring = key_ring
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=timeout_sec)
+        self._client = client or httpx.AsyncClient(
+            timeout=timeout_sec,
+            trust_env=False,
+        )
         self._timeout_sec = timeout_sec
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -185,6 +193,7 @@ class AuthenticatedWebhookTransport:
         binding: Mapping[str, str],
         headers: Mapping[str, str] | None = None,
         allow_stale_ack: bool = False,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> AuthenticatedWebhookResponse:
         if type(context) is not str or context not in {
             "legacy_alert",
@@ -206,6 +215,10 @@ class AuthenticatedWebhookTransport:
             current_key_id=self._key_ring.current_key_id,
             extra=headers,
         )
+        _require_scheduler_transport_authorization(
+            scheduler_authorization,
+            context=context,
+        )
         try:
             request = self._client.build_request(
                 "POST",
@@ -215,16 +228,26 @@ class AuthenticatedWebhookTransport:
             )
         except (TypeError, ValueError, httpx.HTTPError):
             raise AuthenticatedWebhookError("authenticated_webhook_request_is_invalid") from None
+        if request.method != "POST" or str(request.url) != self._target.url:
+            raise AuthenticatedWebhookError("authenticated_webhook_request_is_invalid")
         sent_at = self._now()
         response: httpx.Response | None = None
         try:
             async with asyncio.timeout(self._timeout_sec):
+                _require_scheduler_transport_authorization(
+                    scheduler_authorization,
+                    context=context,
+                )
                 response = await self._client.send(
                     request,
                     stream=True,
                     follow_redirects=False,
                 )
                 response_body = await _bounded_response_body(response)
+                _require_scheduler_transport_authorization(
+                    scheduler_authorization,
+                    context=context,
+                )
                 if response.status_code < 200 or response.status_code >= 300:
                     raise AuthenticatedWebhookError("authenticated_webhook_transport_failed")
                 received_at = self._now()
@@ -260,6 +283,23 @@ class AuthenticatedWebhookTransport:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise AuthenticatedWebhookError("authenticated_webhook_clock_is_invalid")
         return value.astimezone(UTC)
+
+
+def _require_scheduler_transport_authorization(
+    authorization: SchedulerInvocationEffectAuthorization | None,
+    *,
+    context: ReceiverAckContext,
+) -> None:
+    if authorization is None:
+        return
+    if context != "outbox":
+        raise AuthenticatedWebhookError(
+            "authenticated_webhook_scheduler_authorization_context_is_invalid"
+        )
+    require_scheduler_invocation_effect_authorization(
+        authorization,
+        expected_job_key="operations.outbox",
+    )
 
 
 def validate_webhook_target(value: object) -> ValidatedWebhookTarget:
