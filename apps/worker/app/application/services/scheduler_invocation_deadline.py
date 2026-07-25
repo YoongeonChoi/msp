@@ -877,12 +877,16 @@ class SchedulerInvocationPermit:
 
     __slots__ = (
         "_deadline",
+        "_effect_issuer",
+        "_effect_runtime",
         "_monotonic_clock",
         "_last_monotonic",
         "_revocation_reason",
         "_issuance",
     )
     _deadline: SchedulerInvocationDeadline
+    _effect_issuer: object
+    _effect_runtime: SchedulerRuntimeCapability | None
     _issuance: _SchedulerInvocationIssuance
     _last_monotonic: float
     _monotonic_clock: MonotonicClock
@@ -892,18 +896,24 @@ class SchedulerInvocationPermit:
         self,
         deadline: SchedulerInvocationDeadline,
         *,
+        effect_issuer: object,
+        effect_runtime: SchedulerRuntimeCapability | None,
         _issuance: object,
     ) -> None:
         if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
             raise SchedulerInvariantError("scheduler_invocation_permit_is_not_issued")
         if type(deadline) is not SchedulerInvocationDeadline:
             raise SchedulerInvariantError("scheduler_invocation_deadline_type_is_invalid")
+        if not callable(effect_issuer):
+            raise SchedulerInvariantError("scheduler_invocation_effect_issuer_is_invalid")
         deadline._assert_intact()
         monotonic_clock = deadline._rpc_start._monotonic_clock
         initial = _read_monotonic(monotonic_clock)
         if initial < deadline.rpc_started_monotonic:
             raise SchedulerInvariantError("scheduler_invocation_clock_moved_backwards")
         object.__setattr__(self, "_deadline", deadline)
+        object.__setattr__(self, "_effect_issuer", effect_issuer)
+        object.__setattr__(self, "_effect_runtime", effect_runtime)
         object.__setattr__(self, "_monotonic_clock", monotonic_clock)
         object.__setattr__(self, "_last_monotonic", initial)
         object.__setattr__(self, "_revocation_reason", None)
@@ -995,6 +1005,10 @@ class SchedulerInvocationPermit:
                 raise SchedulerInvariantError("scheduler_invocation_permit_is_not_issued")
             if type(self._deadline) is not SchedulerInvocationDeadline:
                 raise SchedulerInvariantError("scheduler_invocation_deadline_type_is_invalid")
+            if not callable(self._effect_issuer):
+                raise SchedulerInvariantError(
+                    "scheduler_invocation_effect_issuer_is_invalid"
+                )
             self._deadline._assert_intact()
             if self._monotonic_clock is not self._deadline._rpc_start._monotonic_clock:
                 raise SchedulerInvariantError("scheduler_invocation_permit_clock_mismatch")
@@ -1031,6 +1045,214 @@ def require_scheduler_invocation_permit(
     permit = value
     permit.assert_effect_allowed(expected_binding=expected_binding)
     return permit
+
+
+class SchedulerInvocationEffectAuthorization:
+    """Sealed authority for one scheduler job's downstream effects.
+
+    The authorization deliberately exposes no runtime, permit, or binding
+    getters.  Every effect boundary must pass it back through
+    ``require_scheduler_invocation_effect_authorization`` so the original
+    runtime graph, outer fencing generation, binding identity, and monotonic
+    deadline are all revalidated immediately before dispatch.
+    """
+
+    __slots__ = (
+        "_runtime",
+        "_permit",
+        "_binding",
+        "_expected_job_key",
+        "_effect_issuer",
+        "_captured_outer_lease",
+        "_scheduler_port",
+        "_persistence_authority",
+        "_issuance",
+    )
+    _binding: SchedulerInvocationBinding
+    _captured_outer_lease: WorkerLease
+    _expected_job_key: SchedulerJobKey
+    _effect_issuer: object
+    _issuance: _SchedulerInvocationIssuance
+    _permit: SchedulerInvocationPermit
+    _persistence_authority: PersistenceAuthority
+    _runtime: SchedulerRuntimeCapability
+    _scheduler_port: DurableSchedulerPort
+
+    def __init__(
+        self,
+        *,
+        runtime: SchedulerRuntimeCapability,
+        permit: SchedulerInvocationPermit,
+        binding: SchedulerInvocationBinding,
+        expected_job_key: SchedulerJobKey,
+        effect_issuer: object,
+        _issuance: object,
+    ) -> None:
+        if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+            raise SchedulerInvariantError(
+                "scheduler_effect_authorization_is_not_issued"
+            )
+        if type(permit) is not SchedulerInvocationPermit:
+            raise SchedulerInvariantError("scheduler_invocation_permit_is_not_issued")
+        if type(binding) is not SchedulerInvocationBinding:
+            raise SchedulerInvariantError("scheduler_invocation_binding_is_not_issued")
+        if expected_job_key not in SCHEDULER_JOB_KEYS:
+            raise SchedulerInvariantError("scheduler_effect_job_key_is_invalid")
+        if permit._effect_issuer is not effect_issuer:
+            permit._revoke_first_wins("binding_mismatch")
+            raise SchedulerInvocationPermitRevoked("binding_mismatch")
+        if permit._effect_runtime is not runtime:
+            permit._revoke_first_wins("binding_mismatch")
+            raise SchedulerInvocationPermitRevoked("binding_mismatch")
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_permit", permit)
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_expected_job_key", expected_job_key)
+        object.__setattr__(self, "_effect_issuer", effect_issuer)
+        object.__setattr__(
+            self,
+            "_captured_outer_lease",
+            canonical_scheduler_outer_lease(binding._outer_lease),
+        )
+        object.__setattr__(self, "_scheduler_port", runtime.scheduler_port)
+        object.__setattr__(
+            self,
+            "_persistence_authority",
+            runtime.persistence_authority,
+        )
+        object.__setattr__(self, "_issuance", _SCHEDULER_INVOCATION_ISSUANCE)
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_authorization_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_authorization_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_authorization_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_authorization_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise SchedulerInvariantError(
+            "scheduler_effect_authorization_is_not_serializable"
+        )
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise SchedulerInvariantError(
+            "scheduler_effect_authorization_is_not_serializable"
+        )
+
+    def _require_effect(self, expected_job_key: SchedulerJobKey) -> None:
+        try:
+            if self._issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+                raise SchedulerInvariantError(
+                    "scheduler_effect_authorization_is_not_issued"
+                )
+            if type(self._permit) is not SchedulerInvocationPermit:
+                raise SchedulerInvariantError(
+                    "scheduler_invocation_permit_is_not_issued"
+                )
+            if type(self._binding) is not SchedulerInvocationBinding:
+                raise SchedulerInvariantError(
+                    "scheduler_invocation_binding_is_not_issued"
+                )
+            if self._permit._effect_issuer is not self._effect_issuer:
+                raise SchedulerInvariantError(
+                    "scheduler_effect_issuer_identity_mismatch"
+                )
+            if self._permit._effect_runtime is not self._runtime:
+                raise SchedulerInvariantError(
+                    "scheduler_effect_runtime_identity_mismatch"
+                )
+            if (
+                expected_job_key not in SCHEDULER_JOB_KEYS
+                or self._expected_job_key != expected_job_key
+                or self._binding.job_key != expected_job_key
+            ):
+                raise SchedulerInvariantError("scheduler_effect_job_binding_mismatch")
+            self._runtime.assert_intact()
+            scheduler_port = self._runtime.scheduler_port
+            if (
+                scheduler_port is not self._scheduler_port
+                or self._runtime.persistence_authority != self._persistence_authority
+                or self._runtime.account_id != self._binding.account_id
+                or self._runtime.holder_id != self._binding.holder_id
+                or self._runtime.release_sha != self._binding.release_sha
+                or scheduler_port.release_sha != self._binding.release_sha
+                or scheduler_port.persistence_authority
+                != self._persistence_authority
+            ):
+                raise SchedulerInvariantError(
+                    "scheduler_effect_runtime_identity_mismatch"
+                )
+            captured_outer_lease = canonical_scheduler_outer_lease(
+                self._captured_outer_lease
+            )
+            if captured_outer_lease != canonical_scheduler_outer_lease(
+                self._binding._outer_lease
+            ):
+                raise SchedulerInvariantError(
+                    "scheduler_effect_outer_lease_binding_mismatch"
+                )
+            current_outer_lease = canonical_scheduler_outer_lease(
+                self._runtime.current_outer_lease()
+            )
+            self._permit.assert_effect_allowed(expected_binding=self._binding)
+            observed_at = self._binding._claim.observed_at + timedelta(
+                seconds=(
+                    self._permit._last_monotonic
+                    - self._permit._deadline.rpc_started_monotonic
+                )
+            )
+            _refresh_same_generation_outer_lease(
+                captured_outer_lease,
+                current_outer_lease,
+                observed_at=observed_at,
+            )
+            self._permit.assert_effect_allowed(expected_binding=self._binding)
+        except SchedulerInvocationPermitRevoked:
+            raise
+        except (SchedulerInvariantError, AttributeError, OverflowError, TypeError, ValueError):
+            self._permit._revoke_first_wins("binding_mismatch")
+            raise SchedulerInvocationPermitRevoked("binding_mismatch") from None
+
+
+def issue_scheduler_invocation_effect_authorization(
+    runtime: SchedulerRuntimeCapability,
+    permit: SchedulerInvocationPermit,
+    invocation_binding: SchedulerInvocationBinding,
+    *,
+    expected_job_key: SchedulerJobKey,
+    effect_issuer: object,
+) -> SchedulerInvocationEffectAuthorization:
+    """Bind one active invocation to one exact downstream job authority."""
+
+    authorization = SchedulerInvocationEffectAuthorization(
+        runtime=runtime,
+        permit=permit,
+        binding=invocation_binding,
+        expected_job_key=expected_job_key,
+        effect_issuer=effect_issuer,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+    authorization._require_effect(expected_job_key)
+    return authorization
+
+
+def require_scheduler_invocation_effect_authorization(
+    value: object,
+    *,
+    expected_job_key: SchedulerJobKey,
+) -> SchedulerInvocationEffectAuthorization:
+    """Revalidate a sealed authorization at an exact effect boundary."""
+
+    if type(value) is not SchedulerInvocationEffectAuthorization:
+        raise SchedulerInvocationPermitRevoked("permit_not_issued")
+    authorization = value
+    authorization._require_effect(expected_job_key)
+    return authorization
 
 
 def begin_scheduler_invocation_settlement(
@@ -1387,11 +1609,16 @@ async def run_with_scheduler_deadline[T](
     invocation: SchedulerClaimedInvocation,
     wait_until: DeadlineWaiter | None = None,
     fail_stop: FailStop,
+    effect_issuer: object | None = None,
+    effect_runtime: SchedulerRuntimeCapability | None = None,
 ) -> T:
     if not callable(handler) or not callable(fail_stop):
         raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
     if wait_until is not None and not callable(wait_until):
         raise SchedulerInvariantError("scheduler_invocation_waiter_is_invalid")
+    resolved_effect_issuer = handler if effect_issuer is None else effect_issuer
+    if not callable(resolved_effect_issuer):
+        raise SchedulerInvariantError("scheduler_invocation_effect_issuer_is_invalid")
     if type(invocation) is not SchedulerClaimedInvocation:
         _invoke_fail_stop(fail_stop, "scheduler_deadline_provenance_invalid")
     try:
@@ -1403,6 +1630,8 @@ async def run_with_scheduler_deadline[T](
     try:
         permit = SchedulerInvocationPermit(
             deadline,
+            effect_issuer=resolved_effect_issuer,
+            effect_runtime=effect_runtime,
             _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
         )
     except SchedulerInvariantError:

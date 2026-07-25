@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from app.domain.execution_v2.models import (
     AccountingTransaction,
@@ -21,6 +21,11 @@ from app.domain.execution_v2.models import (
     WorkerLease,
     WorkerLeaseRelease,
 )
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 
 class WorkerLeasePort(Protocol):
@@ -154,6 +159,8 @@ class DurableExecutionV2Port(Protocol):
     async def reserve_order_intent(
         self,
         intent: ExecutionIntent,
+        *,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OrderIntentReservationResult:
         ...
 
@@ -162,6 +169,7 @@ class DurableExecutionV2Port(Protocol):
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> None:
         ...
 
@@ -170,6 +178,7 @@ class DurableExecutionV2Port(Protocol):
         intent: ExecutionIntent,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCheckpoint:
         ...
 
@@ -181,5 +190,6 @@ class DurableExecutionV2Port(Protocol):
         accounting_transaction: AccountingTransaction | None = None,
         intent_release_sha: str,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ObservationRecordResult:
         ...

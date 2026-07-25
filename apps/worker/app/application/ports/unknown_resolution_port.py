@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from app.domain.execution_v2.models import ExecutionEnvironment
 from app.domain.execution_v2.unknown_resolution import (
@@ -9,6 +9,11 @@ from app.domain.execution_v2.unknown_resolution import (
     UnknownResolutionCandidate,
     UnknownResolutionClaim,
 )
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 
 class UnknownResolutionPort(Protocol):
@@ -22,6 +27,7 @@ class UnknownResolutionPort(Protocol):
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[UnknownResolutionCandidate, ...]: ...
 
     async def claim_unknown_resolution(
@@ -29,6 +35,7 @@ class UnknownResolutionPort(Protocol):
         candidate: UnknownResolutionCandidate,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionClaim: ...
 
     async def apply_unknown_resolution(
@@ -37,4 +44,5 @@ class UnknownResolutionPort(Protocol):
         *,
         now: datetime,
         replay: bool,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionApplicationReceipt: ...

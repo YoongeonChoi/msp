@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 from app.domain.operations.models import (
     ClaimedDeliveryOutboxItem,
@@ -19,6 +24,7 @@ class AlertOutboxPort(Protocol):
         now: datetime,
         limit: int,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ClaimedDeliveryOutboxItem, ...]:
         ...
 
@@ -31,6 +37,7 @@ class AlertOutboxPort(Protocol):
         now: datetime,
         external_receipt_id: str,
         external_receipt_sha256: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> CompletedOutboxDelivery:
         ...
 
@@ -43,6 +50,7 @@ class AlertOutboxPort(Protocol):
         now: datetime,
         error_code: str,
         retry_after: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> FailedOutboxDelivery:
         ...
 
@@ -53,5 +61,6 @@ class DedupeAwareAlertDestinationPort(Protocol):
         item: ClaimedDeliveryOutboxItem,
         *,
         dedupe_key: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OutboxDeliveryReceipt:
         ...

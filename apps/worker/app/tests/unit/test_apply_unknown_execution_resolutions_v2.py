@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
 
+import app.application.use_cases.apply_unknown_execution_resolutions_v2 as unknown_module
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.apply_unknown_execution_resolutions_v2 import (
     ApplyUnknownExecutionResolutionsV2,
     RunExecutionReconciliationStageV2,
@@ -37,6 +42,65 @@ async def test_unknown_resolution_claims_and_applies_a_bounded_candidate() -> No
 
     assert result == UnknownResolutionRunResult(1, 1, 0, 1, 0, 0)
     assert port.calls == ["list:3", "claim", "apply:False"]
+
+
+async def test_scheduled_unknown_resolution_propagates_authorization_to_every_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    port = StubUnknownPort((candidate,))
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    gate = FakeSchedulerAuthorizationGate(authorization)
+    monkeypatch.setattr(
+        unknown_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    result = await _runner(port).run_scheduled(authorization)
+
+    assert result == UnknownResolutionRunResult(1, 1, 0, 1, 0, 0)
+    assert gate.calls == 4
+    assert port.scheduler_authorizations == [
+        authorization,
+        authorization,
+        authorization,
+    ]
+
+
+async def test_scheduled_unknown_resolution_rejects_missing_authorization() -> None:
+    port = StubUnknownPort((_candidate(),))
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await _runner(port).run_scheduled(
+            cast(SchedulerInvocationEffectAuthorization, None)
+        )
+
+    assert port.calls == []
+    assert port.scheduler_authorizations == []
+
+
+async def test_scheduled_unknown_resolution_revocation_blocks_ambiguous_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = StubUnknownPort((_candidate(),), ambiguous_apply_count=1)
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    gate = FakeSchedulerAuthorizationGate(authorization, revoke_at=5)
+    monkeypatch.setattr(
+        unknown_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await _runner(port).run_scheduled(authorization)
+
+    assert port.calls == ["list:3", "claim", "apply:False"]
+    assert port.scheduler_authorizations == [
+        authorization,
+        authorization,
+        authorization,
+    ]
 
 
 async def test_unknown_resolution_resumes_owned_claim_without_reclaiming() -> None:
@@ -146,6 +210,21 @@ async def test_reconciliation_stage_attempts_generic_after_unknown_boundary_fail
     assert calls == ["unknown", "generic"]
 
 
+async def test_scheduled_reconciliation_stage_rejects_missing_authorization() -> None:
+    calls: list[str] = []
+    stage = RunExecutionReconciliationStageV2(
+        StubUnknownRunner(calls, UnknownResolutionRunResult(0, 0, 0, 0, 0, 0)),
+        StubGenericRunner(calls, ExecutionReconciliationRunResult(0, 0, 0, 0)),
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await stage.run_scheduled(
+            cast(SchedulerInvocationEffectAuthorization, None)
+        )
+
+    assert calls == []
+
+
 def _runner(port: StubUnknownPort) -> ApplyUnknownExecutionResolutionsV2:
     lease = WorkerLease(
         account_id="paper-primary",
@@ -210,6 +289,9 @@ class StubUnknownPort:
         self.mismatched_claim = mismatched_claim
         self.mismatched_receipt = mismatched_receipt
         self.calls: list[str] = []
+        self.scheduler_authorizations: list[
+            SchedulerInvocationEffectAuthorization | None
+        ] = []
 
     async def list_unknown_resolution_candidates(
         self,
@@ -221,9 +303,11 @@ class StubUnknownPort:
         fencing_token: int,
         now: datetime,
         limit: int,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[UnknownResolutionCandidate, ...]:
         del account_id, environment, holder_id, release_sha, fencing_token, now
         self.calls.append(f"list:{limit}")
+        self.scheduler_authorizations.append(scheduler_authorization)
         return self.candidates
 
     async def claim_unknown_resolution(
@@ -231,8 +315,10 @@ class StubUnknownPort:
         candidate: UnknownResolutionCandidate,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionClaim:
         self.calls.append("claim")
+        self.scheduler_authorizations.append(scheduler_authorization)
         claim = UnknownResolutionClaim(
             command_id=candidate.command_id,
             request_id=candidate.request_id,
@@ -268,9 +354,11 @@ class StubUnknownPort:
         *,
         now: datetime,
         replay: bool,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> UnknownResolutionApplicationReceipt:
         del now
         self.calls.append(f"apply:{replay}")
+        self.scheduler_authorizations.append(scheduler_authorization)
         if self.ambiguous_apply_count:
             self.ambiguous_apply_count -= 1
             raise UnknownResolutionApplyAmbiguousError
@@ -321,12 +409,28 @@ class StubUnknownRunner:
         self.calls.append("unknown")
         return self.result
 
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> UnknownResolutionRunResult:
+        del authorization
+        self.calls.append("unknown")
+        return self.result
+
 
 class FailingUnknownRunner(StubUnknownRunner):
     def __init__(self, calls: list[str]) -> None:
         super().__init__(calls, UnknownResolutionRunResult(0, 0, 0, 0, 0, 0))
 
     async def run_once(self) -> UnknownResolutionRunResult:
+        self.calls.append("unknown")
+        raise RuntimeError("unknown_boundary_failure")
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> UnknownResolutionRunResult:
+        del authorization
         self.calls.append("unknown")
         raise RuntimeError("unknown_boundary_failure")
 
@@ -343,3 +447,36 @@ class StubGenericRunner:
     async def run_once(self) -> ExecutionReconciliationRunResult:
         self.calls.append("generic")
         return self.result
+
+    async def run_scheduled(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+    ) -> ExecutionReconciliationRunResult:
+        del authorization
+        self.calls.append("generic")
+        return self.result
+
+
+class FakeSchedulerAuthorizationGate:
+    def __init__(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        revoke_at: int | None = None,
+    ) -> None:
+        self.authorization = authorization
+        self.revoke_at = revoke_at
+        self.calls = 0
+
+    def __call__(
+        self,
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is self.authorization
+        assert expected_job_key == "operations.reconciliation"
+        self.calls += 1
+        if self.calls == self.revoke_at:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return self.authorization

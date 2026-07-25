@@ -448,6 +448,8 @@ class _SchedulerInvocationDispatcher:
                 invoke_handler,
                 invocation=invocation,
                 fail_stop=self.fail_stop,
+                effect_issuer=binding.handler,
+                effect_runtime=self.runtime,
             )
         except SchedulerInvocationDeadlineExceeded as exc:
             failure_plan = _deadline_failure_plan(

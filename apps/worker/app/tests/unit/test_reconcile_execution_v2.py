@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 from uuid import UUID
 
 import pytest
 
+import app.application.use_cases.reconcile_execution_v2 as reconciliation_module
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
+)
 from app.application.use_cases.reconcile_execution_v2 import (
     ExecutionReconciliationRunResult,
     FailClosedExecutionReconciliationHandler,
@@ -83,6 +89,91 @@ async def test_priority_keyset_pages_past_fifty_without_starvation() -> None:
         (release_sha, fencing_token)
         for _, release_sha, fencing_token in port.completion_claims
     } == {("a" * 40, 7)}
+
+
+async def test_scheduled_reconciliation_propagates_authorization_to_all_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    claim = _claim(0, now)
+    port = FakeReconciliationPort([claim])
+    handler = IdempotentHandler()
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    gate = FakeSchedulerAuthorizationGate(authorization)
+    monkeypatch.setattr(
+        reconciliation_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    result = await ReconcileExecutionV2(
+        port,
+        handler,
+        account_id=str(UUID(int=10_001)),
+        worker_id=WORKER_A,
+        current_release_sha="a" * 40,
+        lease_provider=lambda: _lease(now),
+        clock=lambda: now,
+    ).run_scheduled(authorization)
+
+    assert result == ExecutionReconciliationRunResult(1, 1, 0, 0)
+    assert gate.calls == 4
+    assert port.effect_authorizations == [
+        ("claim", authorization),
+        ("complete", authorization),
+    ]
+    assert handler.scheduler_authorizations == [authorization]
+
+
+async def test_scheduled_reconciliation_rejects_missing_authorization_before_claim() -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeReconciliationPort([_claim(0, now)])
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        await ReconcileExecutionV2(
+            port,
+            IdempotentHandler(),
+            account_id=str(UUID(int=10_001)),
+            worker_id=WORKER_A,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: _lease(now),
+            clock=lambda: now,
+        ).run_scheduled(cast(SchedulerInvocationEffectAuthorization, None))
+
+    assert port.effect_authorizations == []
+
+
+async def test_scheduled_reconciliation_revocation_blocks_recovery_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 14, 9, 0, tzinfo=UTC)
+    port = FakeReconciliationPort([_claim(0, now)])
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    gate = FakeSchedulerAuthorizationGate(authorization, revoke_at=4)
+    monkeypatch.setattr(
+        reconciliation_module,
+        "require_scheduler_invocation_effect_authorization",
+        gate,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+        await ReconcileExecutionV2(
+            port,
+            FailClosedExecutionReconciliationHandler(
+                port,
+                worker_id=WORKER_A,
+                current_release_sha="a" * 40,
+            ),
+            account_id=str(UUID(int=10_001)),
+            worker_id=WORKER_A,
+            current_release_sha="a" * 40,
+            lease_provider=lambda: _lease(now),
+            clock=lambda: now,
+        ).run_scheduled(authorization)
+
+    assert port.effect_authorizations == [("claim", authorization)]
+    assert port.pre_dispatch_calls == []
+    assert port.completions == []
 
 
 async def test_reconciliation_claim_requires_current_configured_account_lease() -> None:
@@ -494,14 +585,19 @@ class IdempotentHandler:
         self.crash_once = crash_once
         self.calls: list[str] = []
         self.effects: set[str] = set()
+        self.scheduler_authorizations: list[
+            SchedulerInvocationEffectAuthorization | None
+        ] = []
 
     async def reconcile_claim(
         self,
         claim: ExecutionReconciliationClaim,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExecutionReconciliationDecision:
         del now
+        self.scheduler_authorizations.append(scheduler_authorization)
         self.calls.append(claim.intent_id)
         if self.crash_once:
             self.crash_once = False
@@ -527,6 +623,9 @@ class FakeReconciliationPort:
         self.completion_schedules: list[datetime | None] = []
         self.pre_dispatch_calls: list[dict[str, object]] = []
         self.expiry_calls: list[dict[str, object]] = []
+        self.effect_authorizations: list[
+            tuple[str, SchedulerInvocationEffectAuthorization | None]
+        ] = []
 
     async def claim_execution_reconciliation_batch(
         self,
@@ -540,7 +639,9 @@ class FakeReconciliationPort:
         after_priority: int | None,
         after_intent_id: str | None,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> tuple[ExecutionReconciliationClaim, ...]:
+        self.effect_authorizations.append(("claim", scheduler_authorization))
         self.claim_gates.append(
             (account_id, worker_id, release_sha, fencing_token)
         )
@@ -565,11 +666,13 @@ class FakeReconciliationPort:
         release_sha: str,
         fencing_token: int,
         now: datetime,
-        outcome: str,
+        outcome: Literal["reschedule", "complete", "manual"],
         next_reconcile_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExecutionReconciliationCompletion:
         del worker_id
+        self.effect_authorizations.append(("complete", scheduler_authorization))
         if self.completion_crash_once:
             self.completion_crash_once = False
             raise RuntimeError("reconciliation_completion_crash")
@@ -601,7 +704,9 @@ class FakeReconciliationPort:
         release_sha: str,
         now: datetime,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PreDispatchFailureResult:
+        self.effect_authorizations.append(("pre_dispatch", scheduler_authorization))
         self.pre_dispatch_calls.append(
             {
                 "intent_id": intent_id,
@@ -631,7 +736,9 @@ class FakeReconciliationPort:
         release_sha: str,
         now: datetime,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ExpiredPaperIntentResult:
+        self.effect_authorizations.append(("expire", scheduler_authorization))
         del now
         claim = self.pending.pop(intent_id)
         self.expiry_calls.append(
@@ -662,3 +769,28 @@ def _lease(now: datetime, *, holder_id: str = WORKER_A) -> WorkerLease:
         acquired_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=30),
     )
+
+
+class FakeSchedulerAuthorizationGate:
+    def __init__(
+        self,
+        authorization: SchedulerInvocationEffectAuthorization,
+        *,
+        revoke_at: int | None = None,
+    ) -> None:
+        self.authorization = authorization
+        self.revoke_at = revoke_at
+        self.calls = 0
+
+    def __call__(
+        self,
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is self.authorization
+        assert expected_job_key == "operations.reconciliation"
+        self.calls += 1
+        if self.calls == self.revoke_at:
+            raise SchedulerInvocationPermitRevoked("deadline")
+        return self.authorization

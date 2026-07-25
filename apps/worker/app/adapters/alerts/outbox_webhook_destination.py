@@ -9,6 +9,10 @@ from typing import cast
 
 import httpx
 
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    require_scheduler_invocation_effect_authorization,
+)
 from app.domain.operations.models import (
     ClaimedDeliveryOutboxItem,
     OperationsInvariantError,
@@ -51,6 +55,7 @@ class OutboxWebhookDestination:
         item: ClaimedDeliveryOutboxItem,
         *,
         dedupe_key: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OutboxDeliveryReceipt:
         if dedupe_key != item.dedupe_key:
             raise OperationsInvariantError("outbox_receiver_dedupe_key_mismatch")
@@ -76,6 +81,7 @@ class OutboxWebhookDestination:
                     "dedupe_key": dedupe_key,
                 },
                 allow_stale_ack=item.attempt_count > 1,
+                scheduler_authorization=scheduler_authorization,
             )
         except AuthenticatedWebhookError:
             raise OperationsInvariantError("outbox_receiver_authentication_failed") from None
@@ -173,6 +179,12 @@ class UnavailableOutboxDestination:
         item: ClaimedDeliveryOutboxItem,
         *,
         dedupe_key: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> OutboxDeliveryReceipt:
+        if scheduler_authorization is not None:
+            require_scheduler_invocation_effect_authorization(
+                scheduler_authorization,
+                expected_job_key="operations.outbox",
+            )
         del item, dedupe_key
         raise OperationsInvariantError("outbox_destination_is_not_configured")

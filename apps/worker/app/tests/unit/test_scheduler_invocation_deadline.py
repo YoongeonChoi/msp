@@ -23,6 +23,7 @@ from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationBinding,
     SchedulerInvocationDeadline,
     SchedulerInvocationDeadlineExceeded,
+    SchedulerInvocationEffectAuthorization,
     SchedulerInvocationFailStopReturned,
     SchedulerInvocationPermit,
     SchedulerInvocationPermitRevoked,
@@ -33,6 +34,8 @@ from app.application.services.scheduler_invocation_deadline import (
     begin_scheduler_invocation_settlement,
     complete_scheduler_invocation_settlement,
     fail_scheduler_invocation_settlement,
+    issue_scheduler_invocation_effect_authorization,
+    require_scheduler_invocation_effect_authorization,
     require_scheduler_invocation_permit,
     run_with_scheduler_deadline,
 )
@@ -407,6 +410,49 @@ async def _capture_active_permit(
     )
     await started.wait()
     return captured[0], invocation.binding, run_task
+
+
+async def _capture_active_effect_authorization(
+    clock: _Clock,
+    *,
+    job_key: SchedulerJobKey = "operations.commands",
+) -> tuple[
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermit,
+    SchedulerInvocationBinding,
+    _RuntimeStub,
+    asyncio.Task[None],
+]:
+    invocation, runtime = await _deadline_context(clock, job_key=job_key)
+    captured: list[
+        tuple[SchedulerInvocationEffectAuthorization, SchedulerInvocationPermit]
+    ] = []
+    started = asyncio.Event()
+
+    async def handler(permit: SchedulerInvocationPermit) -> None:
+        authorization = issue_scheduler_invocation_effect_authorization(
+            cast(Any, runtime),
+            permit,
+            invocation.binding,
+            expected_job_key=job_key,
+            effect_issuer=handler,
+        )
+        captured.append((authorization, permit))
+        started.set()
+        await asyncio.Event().wait()
+
+    run_task = asyncio.create_task(
+        run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_must_not_fail_stop,
+            effect_runtime=cast(Any, runtime),
+        )
+    )
+    await started.wait()
+    authorization, permit = captured[0]
+    return authorization, permit, invocation.binding, runtime, run_task
 
 
 async def _cancel_run(task: asyncio.Task[None]) -> None:
@@ -1115,6 +1161,8 @@ async def test_deadline_and_permit_reject_public_self_minting() -> None:
     ):
         SchedulerInvocationPermit(
             deadline,
+            effect_issuer=lambda _permit: None,
+            effect_runtime=None,
             _issuance=object(),
         )
 
@@ -1166,6 +1214,219 @@ async def test_permit_is_immutable_non_copyable_and_non_serializable() -> None:
         match="scheduler_invocation_permit_is_not_serializable",
     ):
         pickle.dumps(permit)
+    await _cancel_run(run_task)
+
+
+async def test_effect_authorization_is_exact_immutable_and_non_transferable() -> None:
+    authorization, _permit, _binding, _runtime, run_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+
+    assert (
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+        is authorization
+    )
+    assert not hasattr(authorization, "__dict__")
+    assert not hasattr(authorization, "binding")
+    assert not hasattr(authorization, "permit")
+    assert not hasattr(authorization, "runtime")
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_effect_authorization_is_immutable",
+    ):
+        authorization._expected_job_key = "operations.outbox"
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_effect_authorization_is_immutable",
+    ):
+        del authorization._captured_outer_lease
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_effect_authorization_is_not_copyable",
+    ):
+        copy.copy(authorization)
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_effect_authorization_is_not_copyable",
+    ):
+        copy.deepcopy(authorization)
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_effect_authorization_is_not_serializable",
+    ):
+        pickle.dumps(authorization)
+    with pytest.raises(SchedulerInvocationPermitRevoked, match="permit_not_issued"):
+        require_scheduler_invocation_effect_authorization(
+            object(),
+            expected_job_key="operations.commands",
+        )
+
+    await _cancel_run(run_task)
+
+
+async def test_effect_authorization_rejects_wrong_job_and_cross_run_binding() -> None:
+    authorization, _permit, _binding, _runtime, first_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+    with pytest.raises(SchedulerInvocationPermitRevoked) as wrong_job:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.outbox",
+        )
+    assert wrong_job.value.reason == "binding_mismatch"
+    await _cancel_run(first_task)
+
+    (
+        _first_authorization,
+        first_permit,
+        _first_binding,
+        first_runtime,
+        first_task,
+    ) = await _capture_active_effect_authorization(_Clock(200.0))
+    (
+        _second_authorization,
+        _second_permit,
+        second_binding,
+        _second_runtime,
+        second_task,
+    ) = await _capture_active_effect_authorization(_Clock(300.0))
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as cross_run:
+        issue_scheduler_invocation_effect_authorization(
+            cast(Any, first_runtime),
+            first_permit,
+            second_binding,
+            expected_job_key="operations.commands",
+            effect_issuer=cast(Any, first_permit)._effect_issuer,
+        )
+    assert cross_run.value.reason == "binding_mismatch"
+
+    await _cancel_run(first_task)
+    await _cancel_run(second_task)
+
+
+async def test_effect_authorization_rejects_a_different_issuer_identity() -> None:
+    authorization, permit, binding, runtime, run_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+
+    async def cloned_handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as wrong_issuer:
+        issue_scheduler_invocation_effect_authorization(
+            cast(Any, runtime),
+            permit,
+            binding,
+            expected_job_key="operations.commands",
+            effect_issuer=cloned_handler,
+        )
+    assert wrong_issuer.value.reason == "binding_mismatch"
+    with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+    assert revoked.value.reason == "binding_mismatch"
+
+    await _cancel_run(run_task)
+
+
+async def test_effect_authorization_is_revoked_after_handler_exit() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+    captured: list[SchedulerInvocationEffectAuthorization] = []
+
+    async def handler(permit: SchedulerInvocationPermit) -> str:
+        captured.append(
+            issue_scheduler_invocation_effect_authorization(
+                cast(Any, runtime),
+                permit,
+                invocation.binding,
+                expected_job_key="operations.commands",
+                effect_issuer=handler,
+            )
+        )
+        return "completed"
+
+    assert (
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_must_not_fail_stop,
+            effect_runtime=cast(Any, runtime),
+        )
+        == "completed"
+    )
+    with pytest.raises(SchedulerInvocationPermitRevoked) as exited:
+        require_scheduler_invocation_effect_authorization(
+            captured[0],
+            expected_job_key="operations.commands",
+        )
+    assert exited.value.reason == "handler_exit"
+
+
+async def test_effect_authorization_is_revoked_at_deadline() -> None:
+    clock = _Clock(100.0)
+    authorization, permit, _binding, _runtime, run_task = (
+        await _capture_active_effect_authorization(clock)
+    )
+    clock.value = 110.0
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as expired:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+
+    assert expired.value.reason == "deadline"
+    assert permit.revocation_reason == "deadline"
+    await _cancel_run(run_task)
+
+
+_EffectAuthorizationMutation = Callable[[_RuntimeStub], None]
+
+
+def _replace_effect_scheduler_port(runtime: _RuntimeStub) -> None:
+    runtime.scheduler_port = object()
+
+
+def _change_effect_persistence_authority(runtime: _RuntimeStub) -> None:
+    runtime.persistence_authority = _OTHER_PERSISTENCE_AUTHORITY
+
+
+def _change_effect_outer_fencing_token(runtime: _RuntimeStub) -> None:
+    runtime.outer_lease = replace(runtime.outer_lease, fencing_token=8)
+
+
+@pytest.mark.parametrize(
+    "mutate_runtime",
+    (
+        _replace_effect_scheduler_port,
+        _change_effect_persistence_authority,
+        _change_effect_outer_fencing_token,
+    ),
+)
+async def test_effect_authorization_blocks_runtime_drift_before_dispatch(
+    mutate_runtime: _EffectAuthorizationMutation,
+) -> None:
+    authorization, permit, _binding, runtime, run_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+    mutate_runtime(runtime)
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+
+    assert revoked.value.reason == "binding_mismatch"
+    assert permit.revocation_reason == "binding_mismatch"
     await _cancel_run(run_task)
 
 

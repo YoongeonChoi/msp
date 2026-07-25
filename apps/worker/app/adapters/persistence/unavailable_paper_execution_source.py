@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from app.application.ports.paper_execution_command_source_port import (
     ClaimedPaperExecutionCommand,
@@ -9,6 +10,11 @@ from app.application.ports.paper_execution_command_source_port import (
     PaperExecutionSourceOutcome,
 )
 from app.domain.execution_v2.models import ExecutionInvariantError
+
+if TYPE_CHECKING:
+    from app.application.services.scheduler_invocation_deadline import (
+        SchedulerInvocationEffectAuthorization,
+    )
 
 
 class UnavailablePaperExecutionCommandSource:
@@ -21,8 +27,9 @@ class UnavailablePaperExecutionCommandSource:
         release_sha: str,
         now: datetime,
         lease_ttl: timedelta,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> ClaimedPaperExecutionCommand | None:
-        del worker_id, release_sha, now, lease_ttl
+        del worker_id, release_sha, now, lease_ttl, scheduler_authorization
         raise ExecutionInvariantError("paper_execution_source_unavailable")
 
     async def load_claimed_paper_execution_bundle(
@@ -30,8 +37,9 @@ class UnavailablePaperExecutionCommandSource:
         claim: ClaimedPaperExecutionCommand,
         *,
         now: datetime,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionCommandBundle:
-        del claim, now
+        del claim, now, scheduler_authorization
         raise ExecutionInvariantError("paper_execution_source_unavailable")
 
     async def complete_or_reschedule_paper_execution(
@@ -46,6 +54,7 @@ class UnavailablePaperExecutionCommandSource:
         outcome: PaperExecutionSourceOutcome,
         next_available_at: datetime | None,
         reason_code: str,
+        scheduler_authorization: SchedulerInvocationEffectAuthorization | None = None,
     ) -> PaperExecutionSourceCompletion:
         del (
             command_id,
@@ -57,5 +66,6 @@ class UnavailablePaperExecutionCommandSource:
             outcome,
             next_available_at,
             reason_code,
+            scheduler_authorization,
         )
         raise ExecutionInvariantError("paper_execution_source_unavailable")

@@ -9,6 +9,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+import app.adapters.persistence.supabase_paper_execution_source as paper_source_module
 from app.adapters.persistence.supabase_paper_execution_source import (
     PAPER_SOURCE_RPC_ALLOWLIST,
     SupabasePaperExecutionCommandSource,
@@ -18,6 +19,10 @@ from app.application.ports.paper_execution_command_source_port import (
 )
 from app.application.ports.persistence_authority import (
     persistence_authority_fingerprint,
+)
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
 )
 from app.config import Settings
 from app.domain.execution_v2.models import ExecutionInvariantError, build_semantic_key
@@ -193,6 +198,117 @@ async def test_paper_source_claims_only_the_configured_account() -> None:
         "p_now": now.isoformat(),
         "p_lease_seconds": 30,
     }
+
+
+async def test_scheduled_authorization_is_revalidated_immediately_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 7, 15, 9, 2, tzinfo=UTC)
+    command_id = str(uuid4())
+    intent_id = str(uuid4())
+    claim_token = str(uuid4())
+    worker_id = str(uuid4())
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    events: list[str] = []
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        events.append("authorization")
+        return authorization
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert events == ["authorization"]
+        events.append("transport")
+        return httpx.Response(
+            200,
+            request=request,
+            json=[
+                {
+                    "command_id": command_id,
+                    "intent_id": intent_id,
+                    "kind": "new_candidate",
+                    "claim_token": claim_token,
+                    "source_revision": 2,
+                    "worker_id": worker_id,
+                    "release_sha": "a" * 40,
+                    "available_at": (now - timedelta(minutes=1)).isoformat(),
+                    "claimed_at": now.isoformat(),
+                    "claim_expires_at": (now + timedelta(seconds=30)).isoformat(),
+                }
+            ],
+        )
+
+    monkeypatch.setattr(
+        paper_source_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SupabasePaperExecutionCommandSource(
+            _enabled_settings(),
+            account_id="paper-primary",
+            release_sha="a" * 40,
+            client=client,
+        )
+        claim = await source.claim_available_paper_execution(
+            worker_id=worker_id,
+            release_sha="a" * 40,
+            now=now,
+            lease_ttl=timedelta(seconds=30),
+            scheduler_authorization=authorization,
+        )
+
+    assert claim is not None
+    assert events == ["authorization", "transport"]
+
+
+async def test_revoked_scheduled_authorization_blocks_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: str,
+    ) -> SchedulerInvocationEffectAuthorization:
+        assert value is authorization
+        assert expected_job_key == "operations.execution"
+        raise SchedulerInvocationPermitRevoked("deadline")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=request, json=[])
+
+    monkeypatch.setattr(
+        paper_source_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SupabasePaperExecutionCommandSource(
+            _enabled_settings(),
+            account_id="paper-primary",
+            release_sha="a" * 40,
+            client=client,
+        )
+        with pytest.raises(SchedulerInvocationPermitRevoked, match="deadline"):
+            await source.claim_available_paper_execution(
+                worker_id=str(uuid4()),
+                release_sha="a" * 40,
+                now=datetime(2026, 7, 15, 9, 2, tzinfo=UTC),
+                lease_ttl=timedelta(seconds=30),
+                scheduler_authorization=authorization,
+            )
+
+    assert calls == 0
 
 
 async def test_paper_source_loads_strict_bundle_and_reschedules_with_cas() -> None:

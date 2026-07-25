@@ -1,15 +1,23 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import uuid4
 
 import httpx
 import pytest
 
 from app.adapters.alerts.outbox_webhook_destination import OutboxWebhookDestination
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+)
 from app.domain.operations.models import (
     ClaimedDeliveryOutboxItem,
     OperationsInvariantError,
+)
+from app.infrastructure.authenticated_webhook import (
+    AuthenticatedWebhookResponse,
+    AuthenticatedWebhookTransport,
 )
 from app.tests.receiver_ack_fixture import (
     TEST_ACK_NOW,
@@ -17,6 +25,45 @@ from app.tests.receiver_ack_fixture import (
     receiver_key_ring_fixture,
     signed_receiver_response,
 )
+
+
+async def test_outbox_forwards_same_authorization_and_exact_scheduler_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    captured: list[dict[str, object]] = []
+    item = _audit_item("a" * 64)
+    receipt_id = "archive-object-version-42"
+
+    async def post_json(
+        _transport: AuthenticatedWebhookTransport,
+        **kwargs: object,
+    ) -> AuthenticatedWebhookResponse:
+        captured.append(kwargs)
+        return AuthenticatedWebhookResponse(
+            status_code=201,
+            content=json_response_body(
+                {
+                    "immutable_receipt_id": receipt_id,
+                    "archived_event_hash": "a" * 64,
+                }
+            ),
+        )
+
+    monkeypatch.setattr(AuthenticatedWebhookTransport, "post_json", post_json)
+    receipt = await OutboxWebhookDestination(
+        "https://archive.example.test/events",
+        key_ring=receiver_key_ring_fixture(),
+        clock=lambda: TEST_ACK_NOW,
+    ).deliver_outbox_item(
+        item,
+        dedupe_key=item.dedupe_key,
+        scheduler_authorization=authorization,
+    )
+
+    assert receipt.external_receipt_id == receipt_id
+    assert captured[0]["scheduler_authorization"] is authorization
+    assert "scheduler_job_key" not in captured[0]
 
 
 async def test_webhook_destination_passes_receiver_dedupe_key_and_safe_payload() -> None:

@@ -3,18 +3,24 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
+import app.adapters.persistence.supabase_worker_api as worker_api_module
 from app.adapters.persistence.supabase_worker_api import (
     WORKER_API_RPC_ALLOWLIST,
     SupabaseWorkerApi,
 )
 from app.application.ports.persistence_authority import (
     persistence_authority_fingerprint,
+)
+from app.application.services.scheduler_invocation_deadline import (
+    SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationPermitRevoked,
 )
 from app.config import Settings
 from app.domain.common.json import JsonObject
@@ -27,6 +33,154 @@ from app.domain.execution_v2.models import (
     LedgerPosting,
     WorkerLease,
 )
+
+
+@pytest.mark.parametrize(
+    ("rpc", "expected_job_key"),
+    [
+        ("reserve_order_intent", "operations.execution"),
+        ("mark_dispatch_started", "operations.execution"),
+        ("load_paper_execution_checkpoint", "operations.execution"),
+        ("record_execution_observation", "operations.execution"),
+        ("claim_execution_reconciliation_batch", "operations.reconciliation"),
+        ("fail_reserved_intent_pre_dispatch", "operations.reconciliation"),
+        ("expire_paper_intent_remainder", "operations.reconciliation"),
+        ("complete_execution_reconciliation", "operations.reconciliation"),
+        ("list_unknown_resolution_v2", "operations.reconciliation"),
+        ("claim_unknown_resolution_v2", "operations.reconciliation"),
+        ("apply_unknown_resolution_v2", "operations.reconciliation"),
+        ("claim_cash_settlement_batch", "operations.settlement"),
+        ("complete_cash_settlement", "operations.settlement"),
+        ("fail_cash_settlement_attempt", "operations.settlement"),
+        ("claim_delivery_outbox", "operations.outbox"),
+        ("complete_outbox_delivery", "operations.outbox"),
+        ("fail_outbox_delivery", "operations.outbox"),
+        ("claim_operation_command_batch", "operations.commands"),
+        ("acknowledge_operation_command", "operations.commands"),
+    ],
+)
+async def test_scheduler_authorization_is_bound_by_rpc_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    rpc: str,
+    expected_job_key: str,
+) -> None:
+    events: list[str] = []
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+    expected_from_case = expected_job_key
+
+    def require_authorization(
+        value: object,
+        *,
+        expected_job_key: object,
+    ) -> None:
+        assert value is authorization
+        assert expected_job_key == expected_from_case
+        events.append("validated")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        events.append("posted")
+        return httpx.Response(200, json=[], request=request)
+
+    monkeypatch.setattr(
+        worker_api_module,
+        "require_scheduler_invocation_effect_authorization",
+        require_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SupabaseWorkerApi(
+            _enabled_settings(),
+            release_sha="a" * 40,
+            client=client,
+        )
+        result = await cast(Any, adapter)._rpc(
+            rpc,
+            {},
+            scheduler_authorization=authorization,
+        )
+
+    assert result == []
+    assert events == ["validated", "posted"]
+
+
+@pytest.mark.parametrize("reason", ["binding_mismatch", "handler_exit"])
+async def test_wrong_or_revoked_scheduler_authorization_blocks_rpc_post(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    requests = 0
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+
+    def reject_authorization(
+        _value: object,
+        *,
+        expected_job_key: object,
+    ) -> None:
+        assert expected_job_key == "operations.commands"
+        raise SchedulerInvocationPermitRevoked(reason)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=[], request=request)
+
+    monkeypatch.setattr(
+        worker_api_module,
+        "require_scheduler_invocation_effect_authorization",
+        reject_authorization,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SupabaseWorkerApi(
+            _enabled_settings(),
+            release_sha="a" * 40,
+            client=client,
+        )
+        with pytest.raises(SchedulerInvocationPermitRevoked, match=reason):
+            await cast(Any, adapter)._rpc(
+                "claim_operation_command_batch",
+                {},
+                scheduler_authorization=authorization,
+            )
+
+    assert requests == 0
+
+
+@pytest.mark.parametrize(
+    "rpc",
+    [
+        "acquire_worker_lease",
+        "renew_worker_lease",
+        "release_worker_lease",
+        "record_worker_heartbeat",
+    ],
+)
+async def test_scheduler_authorization_is_rejected_for_lease_and_heartbeat_rpcs(
+    rpc: str,
+) -> None:
+    requests = 0
+    authorization = cast(SchedulerInvocationEffectAuthorization, object())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json=[], request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SupabaseWorkerApi(
+            _enabled_settings(),
+            release_sha="a" * 40,
+            client=client,
+        )
+        with pytest.raises(
+            ExecutionInvariantError,
+            match="worker_api_scheduler_authorization_is_not_allowed_for_rpc",
+        ):
+            await cast(Any, adapter)._rpc(
+                rpc,
+                {},
+                scheduler_authorization=authorization,
+            )
+
+    assert requests == 0
 
 
 def test_worker_api_is_disabled_by_default() -> None:
