@@ -15,6 +15,6 @@
     "desktop:e2e": "npm --workspace apps/desktop run e2e"
   },
   "devDependencies": {
-    "prettier": "^3.3.3"
+    "prettier": "^3.9.6"
   }
 }
