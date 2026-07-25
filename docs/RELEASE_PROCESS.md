@@ -18,6 +18,13 @@ Branches:
 4. Verify that `origin/main` points to the approved integrated commit.
 5. Fast-forward `develop` to the integrated `main` commit, push the synchronized `origin/develop` without force, and remain on `develop` for subsequent work.
 
+The post-integration `develop` update is an ancestry-only synchronization, not a new
+content merge. The pre-sync `develop` commit must be the integrated commit's second
+parent, the first parent must already be its ancestor, and the complete integrated tree
+must equal the pre-sync `develop` tree. The migration history guard accepts only that
+tree-identical shape; any different parent order, content change, or migration rewrite
+remains fail closed.
+
 ## Pre-Release Checklist
 
 - Worker tests pass.
