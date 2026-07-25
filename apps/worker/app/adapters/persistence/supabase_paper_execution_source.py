@@ -15,6 +15,10 @@ from app.application.ports.paper_execution_command_source_port import (
     PaperExecutionSourceCompletion,
     PaperExecutionSourceOutcome,
 )
+from app.application.ports.persistence_authority import (
+    PersistenceAuthority,
+    persistence_authority_fingerprint,
+)
 from app.application.use_cases.run_execution_v2 import PaperExecutionV2Command
 from app.config import Settings
 from app.domain.common.json import JsonObject
@@ -81,21 +85,50 @@ class SupabasePaperExecutionCommandSource:
             or _SHA_RE.fullmatch(resolved_release_sha) is None
         ):
             raise ExecutionInvariantError("paper_source_release_sha_is_missing")
+        try:
+            authority = persistence_authority_fingerprint(
+                namespace="supabase-worker-api",
+                origin=settings.supabase_url,
+                profile="worker_api",
+            )
+        except ValueError:
+            raise ExecutionInvariantError("paper_source_origin_is_invalid") from None
         secret = settings.supabase_secret_key.get_secret_value()
-        self.account_id = account_id
-        self.release_sha = resolved_release_sha.lower()
-        self.base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
-        self.headers = supabase_api_headers(secret) | {
+        self._account_id = account_id
+        self._release_sha = resolved_release_sha.lower()
+        self._persistence_authority: PersistenceAuthority = authority
+        self._base_url = settings.supabase_url.rstrip("/") + "/rest/v1/rpc"
+        self._headers = supabase_api_headers(secret) | {
             "accept-profile": "worker_api",
             "content-profile": "worker_api",
             "content-type": "application/json",
         }
         self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(timeout=10.0, headers=self.headers)
+        self._client = client or httpx.AsyncClient(
+            timeout=10.0,
+            headers=self._headers,
+            trust_env=False,
+        )
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def release_sha(self) -> str:
+        return self._release_sha
+
+    @property
+    def persistence_authority(self) -> PersistenceAuthority:
+        return self._persistence_authority
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     async def close(self) -> None:
         if self._owns_client:
-            await self.client.aclose()
+            await self._client.aclose()
 
     async def claim_available_paper_execution(
         self,
@@ -272,9 +305,9 @@ class SupabasePaperExecutionCommandSource:
         if rpc not in PAPER_SOURCE_RPC_ALLOWLIST:
             raise ExecutionInvariantError("paper_source_rpc_is_not_allowed")
         try:
-            response = await self.client.post(
-                f"{self.base_url}/{rpc}",
-                headers=self.headers,
+            response = await self._client.post(
+                f"{self._base_url}/{rpc}",
+                headers=self._headers,
                 json=payload,
             )
             response.raise_for_status()

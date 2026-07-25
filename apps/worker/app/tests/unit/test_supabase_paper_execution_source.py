@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -14,6 +15,9 @@ from app.adapters.persistence.supabase_paper_execution_source import (
 )
 from app.application.ports.paper_execution_command_source_port import (
     ClaimedPaperExecutionCommand,
+)
+from app.application.ports.persistence_authority import (
+    persistence_authority_fingerprint,
 )
 from app.config import Settings
 from app.domain.execution_v2.models import ExecutionInvariantError, build_semantic_key
@@ -65,6 +69,68 @@ def test_paper_source_rejects_non_paper_environment_and_account_mismatch() -> No
             account_id="paper-secondary",
             release_sha="a" * 40,
         )
+
+
+async def test_paper_source_exposes_only_read_only_runtime_identity() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, request=request, json=[])
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        source = SupabasePaperExecutionCommandSource(
+            _enabled_settings(),
+            account_id="paper-primary",
+            release_sha="a" * 40,
+            client=client,
+        )
+
+        expected_authority = persistence_authority_fingerprint(
+            namespace="supabase-worker-api",
+            origin="https://example.supabase.co",
+            profile="worker_api",
+        )
+        assert source.account_id == "paper-primary"
+        assert source.release_sha == "a" * 40
+        assert source.persistence_authority == expected_authority
+        assert source.base_url == "https://example.supabase.co/rest/v1/rpc"
+        assert not hasattr(source, "client")
+        assert not hasattr(source, "headers")
+        for field, value in (
+            ("account_id", "paper-secondary"),
+            ("release_sha", "b" * 40),
+            ("persistence_authority", "supabase-worker-api:" + "f" * 64),
+            ("base_url", "https://attacker.invalid/rest/v1/rpc"),
+        ):
+            with pytest.raises(AttributeError):
+                setattr(source, field, value)
+
+
+async def test_paper_source_rejects_non_origin_supabase_url() -> None:
+    settings = _enabled_settings().model_copy(
+        update={"supabase_url": "https://example.supabase.co/unexpected"}
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, request=request, json=[])
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ExecutionInvariantError, match="paper_source_origin_is_invalid"):
+            SupabasePaperExecutionCommandSource(
+                settings,
+                account_id="paper-primary",
+                release_sha="a" * 40,
+                client=client,
+            )
+
+
+async def test_paper_source_owned_client_disables_environment_proxy_discovery() -> None:
+    source = SupabasePaperExecutionCommandSource(
+        _enabled_settings(),
+        account_id="paper-primary",
+        release_sha="a" * 40,
+    )
+    try:
+        assert getattr(cast(Any, source)._client, "_trust_env", None) is False
+    finally:
+        await source.close()
 
 
 async def test_paper_source_claims_only_the_configured_account() -> None:
