@@ -331,6 +331,23 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
         "operations.outbox",
     ):
         assert f'"{job_key}"' in isolation_prefix
+    outbox_retry_wait = retry_matrix.index('str(outbox["run"]["run_id"]),')
+    outbox_retry_claim = retry_matrix.index("outbox_retry_receipt = claim_due")
+    assert outbox_retry_wait < outbox_retry_claim
+    assert (
+        retry_matrix.index('reconciliation_disabled["enabled"] = False')
+        < outbox_retry_claim
+    )
+    concurrent_claim = source[
+        source.index("def verify_concurrent_single_claim") :
+        source.index("def verify_effectful_explicit_failure_is_not_retryable")
+    ]
+    assert 'account_id = "scheduler-concurrent-claim"' in concurrent_claim
+    assert "outer = acquire_outer_lease(" in concurrent_claim
+    assert '"operations.outbox"' in concurrent_claim
+    assert 'invariant != "0|0|1"' in concurrent_claim
+    assert "LOCK_FIXTURE_START_POLL_ATTEMPTS = 600" in source
+    assert "LOCK_FIXTURE_START_POLL_SECONDS = 0.05" in source
     assert "OTHER_HOLDER_ID" in source
     assert "takeover replay receipt mismatch" in source
     assert "command_before <= next_due_at <= observed_at <= command_after" in source

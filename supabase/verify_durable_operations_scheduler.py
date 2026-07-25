@@ -40,6 +40,8 @@ from verify_g1_g2_migration import (
 from verify_pit_calendar_observation_store import domain_snapshot
 
 POSTGRES_IMAGE = "postgres:17.6-alpine"
+LOCK_FIXTURE_START_POLL_ATTEMPTS = 600
+LOCK_FIXTURE_START_POLL_SECONDS = 0.05
 MIGRATION_NAME = "20260724210000_durable_operations_scheduler.sql"
 CONFLICT_FIX_MIGRATION_NAME = (
     "20260724234500_durable_scheduler_conflict_target.sql"
@@ -57,6 +59,7 @@ DEFINITION_RACE_HOLDER_ID = "58585858-5858-4858-8858-585858585858"
 RECONCILIATION_GATE_HOLDER_ID = "59595959-5959-4959-8959-595959595959"
 LEASE_BUDGET_HOLDER_ID = "60606060-6060-4060-8060-606060606060"
 FUTURE_OUTER_HOLDER_ID = "61616161-6161-4161-8161-616161616161"
+CONCURRENT_CLAIM_HOLDER_ID = "62626262-6262-4626-8626-626262626262"
 RELEASE_SHA = "d" * 40
 OTHER_RELEASE_SHA = "e" * 40
 JOB_KEYS = (
@@ -2711,6 +2714,15 @@ def verify_job_specific_retry_matrix_and_completion(
         "scheduler_completion_compare_and_swap_failed",
     )
 
+    reconciliation_disabled = dict(specs["operations.reconciliation"])
+    reconciliation_disabled["enabled"] = False
+    ensure_definition(container, outer_token, reconciliation_disabled)
+    specs["operations.reconciliation"] = reconciliation_disabled
+    wait_for_run_deadline(
+        container,
+        str(outbox["run"]["run_id"]),
+        "available_at",
+    )
     outbox_retry_receipt = claim_due(container, outer_token)
     outbox_retry = validate_claim(outbox_retry_receipt)
     if (
@@ -2742,23 +2754,47 @@ def verify_job_specific_retry_matrix_and_completion(
 
 def verify_concurrent_single_claim(
     container: str,
-    outer: dict[str, Any],
-    specs: dict[str, dict[str, object]],
 ) -> None:
+    account_id = "scheduler-concurrent-claim"
+    holder_id = CONCURRENT_CLAIM_HOLDER_ID
+    outer = acquire_outer_lease(
+        container,
+        account_id=account_id,
+        holder_id=holder_id,
+    )
     outer_token = int(outer["fencing_token"])
-    reconciliation_disabled = dict(specs["operations.reconciliation"])
-    reconciliation_disabled["enabled"] = False
-    ensure_definition(container, outer_token, reconciliation_disabled)
-    specs["operations.reconciliation"] = reconciliation_disabled
+    ensure_definition(
+        container,
+        outer_token,
+        definition_spec(
+            "operations.outbox",
+            interval_seconds=300,
+            lease_ttl_seconds=30,
+        ),
+        account_id=account_id,
+        holder_id=holder_id,
+    )
 
     def concurrent_claim() -> dict[str, Any]:
-        value = _service_rpc(container, HOLDER_ID, _claim_sql(outer_token))
-        validate_claim(value)
+        value = _service_rpc(
+            container,
+            holder_id,
+            _claim_sql(
+                outer_token,
+                account_id=account_id,
+                holder_id=holder_id,
+            ),
+        )
+        validate_claim(value, account_id=account_id)
         return value
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         receipts = list(pool.map(lambda _: concurrent_claim(), range(4)))
-    winners = [validate_claim(receipt) for receipt in receipts if receipt["claimed"]]
+    winners = [
+        validate_claim(receipt, account_id=account_id)
+        for receipt in receipts
+        if receipt["claimed"]
+    ]
     if len(winners) != 1 or winners[0] is None:
         raise VerificationError(f"concurrent due claim winner mismatch: {receipts}")
     winner = winners[0]
@@ -2766,19 +2802,28 @@ def verify_concurrent_single_claim(
         raise VerificationError(f"unexpected concurrent claim winner: {winner}")
     if len({receipt["claim"]["run"]["run_id"] for receipt in receipts if receipt["claimed"]}) != 1:
         raise VerificationError(f"concurrent calls created duplicate runs: {receipts}")
-    complete_run(container, outer_token, winner, "2" * 64)
+    complete_run(
+        container,
+        outer_token,
+        winner,
+        "2" * 64,
+        account_id=account_id,
+        holder_id=holder_id,
+    )
     invariant = scalar(
         container,
         "select concat_ws('|',"
         "(select coalesce(max(active_count),0) from ("
         "select definition_id,count(*) as active_count "
         "from private.scheduler_job_runs "
-        "where state in ('pending','leased','retry_wait') group by definition_id) active),"
-        "(select count(*)-count(distinct run_id) from private.scheduler_job_runs),"
+        f"where account_id={sql_text(account_id)} "
+        "and state in ('pending','leased','retry_wait') group by definition_id) active),"
+        "(select count(*)-count(distinct run_id) from private.scheduler_job_runs "
+        f"where account_id={sql_text(account_id)}),"
         "(select count(*) from private.scheduler_job_definitions "
-        "where account_id='paper-primary'))",
+        f"where account_id={sql_text(account_id)}))",
     )
-    if invariant != "0|0|5":
+    if invariant != "0|0|1":
         raise VerificationError(f"concurrent single-active invariant mismatch: {invariant}")
     print("PASS concurrent_single_claim and one-active-run uniqueness")
 
@@ -3328,7 +3373,7 @@ def verify_outer_lease_time_and_budget_boundaries(container: str) -> None:
 
 
 def _wait_for_lock_fixture(container: str, marker: str) -> None:
-    for _ in range(120):
+    for _ in range(LOCK_FIXTURE_START_POLL_ATTEMPTS):
         active = scalar(
             container,
             "select count(*) from pg_catalog.pg_stat_activity "
@@ -3338,7 +3383,7 @@ def _wait_for_lock_fixture(container: str, marker: str) -> None:
         )
         if active == "1":
             return
-        time.sleep(0.05)
+        time.sleep(LOCK_FIXTURE_START_POLL_SECONDS)
     raise VerificationError(f"lock fixture did not become active: {marker}")
 
 
@@ -4008,7 +4053,7 @@ def main() -> int:
         verify_missing_barrier_expired_execution_cleanup(fresh)
         verify_reconciliation_execution_gate(fresh)
         verify_concurrent_definition_idempotency(fresh)
-        verify_concurrent_single_claim(fresh, barrier_outer, specs)
+        verify_concurrent_single_claim(fresh)
         verify_effectful_explicit_failure_is_not_retryable(fresh)
         verify_rolling_upgrade_definition_convergence(fresh)
         command_outer = verify_command_retry_and_manual_replay_budget(
