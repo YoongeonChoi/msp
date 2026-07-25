@@ -226,7 +226,7 @@ def test_committed_manifest_matches_current_repository() -> None:
     assert payload == module.canonical_json_bytes(manifest)
     assert manifest["component_counts"] == {
         "cargo": 418,
-        "npm": 393,
+        "npm": 390,
         "pypi": 50,
     }
     assert "apps/worker/requirements.txt" in {
