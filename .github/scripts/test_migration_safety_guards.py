@@ -609,6 +609,34 @@ class MigrationHistoryGuardTests(unittest.TestCase):
         self.assertEqual(result, 1, output)
         self.assertIn("trusted base as its second parent", output)
 
+    def test_remote_rejects_tree_identical_merge_of_divergent_parent(self) -> None:
+        root, base = self.fixture.timestamp_base()
+        root_tree = self.fixture.git("rev-parse", f"{root}^{{tree}}")
+        base_tree = self.fixture.git("rev-parse", f"{base}^{{tree}}")
+        divergent = self.fixture.git(
+            "commit-tree",
+            root_tree,
+            "-p",
+            root,
+            "-m",
+            "divergent no-op history",
+        )
+        head = self.fixture.git(
+            "commit-tree",
+            base_tree,
+            "-p",
+            base,
+            "-p",
+            divergent,
+            "-m",
+            "tree-identical divergent merge",
+        )
+
+        result, output = self.fixture.remote_guard(base, head)
+
+        self.assertEqual(result, 1, output)
+        self.assertIn("trusted base as its second parent", output)
+
     def _stage_mode(self, mode: str, object_id: str, path: str) -> None:
         self.fixture.git("update-index", "--add", "--cacheinfo", mode, object_id, path)
 
