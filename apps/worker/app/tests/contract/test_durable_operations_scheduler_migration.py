@@ -310,6 +310,8 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert '"23514"' in source
     assert "durable_scheduler_conflict_patch_target_invalid" in source
     assert '["docker", "restart", container]' in source
+    assert '"--volume",\n            "/var/lib/postgresql/data",' in source
+    assert '"--tmpfs",\n            "/var/lib/postgresql/data' not in source
     assert '["docker", "rm", "-f", "-v", container]' in source
     assert "domain_snapshot(fresh)" in source
     assert "scheduler_definition_lock_fixture" in source
