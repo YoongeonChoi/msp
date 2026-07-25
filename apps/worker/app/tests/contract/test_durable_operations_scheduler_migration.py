@@ -346,6 +346,12 @@ def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None
     assert "outer = acquire_outer_lease(" in concurrent_claim
     assert '"operations.outbox"' in concurrent_claim
     assert 'invariant != "0|0|1"' in concurrent_claim
+    account_fixtures = source[
+        source.index("def open_scheduler_account_fixtures") :
+        source.index("def verify_definition_digest_and_db_clock")
+    ]
+    assert "'scheduler-concurrent-claim'" in account_fixtures
+    assert 'if opened != "12":' in account_fixtures
     assert "LOCK_FIXTURE_START_POLL_ATTEMPTS = 600" in source
     assert "LOCK_FIXTURE_START_POLL_SECONDS = 0.05" in source
     assert "OTHER_HOLDER_ID" in source

@@ -898,6 +898,8 @@ def open_scheduler_account_fixtures(container: str) -> None:
         "('scheduler-lease-budget','contract_test','local_contract_simulator',"
         "'open',0,pg_catalog.clock_timestamp()),"
         "('scheduler-future-outer','contract_test','local_contract_simulator',"
+        "'open',0,pg_catalog.clock_timestamp()),"
+        "('scheduler-concurrent-claim','contract_test','local_contract_simulator',"
         "'open',0,pg_catalog.clock_timestamp()) "
         "on conflict (account_id) do nothing;"
         "update private.trading_accounts "
@@ -912,11 +914,12 @@ def open_scheduler_account_fixtures(container: str) -> None:
         "'scheduler-recovery-effectful','scheduler-recovery-exhausted',"
         "'scheduler-settlement-blocked','scheduler-expired-execution-missing',"
         "'scheduler-definition-race','scheduler-reconciliation-gate',"
-        "'scheduler-lease-budget','scheduler-future-outer') "
+        "'scheduler-lease-budget','scheduler-future-outer',"
+        "'scheduler-concurrent-claim') "
         "and state='open' "
         "and opened_at is not null and closed_at is null;",
     )
-    if opened != "11":
+    if opened != "12":
         raise VerificationError(f"scheduler account fixture mismatch: {opened}")
 
 
