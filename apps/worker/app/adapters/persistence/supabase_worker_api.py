@@ -363,44 +363,44 @@ class SupabaseWorkerApi:
             if details.get("checkpoint") not in {
                 "cycle_completed",
                 "operations_completed",
-                "independent_scheduler_running",
+                "durable_scheduler_running",
             }:
                 raise ExecutionInvariantError("worker_api_completed_heartbeat_checkpoint_invalid")
             completed_at = details.get("completed_at")
             if not isinstance(completed_at, str):
                 raise ExecutionInvariantError("worker_api_completed_heartbeat_time_invalid")
-            if details.get("checkpoint") == "independent_scheduler_running":
-                stage_times = details.get("stage_last_completed_at")
-                if not isinstance(stage_times, dict) or set(stage_times) != {
-                    "commands",
-                    "execution",
-                    "settlement",
-                    "reconciliation",
-                    "outbox",
+            if details.get("checkpoint") == "durable_scheduler_running":
+                job_times = details.get("job_last_succeeded_at")
+                if not isinstance(job_times, dict) or set(job_times) != {
+                    "operations.commands",
+                    "operations.execution",
+                    "operations.settlement",
+                    "operations.reconciliation",
+                    "operations.outbox",
                 }:
                     raise ExecutionInvariantError(
-                        "worker_api_scheduler_heartbeat_stages_invalid"
+                        "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                     )
-                for value in stage_times.values():
+                for value in job_times.values():
                     if not isinstance(value, str):
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         )
                     try:
-                        stage_time = datetime.fromisoformat(value)
+                        job_time = datetime.fromisoformat(value)
                     except ValueError as exc:
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         ) from exc
                     if (
-                        stage_time.tzinfo is None
-                        or stage_time.utcoffset() is None
+                        job_time.tzinfo is None
+                        or job_time.utcoffset() is None
                         or not now - timedelta(hours=1)
-                        <= stage_time
+                        <= job_time
                         <= now + timedelta(seconds=30)
                     ):
                         raise ExecutionInvariantError(
-                            "worker_api_scheduler_heartbeat_stages_invalid"
+                            "worker_api_durable_scheduler_heartbeat_jobs_invalid"
                         )
             try:
                 completed_time = datetime.fromisoformat(completed_at)

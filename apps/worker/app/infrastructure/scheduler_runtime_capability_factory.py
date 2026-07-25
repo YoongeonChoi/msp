@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import re
@@ -7,7 +8,7 @@ import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Never, SupportsIndex
+from typing import Never, SupportsIndex, cast
 from uuid import UUID
 
 import httpx
@@ -36,8 +37,12 @@ from app.application.services.paper_execution_v2 import (
 )
 from app.application.services.risk_service import RiskService
 from app.application.services.scheduler_invocation_deadline import (
+    FailStop,
     SchedulerInvocationBinding,
+    SchedulerInvocationFailStopReturned,
     SchedulerInvocationPermit,
+    _issue_scheduler_dispatch_registry_seal,
+    _SchedulerDispatchRegistrySeal,
     issue_scheduler_invocation_effect_authorization,
 )
 from app.application.use_cases.apply_operation_commands import ApplyOperationCommands
@@ -54,7 +59,13 @@ from app.application.use_cases.reconcile_execution_v2 import (
 )
 from app.application.use_cases.run_durable_scheduler import (
     SCHEDULER_RESULT_VALIDATORS,
+    ConvergeDurableSchedulerDefinitions,
+    DurableSchedulerConvergenceResult,
+    DurableSchedulerRunResult,
+    RunDurableSchedulerOnce,
     SchedulerJobBinding,
+    _EffectAuthorizedSchedulerRegistry,
+    _issue_effect_authorized_scheduler_registry,
 )
 from app.application.use_cases.run_execution_supervisor_v2 import (
     RunExecutionSupervisorV2,
@@ -63,9 +74,12 @@ from app.application.use_cases.run_execution_v2 import RunExecutionV2
 from app.application.use_cases.scheduler_runtime_capability import (
     SchedulerRuntimeCapability,
 )
+from app.config import Settings
 from app.domain.execution_v2.models import WorkerLease
 from app.domain.scheduler.models import (
+    SCHEDULER_EFFECTFUL_JOB_KEYS,
     SCHEDULER_JOB_KEYS,
+    ScheduledJobDefinitionV1,
     SchedulerInvariantError,
     SchedulerJobKey,
 )
@@ -161,6 +175,7 @@ class _SupabaseSchedulerRuntimeCapability:
         "_holder_id",
         "_release_sha",
         "_persistence_authority",
+        "_dispatch_registry_provenance",
     )
     _scheduler: SupabaseDurableScheduler
     _worker_api: SupabaseWorkerApi
@@ -181,6 +196,7 @@ class _SupabaseSchedulerRuntimeCapability:
     _holder_id: str
     _release_sha: str
     _persistence_authority: PersistenceAuthority
+    _dispatch_registry_provenance: object
 
     def __init__(
         self,
@@ -266,6 +282,7 @@ class _SupabaseSchedulerRuntimeCapability:
         object.__setattr__(self, "_holder_id", holder_id)
         object.__setattr__(self, "_release_sha", release_sha)
         object.__setattr__(self, "_persistence_authority", persistence_authority)
+        object.__setattr__(self, "_dispatch_registry_provenance", object())
         self.assert_intact()
 
     def __setattr__(self, _name: str, _value: object) -> Never:
@@ -347,8 +364,50 @@ class _SupabaseSchedulerRuntimeCapability:
             raise SchedulerInvariantError("scheduler_runtime_outer_lease_identity_mismatch")
         return lease
 
+    def _assert_dispatch_registry_provenance(self, value: object) -> None:
+        if value is not self._dispatch_registry_provenance:
+            _invalid("dispatch_registry_provenance")
 
-def create_scheduler_runtime_capability(
+    def _issue_dispatch_registry_seal(
+        self,
+        registry: _SupabaseSchedulerBindingRegistry,
+    ) -> _SchedulerDispatchRegistrySeal:
+        if (
+            type(registry) is not _SupabaseSchedulerBindingRegistry
+            or registry._runtime is not self
+            or registry._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE
+            or type(registry._entries) is not tuple
+            or tuple(job_key for job_key, _binding in registry._entries)
+            != _SCHEDULER_HANDLER_ORDER
+            or set(registry._bindings) != SCHEDULER_JOB_KEYS
+        ):
+            _invalid("binding_registry")
+        for job_key, binding in registry._entries:
+            handler = binding.handler
+            if (
+                type(binding) is not SchedulerJobBinding
+                or registry._bindings.get(job_key) is not binding
+                or binding.job_key != job_key
+                or type(handler) is not _SupabaseSchedulerJobHandler
+                or handler._runtime is not self
+                or handler._registry is not registry
+                or handler._job_key != job_key
+                or handler._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE
+                or binding.result_validator
+                is not SCHEDULER_RESULT_VALIDATORS[job_key]
+            ):
+                _invalid("binding_registry")
+        return _issue_scheduler_dispatch_registry_seal(
+            self,
+            tuple(
+                (job_key, binding.handler, binding.result_validator)
+                for job_key, binding in registry._entries
+            ),
+            runtime_provenance=self._dispatch_registry_provenance,
+        )
+
+
+def _create_scheduler_runtime_capability(
     *,
     scheduler: SupabaseDurableScheduler,
     worker_api: SupabaseWorkerApi,
@@ -359,7 +418,7 @@ def create_scheduler_runtime_capability(
     reconciliation: RunExecutionReconciliationStageV2,
     outbox: DispatchAlertOutbox,
 ) -> SchedulerRuntimeCapability:
-    """Attest one exact production scheduler graph and return a sealed proof."""
+    """White-box helper retained for capability tests; production uses the facade."""
 
     return _SupabaseSchedulerRuntimeCapability(
         scheduler=scheduler,
@@ -386,16 +445,18 @@ def require_supabase_scheduler_runtime_capability(
 
 
 class _SupabaseSchedulerJobHandler:
-    """One immutable handler bound to an attested runtime stage."""
+    """One immutable handler bound to an attested runtime and registry."""
 
-    __slots__ = ("_runtime", "_job_key", "_issuance")
+    __slots__ = ("_runtime", "_registry", "_job_key", "_issuance")
     _issuance: _SupabaseSchedulerHandlerIssuance
     _job_key: SchedulerJobKey
+    _registry: _SupabaseSchedulerBindingRegistry
     _runtime: _SupabaseSchedulerRuntimeCapability
 
     def __init__(
         self,
         runtime: _SupabaseSchedulerRuntimeCapability,
+        registry: _SupabaseSchedulerBindingRegistry,
         job_key: SchedulerJobKey,
         *,
         _issuance: object,
@@ -404,8 +465,11 @@ class _SupabaseSchedulerJobHandler:
             _invalid("handler_not_issued")
         if job_key not in SCHEDULER_JOB_KEYS:
             _invalid("handler_job_key")
+        if type(registry) is not _SupabaseSchedulerBindingRegistry:
+            _invalid("handler_registry")
         runtime.assert_intact()
         object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_registry", registry)
         object.__setattr__(self, "_job_key", job_key)
         object.__setattr__(self, "_issuance", _SUPABASE_SCHEDULER_HANDLER_ISSUANCE)
 
@@ -428,6 +492,10 @@ class _SupabaseSchedulerJobHandler:
     ) -> object:
         if self._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE:
             _invalid("handler_not_issued")
+        registry = self._registry
+        if type(registry) is not _SupabaseSchedulerBindingRegistry:
+            _invalid("handler_registry")
+        registry.assert_intact()
         runtime = self._runtime
         if require_supabase_scheduler_runtime_capability(runtime) is not runtime:
             _invalid("handler_runtime")
@@ -437,6 +505,7 @@ class _SupabaseSchedulerJobHandler:
             invocation_binding,
             expected_job_key=self._job_key,
             effect_issuer=self,
+            dispatch_registry_seal=registry._seal,
         )
         if self._job_key == "operations.commands":
             return await runtime._commands.run_scheduled(authorization)
@@ -451,26 +520,384 @@ class _SupabaseSchedulerJobHandler:
         _invalid("handler_job_key")
 
 
-def create_supabase_scheduler_job_bindings(
-    runtime: SchedulerRuntimeCapability,
-) -> Mapping[SchedulerJobKey, SchedulerJobBinding]:
-    """Create the only production binding registry for the attested graph."""
+class _SupabaseSchedulerBindingRegistry:
+    """Private, identity-pinned registry for the five production handlers."""
 
-    capability = require_supabase_scheduler_runtime_capability(runtime)
-    assert type(capability) is _SupabaseSchedulerRuntimeCapability
-    bindings = {
-        job_key: SchedulerJobBinding(
-            job_key=job_key,
-            handler=_SupabaseSchedulerJobHandler(
-                capability,
+    __slots__ = (
+        "_runtime",
+        "_entries",
+        "_bindings",
+        "_seal",
+        "_authorized_registry",
+        "_issuance",
+    )
+    _authorized_registry: _EffectAuthorizedSchedulerRegistry
+    _bindings: Mapping[SchedulerJobKey, SchedulerJobBinding]
+    _entries: tuple[tuple[SchedulerJobKey, SchedulerJobBinding], ...]
+    _issuance: _SupabaseSchedulerHandlerIssuance
+    _runtime: _SupabaseSchedulerRuntimeCapability
+    _seal: _SchedulerDispatchRegistrySeal
+
+    def __init__(self, runtime: _SupabaseSchedulerRuntimeCapability) -> None:
+        runtime.assert_intact()
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_issuance", _SUPABASE_SCHEDULER_HANDLER_ISSUANCE)
+        entries = tuple(
+            (
                 job_key,
-                _issuance=_SUPABASE_SCHEDULER_HANDLER_ISSUANCE,
+                SchedulerJobBinding(
+                    job_key=job_key,
+                    handler=_SupabaseSchedulerJobHandler(
+                        runtime,
+                        self,
+                        job_key,
+                        _issuance=_SUPABASE_SCHEDULER_HANDLER_ISSUANCE,
+                    ),
+                    result_validator=SCHEDULER_RESULT_VALIDATORS[job_key],
+                ),
+            )
+            for job_key in _SCHEDULER_HANDLER_ORDER
+        )
+        bindings = MappingProxyType(dict(entries))
+        object.__setattr__(self, "_entries", entries)
+        object.__setattr__(self, "_bindings", bindings)
+        seal = runtime._issue_dispatch_registry_seal(self)
+        authorized_registry = _issue_effect_authorized_scheduler_registry(
+            runtime,
+            bindings,
+            seal,
+        )
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(self, "_authorized_registry", authorized_registry)
+        self.assert_intact()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_binding_registry_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_binding_registry_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise TypeError("scheduler_binding_registry_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise TypeError("scheduler_binding_registry_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("scheduler_binding_registry_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise TypeError("scheduler_binding_registry_is_not_serializable")
+
+    def assert_intact(self) -> None:
+        try:
+            runtime = self._runtime
+            entries = self._entries
+            bindings = self._bindings
+            seal = self._seal
+            authorized_registry = self._authorized_registry
+            if (
+                self._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE
+                or type(runtime) is not _SupabaseSchedulerRuntimeCapability
+                or type(entries) is not tuple
+                or tuple(job_key for job_key, _binding in entries)
+                != _SCHEDULER_HANDLER_ORDER
+                or set(bindings) != SCHEDULER_JOB_KEYS
+                or type(seal) is not _SchedulerDispatchRegistrySeal
+                or type(authorized_registry)
+                is not _EffectAuthorizedSchedulerRegistry
+                or authorized_registry._runtime is not runtime
+                or authorized_registry._seal is not seal
+            ):
+                _invalid("binding_registry")
+            runtime.assert_intact()
+            for job_key, binding in entries:
+                handler = binding.handler
+                if (
+                    type(binding) is not SchedulerJobBinding
+                    or bindings.get(job_key) is not binding
+                    or binding.job_key != job_key
+                    or type(handler) is not _SupabaseSchedulerJobHandler
+                    or handler._runtime is not runtime
+                    or handler._registry is not self
+                    or handler._job_key != job_key
+                    or handler._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE
+                    or binding.result_validator
+                    is not SCHEDULER_RESULT_VALIDATORS[job_key]
+                ):
+                    _invalid("binding_registry")
+                seal.assert_authorized(
+                    runtime,
+                    job_key=job_key,
+                    handler=handler,
+                    validator=binding.result_validator,
+                )
+            authorized_registry._assert_intact()
+        except SchedulerInvariantError:
+            raise
+        except Exception:
+            _invalid("binding_registry")
+
+
+def _create_supabase_scheduler_binding_registry(
+    runtime: SchedulerRuntimeCapability,
+) -> _SupabaseSchedulerBindingRegistry:
+    capability = require_supabase_scheduler_runtime_capability(runtime)
+    return _SupabaseSchedulerBindingRegistry(
+        cast(_SupabaseSchedulerRuntimeCapability, capability)
+    )
+
+
+class _SupabaseDurableSchedulerFacade:
+    """Opaque production facade; raw runtime and bindings never escape."""
+
+    __slots__ = (
+        "_runtime",
+        "_registry",
+        "_definitions",
+        "_definition_digests",
+        "_fail_stop",
+        "_converged_generation",
+        "_operation_lock",
+        "_operation_owner",
+        "_issuance",
+    )
+    _converged_generation: tuple[str, str, int, object] | None
+    _definitions: tuple[ScheduledJobDefinitionV1, ...]
+    _definition_digests: tuple[str, ...]
+    _fail_stop: FailStop
+    _issuance: _SupabaseSchedulerHandlerIssuance
+    _operation_lock: asyncio.Lock
+    _operation_owner: asyncio.Task[object] | None
+    _registry: _SupabaseSchedulerBindingRegistry
+    _runtime: _SupabaseSchedulerRuntimeCapability
+
+    def __init__(
+        self,
+        runtime: _SupabaseSchedulerRuntimeCapability,
+        registry: _SupabaseSchedulerBindingRegistry,
+        definitions: tuple[ScheduledJobDefinitionV1, ...],
+        *,
+        fail_stop: FailStop,
+    ) -> None:
+        if not callable(fail_stop):
+            _invalid("fail_stop")
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_registry", registry)
+        object.__setattr__(self, "_definitions", definitions)
+        object.__setattr__(
+            self,
+            "_definition_digests",
+            tuple(definition.definition_sha256 for definition in definitions),
+        )
+        object.__setattr__(self, "_fail_stop", fail_stop)
+        object.__setattr__(self, "_converged_generation", None)
+        object.__setattr__(self, "_operation_lock", asyncio.Lock())
+        object.__setattr__(self, "_operation_owner", None)
+        object.__setattr__(self, "_issuance", _SUPABASE_SCHEDULER_HANDLER_ISSUANCE)
+        self.assert_intact()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_facade_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_facade_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise TypeError("scheduler_facade_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise TypeError("scheduler_facade_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("scheduler_facade_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise TypeError("scheduler_facade_is_not_serializable")
+
+    def assert_intact(self) -> None:
+        try:
+            if (
+                self._issuance is not _SUPABASE_SCHEDULER_HANDLER_ISSUANCE
+                or type(self._runtime) is not _SupabaseSchedulerRuntimeCapability
+                or type(self._registry) is not _SupabaseSchedulerBindingRegistry
+                or self._registry._runtime is not self._runtime
+                or type(self._definitions) is not tuple
+                or tuple(item.job_key for item in self._definitions)
+                != _SCHEDULER_HANDLER_ORDER
+                or tuple(item.definition_sha256 for item in self._definitions)
+                != self._definition_digests
+                or not callable(self._fail_stop)
+                or type(self._operation_lock) is not asyncio.Lock
+                or (
+                    self._operation_owner is not None
+                    and not isinstance(self._operation_owner, asyncio.Task)
+                )
+                or self._operation_lock.locked()
+                != (self._operation_owner is not None)
+            ):
+                _invalid("facade")
+            self._runtime.assert_intact()
+            self._registry.assert_intact()
+        except SchedulerInvariantError:
+            raise
+        except Exception:
+            _invalid("facade")
+
+    async def converge_step(self) -> DurableSchedulerConvergenceResult:
+        await self._begin_operation()
+        try:
+            object.__setattr__(self, "_converged_generation", None)
+            self._assert_or_fail_stop()
+            result = await ConvergeDurableSchedulerDefinitions._effect_authorized(
+                self._registry._authorized_registry,
+                self._definitions,
+                fail_stop=self._fail_stop,
+            ).run_step()
+            self._assert_or_fail_stop()
+            object.__setattr__(
+                self,
+                "_converged_generation",
+                self._current_generation() if result.outcome == "converged" else None,
+            )
+            return result
+        finally:
+            self._end_operation()
+
+    async def run_once(self) -> DurableSchedulerRunResult:
+        await self._begin_operation()
+        try:
+            self._assert_or_fail_stop()
+            if self._converged_generation != self._current_generation():
+                raise SchedulerInvariantError(
+                    "scheduler_definitions_not_converged_for_outer_lease"
+                )
+            result = await RunDurableSchedulerOnce._effect_authorized(
+                self._registry._authorized_registry,
+                fail_stop=self._fail_stop,
+            ).run_once()
+            self._assert_or_fail_stop()
+            return result
+        finally:
+            self._end_operation()
+
+    async def _begin_operation(self) -> None:
+        current = asyncio.current_task()
+        if current is None:
+            self._fail_stop_now("scheduler_facade_operation_task_invalid")
+        lock = self._operation_lock
+        owner = self._operation_owner
+        if type(lock) is not asyncio.Lock:
+            self._fail_stop_now("scheduler_facade_operation_lock_corrupt")
+        if owner is current:
+            self._fail_stop_now("scheduler_facade_operation_reentrant")
+        if (
+            (owner is not None and not isinstance(owner, asyncio.Task))
+            or lock.locked() != (owner is not None)
+        ):
+            self._fail_stop_now("scheduler_facade_operation_lock_corrupt")
+        await lock.acquire()
+        if self._operation_lock is not lock or self._operation_owner is not None:
+            lock.release()
+            self._fail_stop_now("scheduler_facade_operation_lock_corrupt")
+        object.__setattr__(self, "_operation_owner", current)
+
+    def _end_operation(self) -> None:
+        current = asyncio.current_task()
+        lock = self._operation_lock
+        if (
+            current is None
+            or self._operation_owner is not current
+            or type(lock) is not asyncio.Lock
+            or not lock.locked()
+        ):
+            self._fail_stop_now("scheduler_facade_operation_lock_corrupt")
+        object.__setattr__(self, "_operation_owner", None)
+        lock.release()
+
+    def _fail_stop_now(self, reason: str) -> Never:
+        self._fail_stop(reason)
+        raise SchedulerInvocationFailStopReturned(reason)
+
+    def _assert_or_fail_stop(self) -> None:
+        try:
+            self.assert_intact()
+        except SchedulerInvariantError:
+            self._fail_stop_now("scheduler_facade_integrity_changed")
+
+    def _current_generation(self) -> tuple[str, str, int, object]:
+        lease = self._runtime.current_outer_lease()
+        return (
+            lease.account_id,
+            lease.holder_id,
+            lease.fencing_token,
+            lease.acquired_at,
+        )
+
+
+def create_supabase_durable_scheduler_facade(
+    *,
+    scheduler: SupabaseDurableScheduler,
+    worker_api: SupabaseWorkerApi,
+    lease_manager: MaintainWorkerLease,
+    commands: ApplyOperationCommands,
+    execution: RunExecutionSupervisorV2,
+    settlement: MatureCashSettlements,
+    reconciliation: RunExecutionReconciliationStageV2,
+    outbox: DispatchAlertOutbox,
+    settings: Settings,
+    fail_stop: FailStop,
+) -> _SupabaseDurableSchedulerFacade:
+    """Build the only effect-authorized production scheduler facade."""
+
+    runtime = _SupabaseSchedulerRuntimeCapability(
+        scheduler=scheduler,
+        worker_api=worker_api,
+        lease_manager=lease_manager,
+        commands=commands,
+        execution=execution,
+        settlement=settlement,
+        reconciliation=reconciliation,
+        outbox=outbox,
+    )
+    registry = _SupabaseSchedulerBindingRegistry(runtime)
+    return _SupabaseDurableSchedulerFacade(
+        runtime,
+        registry,
+        _production_scheduler_definitions(settings),
+        fail_stop=fail_stop,
+    )
+
+
+def _production_scheduler_definitions(
+    settings: Settings,
+) -> tuple[ScheduledJobDefinitionV1, ...]:
+    intervals: Mapping[SchedulerJobKey, int] = MappingProxyType(
+        {
+            "operations.commands": settings.operations_command_interval_sec,
+            "operations.execution": settings.operations_execution_interval_sec,
+            "operations.settlement": settings.operations_settlement_interval_sec,
+            "operations.reconciliation": (
+                settings.operations_reconciliation_interval_sec
             ),
-            result_validator=SCHEDULER_RESULT_VALIDATORS[job_key],
+            "operations.outbox": settings.operations_outbox_interval_sec,
+        }
+    )
+    return tuple(
+        ScheduledJobDefinitionV1(
+            job_key=job_key,
+            interval_seconds=intervals[job_key],
+            lease_ttl_seconds=settings.worker_lease_ttl_sec,
+            max_attempts=1 if job_key in SCHEDULER_EFFECTFUL_JOB_KEYS else 3,
+            retry_base_seconds=2,
+            retry_max_seconds=8,
+            max_manual_replays=(
+                0 if job_key in SCHEDULER_EFFECTFUL_JOB_KEYS else 1
+            ),
+            enabled=True,
         )
         for job_key in _SCHEDULER_HANDLER_ORDER
-    }
-    return MappingProxyType(bindings)
+    )
 
 
 def _assert_scheduler_runtime_graph(

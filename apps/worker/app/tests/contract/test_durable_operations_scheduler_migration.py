@@ -21,6 +21,12 @@ BUDGET_POLICY_MIGRATION_NAME = (
 BUDGET_POLICY_MIGRATION = (
     ROOT / "supabase" / "migrations" / BUDGET_POLICY_MIGRATION_NAME
 )
+HEARTBEAT_CONTRACT_MIGRATION_NAME = (
+    "20260725235840_durable_scheduler_heartbeat_contract.sql"
+)
+HEARTBEAT_CONTRACT_MIGRATION = (
+    ROOT / "supabase" / "migrations" / HEARTBEAT_CONTRACT_MIGRATION_NAME
+)
 VERIFIER = ROOT / "supabase" / "verify_durable_operations_scheduler.py"
 G1_G2_VERIFIER = ROOT / "supabase" / "verify_g1_g2_migration.py"
 MANIFEST = ROOT / "supabase" / "migration-checksums.v1.json"
@@ -46,6 +52,7 @@ EXPECTED_RPCS = {
 EXPECTED_VERIFICATION_MARKERS = {
     "definition_digest_and_db_clock",
     "definition_budget_policy",
+    "durable_heartbeat_contract",
     "outer_lease_binding",
     "commands_priority",
     "forced_startup_command_drain",
@@ -332,12 +339,52 @@ def test_scheduler_budget_policy_is_append_only_and_job_specific() -> None:
     assert "grant " not in sql.casefold()
 
 
+def test_scheduler_heartbeat_contract_supports_rolling_formats() -> None:
+    sql = _regular_file(HEARTBEAT_CONTRACT_MIGRATION)
+    record = _function_block(sql, "private.record_worker_heartbeat_impl")
+    dead_man = _function_block(sql, "private.get_dead_man_snapshot_v1_impl")
+    desktop = _function_block(
+        sql,
+        "private.get_desktop_operations_snapshot_v1_impl",
+    )
+
+    assert "'independent_scheduler_running'" in record
+    assert "'durable_scheduler_running'" in record
+    assert "jsonb_typeof(p_details->'job_last_succeeded_at') <> 'object'" in record
+    assert "scheduler_job_keys is distinct from array[" in record
+    assert {
+        value.strip("'")
+        for value in re.findall(r"'operations\.[a-z_]+'", record)
+    } == EXPECTED_JOBS
+    assert "jsonb_each(p_details->'job_last_succeeded_at')" in record
+    assert "not between p_now - interval '1 hour'" in record
+    assert "and p_now + interval '30 seconds'" in record
+
+    for stage in ("commands", "execution", "settlement", "reconciliation", "outbox"):
+        assert (
+            "heartbeat.details->'stage_last_completed_at'->>"
+            f"'{stage}'"
+        ) in dead_man
+        assert (
+            "heartbeat.details->'job_last_succeeded_at'->>"
+            f"'operations.{stage}'"
+        ) in dead_man
+    assert "'independent_scheduler_running'" in desktop
+    assert "'durable_scheduler_running'" in desktop
+    assert "create or replace function worker_api." not in sql
+    assert "durable_scheduler_heartbeat_contract_failed" in sql
+
+
 def test_scheduler_verifier_pins_behavior_upgrade_and_cleanup_evidence() -> None:
     source = _regular_file(VERIFIER)
     parsed = ast.parse(source)
     assert 'POSTGRES_IMAGE = "postgres:17.6-alpine"' in source
     assert f'MIGRATION_NAME = "{MIGRATION_NAME}"' in source
     assert f'BUDGET_POLICY_MIGRATION_NAME = (\n    "{BUDGET_POLICY_MIGRATION_NAME}"' in source
+    assert (
+        f'HEARTBEAT_CONTRACT_MIGRATION_NAME = (\n'
+        f'    "{HEARTBEAT_CONTRACT_MIGRATION_NAME}"'
+    ) in source
     for marker in EXPECTED_VERIFICATION_MARKERS:
         assert f'"{marker}"' in source
     assert "apply_repository(fresh)" in source
@@ -524,6 +571,7 @@ def test_scheduler_migration_checksums_are_wired_after_final_freeze() -> None:
         (MIGRATION_NAME, MIGRATION),
         (CONFLICT_FIX_MIGRATION_NAME, CONFLICT_FIX_MIGRATION),
         (BUDGET_POLICY_MIGRATION_NAME, BUDGET_POLICY_MIGRATION),
+        (HEARTBEAT_CONTRACT_MIGRATION_NAME, HEARTBEAT_CONTRACT_MIGRATION),
     ):
         migration = _regular_file(migration_path)
         expected = hashlib.sha256(migration.encode("utf-8")).hexdigest()

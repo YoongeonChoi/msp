@@ -51,16 +51,9 @@ def test_paper_source_rpc_allowlist_is_source_only() -> None:
 
 
 def test_paper_source_rejects_non_paper_environment_and_account_mismatch() -> None:
-    contract_settings = Settings(
-        EXECUTION_V2_ENABLED=True,
-        EXECUTION_V2_WORKER_API_ENABLED=True,
-        EXECUTION_V2_ENVIRONMENT="contract_test",
-        EXECUTION_V2_WORKER_ID="00000000-0000-4000-8000-000000000001",
-        EXECUTION_V2_ACCOUNT_ID="contract-test-primary",
-        MOCK_PROVIDERS=True,
-        SUPABASE_URL="https://example.supabase.co",
-        SUPABASE_SECRET_KEY=SecretStr("test-secret"),
-    )
+    contract_settings = _enabled_settings()
+    contract_settings.execution_v2_environment = "contract_test"
+    contract_settings.execution_v2_account_id = "contract-test-primary"
     with pytest.raises(ExecutionInvariantError, match="requires_paper_environment"):
         SupabasePaperExecutionCommandSource(
             contract_settings,

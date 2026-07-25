@@ -232,6 +232,7 @@ def _latest_completed_heartbeat(
             "cycle_completed",
             "operations_completed",
             "independent_scheduler_running",
+            "durable_scheduler_running",
         }:
             continue
         if not isinstance(details.get("completed_at"), str):

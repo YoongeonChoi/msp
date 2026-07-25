@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal, Never, Protocol
+from typing import Literal, Never, Protocol, SupportsIndex
 from uuid import UUID
 
 from app.application.ports.durable_scheduler_port import (
@@ -25,6 +25,7 @@ from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationDeadlineExceeded,
     SchedulerInvocationFailStopReturned,
     SchedulerInvocationPermit,
+    _SchedulerDispatchRegistrySeal,
     begin_scheduler_invocation_settlement,
     claim_scheduler_invocation,
     complete_scheduler_invocation_settlement,
@@ -393,6 +394,15 @@ class _HandlerRaised(Exception):
     """Hide handler-owned Exception types from supervisor control flow."""
 
 
+class _EffectAuthorizedSchedulerRegistryIssuance:
+    __slots__ = ()
+
+
+_EFFECT_AUTHORIZED_SCHEDULER_REGISTRY_ISSUANCE = (
+    _EffectAuthorizedSchedulerRegistryIssuance()
+)
+
+
 class _SchedulerInvocationDispatcher:
     def __init__(
         self,
@@ -400,6 +410,7 @@ class _SchedulerInvocationDispatcher:
         bindings: Mapping[SchedulerJobKey, SchedulerJobBinding],
         *,
         fail_stop: FailStop,
+        dispatch_registry_seal: _SchedulerDispatchRegistrySeal | None = None,
     ) -> None:
         if not callable(fail_stop):
             raise SchedulerInvariantError("scheduler_fail_stop_is_invalid")
@@ -407,6 +418,45 @@ class _SchedulerInvocationDispatcher:
         self.fail_stop = fail_stop
         self.runtime_pin, _outer_lease = _capture_runtime(runtime)
         self.bindings = _fixed_scheduler_bindings(bindings)
+        self.dispatch_registry_seal = dispatch_registry_seal
+        self._require_registry_intact(fail_stop_on_error=False)
+
+    def _require_registry_intact(self, *, fail_stop_on_error: bool) -> None:
+        seal = self.dispatch_registry_seal
+        if seal is None:
+            return
+        try:
+            if type(seal) is not _SchedulerDispatchRegistrySeal:
+                raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_invalid")
+            for job_key, binding in self.bindings.items():
+                seal.assert_authorized(
+                    self.runtime,
+                    job_key=job_key,
+                    handler=binding.handler,
+                    validator=binding.result_validator,
+                )
+        except SchedulerInvariantError:
+            if fail_stop_on_error:
+                _invoke_fail_stop(self.fail_stop, "scheduler_dispatch_registry_changed")
+            raise
+
+    def _effect_runtime_for(
+        self,
+        binding: SchedulerJobBinding,
+    ) -> SchedulerRuntimeCapability | None:
+        seal = self.dispatch_registry_seal
+        if seal is None:
+            return None
+        try:
+            seal.assert_authorized(
+                self.runtime,
+                job_key=binding.job_key,
+                handler=binding.handler,
+                validator=binding.result_validator,
+            )
+        except SchedulerInvariantError:
+            _invoke_fail_stop(self.fail_stop, "scheduler_dispatch_registry_changed")
+        return self.runtime
 
     async def dispatch(
         self,
@@ -414,6 +464,7 @@ class _SchedulerInvocationDispatcher:
         *,
         allow_disabled_definition: bool,
     ) -> DurableSchedulerRunResult:
+        self._require_registry_intact(fail_stop_on_error=True)
         claim, binding = _validate_invocation_policy(
             invocation,
             self.runtime_pin,
@@ -434,14 +485,17 @@ class _SchedulerInvocationDispatcher:
         )
 
         async def invoke_handler(permit: SchedulerInvocationPermit) -> object:
+            self._require_registry_intact(fail_stop_on_error=True)
             try:
-                return await binding.handler(permit, invocation.binding)
+                result = await binding.handler(permit, invocation.binding)
             except SchedulerRetryableError as exc:
                 if type(exc) is SchedulerRetryableError:
                     raise
                 raise _HandlerRaised from None
             except Exception:
                 raise _HandlerRaised from None
+            self._require_registry_intact(fail_stop_on_error=True)
+            return result
 
         try:
             raw_handler_result = await run_with_scheduler_deadline(
@@ -449,7 +503,8 @@ class _SchedulerInvocationDispatcher:
                 invocation=invocation,
                 fail_stop=self.fail_stop,
                 effect_issuer=binding.handler,
-                effect_runtime=self.runtime,
+                effect_runtime=self._effect_runtime_for(binding),
+                dispatch_registry_seal=self.dispatch_registry_seal,
             )
         except SchedulerInvocationDeadlineExceeded as exc:
             failure_plan = _deadline_failure_plan(
@@ -471,6 +526,7 @@ class _SchedulerInvocationDispatcher:
                 terminal_message="scheduler_handler_failed_closed",
             )
         else:
+            self._require_registry_intact(fail_stop_on_error=True)
             try:
                 handler_result = binding.result_validator(raw_handler_result)
                 result_sha256 = scheduler_result_sha256(handler_result)
@@ -481,6 +537,7 @@ class _SchedulerInvocationDispatcher:
                     terminal_message="scheduler_handler_result_failed_closed",
                 )
             else:
+                self._require_registry_intact(fail_stop_on_error=True)
                 return await self._complete(
                     invocation,
                     claim,
@@ -498,6 +555,7 @@ class _SchedulerInvocationDispatcher:
         handler_result: object,
         result_sha256: str,
     ) -> DurableSchedulerRunResult:
+        self._require_registry_intact(fail_stop_on_error=True)
         authorization = begin_scheduler_invocation_settlement(
             self.runtime,
             invocation,
@@ -533,6 +591,7 @@ class _SchedulerInvocationDispatcher:
         claim: ScheduledJobClaimV1,
         plan: _FailurePlan,
     ) -> DurableSchedulerRunResult:
+        self._require_registry_intact(fail_stop_on_error=True)
         failure_sha256 = scheduler_result_sha256(
             {
                 "classification": "retryable" if plan.retryable else "terminal",
@@ -603,7 +662,25 @@ class RunDurableSchedulerOnce:
             fail_stop=fail_stop,
         )
 
+    @classmethod
+    def _effect_authorized(
+        cls,
+        registry: _EffectAuthorizedSchedulerRegistry,
+        *,
+        fail_stop: FailStop,
+    ) -> RunDurableSchedulerOnce:
+        registry._assert_intact()
+        instance = cls.__new__(cls)
+        instance._dispatcher = _SchedulerInvocationDispatcher(
+            registry._runtime,
+            registry._bindings,
+            fail_stop=fail_stop,
+            dispatch_registry_seal=registry._seal,
+        )
+        return instance
+
     async def run_once(self) -> DurableSchedulerRunResult:
+        self._dispatcher._require_registry_intact(fail_stop_on_error=True)
         _require_runtime_pin(self._dispatcher.runtime, self._dispatcher.runtime_pin)
         invocation = await claim_scheduler_invocation(self._dispatcher.runtime)
         _require_runtime_pin_or_fail_stop(
@@ -646,7 +723,27 @@ class ConvergeDurableSchedulerDefinitions:
             fail_stop=fail_stop,
         )
 
+    @classmethod
+    def _effect_authorized(
+        cls,
+        registry: _EffectAuthorizedSchedulerRegistry,
+        definitions: tuple[ScheduledJobDefinitionV1, ...],
+        *,
+        fail_stop: FailStop,
+    ) -> ConvergeDurableSchedulerDefinitions:
+        registry._assert_intact()
+        instance = cls.__new__(cls)
+        instance._definitions = _fixed_scheduler_definitions(definitions)
+        instance._dispatcher = _SchedulerInvocationDispatcher(
+            registry._runtime,
+            registry._bindings,
+            fail_stop=fail_stop,
+            dispatch_registry_seal=registry._seal,
+        )
+        return instance
+
     async def run_step(self) -> DurableSchedulerConvergenceResult:
+        self._dispatcher._require_registry_intact(fail_stop_on_error=True)
         receipts: list[SchedulerDefinitionConvergenceReceiptV1] = []
         run_results: list[DurableSchedulerRunResult] = []
         for definition in self._definitions:
@@ -707,6 +804,108 @@ def _fixed_scheduler_bindings(
             raise SchedulerInvariantError("scheduler_binding_registry_is_invalid")
         canonical[job_key] = reconstructed
     return MappingProxyType(canonical)
+
+
+class _EffectAuthorizedSchedulerRegistry:
+    """Atomic runtime, handler registry, and provenance seal bundle."""
+
+    __slots__ = ("_runtime", "_bindings", "_seal", "_issuance")
+    _bindings: Mapping[SchedulerJobKey, SchedulerJobBinding]
+    _issuance: _EffectAuthorizedSchedulerRegistryIssuance
+    _runtime: SchedulerRuntimeCapability
+    _seal: _SchedulerDispatchRegistrySeal
+
+    def __init__(
+        self,
+        runtime: SchedulerRuntimeCapability,
+        bindings: Mapping[SchedulerJobKey, SchedulerJobBinding],
+        seal: _SchedulerDispatchRegistrySeal,
+        *,
+        _issuance: object,
+    ) -> None:
+        if _issuance is not _EFFECT_AUTHORIZED_SCHEDULER_REGISTRY_ISSUANCE:
+            raise SchedulerInvariantError(
+                "scheduler_effect_registry_is_not_issued"
+            )
+        if type(seal) is not _SchedulerDispatchRegistrySeal:
+            raise SchedulerInvariantError("scheduler_effect_registry_seal_is_invalid")
+        fixed_bindings = _fixed_scheduler_bindings(bindings)
+        runtime.assert_intact()
+        for job_key, binding in fixed_bindings.items():
+            seal.assert_authorized(
+                runtime,
+                job_key=job_key,
+                handler=binding.handler,
+                validator=binding.result_validator,
+            )
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_bindings", fixed_bindings)
+        object.__setattr__(self, "_seal", seal)
+        object.__setattr__(
+            self,
+            "_issuance",
+            _EFFECT_AUTHORIZED_SCHEDULER_REGISTRY_ISSUANCE,
+        )
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise SchedulerInvariantError("scheduler_effect_registry_is_not_serializable")
+
+    def _assert_intact(self) -> None:
+        try:
+            if (
+                self._issuance
+                is not _EFFECT_AUTHORIZED_SCHEDULER_REGISTRY_ISSUANCE
+                or type(self._seal) is not _SchedulerDispatchRegistrySeal
+            ):
+                raise SchedulerInvariantError("scheduler_effect_registry_is_invalid")
+            self._runtime.assert_intact()
+            fixed_bindings = _fixed_scheduler_bindings(self._bindings)
+            if any(
+                binding.handler is not self._bindings[job_key].handler
+                for job_key, binding in fixed_bindings.items()
+            ):
+                raise SchedulerInvariantError("scheduler_effect_registry_is_invalid")
+            for job_key, binding in self._bindings.items():
+                self._seal.assert_authorized(
+                    self._runtime,
+                    job_key=job_key,
+                    handler=binding.handler,
+                    validator=binding.result_validator,
+                )
+        except SchedulerInvariantError:
+            raise
+        except Exception:
+            raise SchedulerInvariantError("scheduler_effect_registry_is_invalid") from None
+
+
+def _issue_effect_authorized_scheduler_registry(
+    runtime: SchedulerRuntimeCapability,
+    bindings: Mapping[SchedulerJobKey, SchedulerJobBinding],
+    seal: _SchedulerDispatchRegistrySeal,
+) -> _EffectAuthorizedSchedulerRegistry:
+    """Private factory hook that atomically binds an already attested registry."""
+
+    return _EffectAuthorizedSchedulerRegistry(
+        runtime,
+        bindings,
+        seal,
+        _issuance=_EFFECT_AUTHORIZED_SCHEDULER_REGISTRY_ISSUANCE,
+    )
 
 
 def _fixed_scheduler_definitions(

@@ -15,7 +15,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -49,6 +49,9 @@ CONFLICT_FIX_MIGRATION_NAME = (
 BUDGET_POLICY_MIGRATION_NAME = (
     "20260725090000_durable_scheduler_budget_policy.sql"
 )
+HEARTBEAT_CONTRACT_MIGRATION_NAME = (
+    "20260725235840_durable_scheduler_heartbeat_contract.sql"
+)
 CHECKSUM_MANIFEST = ROOT / "migration-checksums.v1.json"
 ACCOUNT_ID = "paper-primary"
 HOLDER_ID = "51515151-5151-4515-8515-515151515151"
@@ -65,6 +68,7 @@ FUTURE_OUTER_HOLDER_ID = "61616161-6161-4161-8161-616161616161"
 CONCURRENT_CLAIM_HOLDER_ID = "62626262-6262-4626-8626-626262626262"
 RELEASE_SHA = "d" * 40
 OTHER_RELEASE_SHA = "e" * 40
+HEARTBEAT_VIEWER_ID = "63636363-6363-4363-8363-636363636363"
 JOB_KEYS = (
     "operations.commands",
     "operations.execution",
@@ -116,6 +120,7 @@ VERIFICATION_MARKERS = frozenset(
     {
         "definition_digest_and_db_clock",
         "definition_budget_policy",
+        "durable_heartbeat_contract",
         "outer_lease_binding",
         "commands_priority",
         "forced_startup_command_drain",
@@ -883,6 +888,7 @@ def verify_checksum_wiring() -> None:
         MIGRATION_NAME,
         CONFLICT_FIX_MIGRATION_NAME,
         BUDGET_POLICY_MIGRATION_NAME,
+        HEARTBEAT_CONTRACT_MIGRATION_NAME,
     ):
         target = MIGRATIONS / migration_name
         if not target.is_file() or target.is_symlink():
@@ -903,6 +909,183 @@ def verify_checksum_wiring() -> None:
                 f"migration={migration_name}, expected={expected!r}, actual={actual}"
             )
     print("PASS durable scheduler migration tail checksum wiring")
+
+
+def verify_durable_heartbeat_contract(
+    container: str,
+    outer: dict[str, Any],
+) -> None:
+    if outer.get("holder_id") != HOLDER_ID:
+        raise VerificationError("durable heartbeat fixture lost the outer lease holder")
+
+    def heartbeat_call(details: dict[str, Any], observed_at: datetime) -> str:
+        document = json.dumps(details, sort_keys=True, separators=(",", ":"))
+        return (
+            "worker_api.record_worker_heartbeat("
+            f"{sql_text(HOLDER_ID)},'ok',{sql_text(document)}::jsonb,"
+            f"{sql_text(observed_at.isoformat())}::timestamptz,"
+            f"{sql_text(RELEASE_SHA)})"
+        )
+
+    def dead_man_snapshot() -> dict[str, Any]:
+        return _service_rpc(
+            container,
+            HOLDER_ID,
+            "worker_api.get_dead_man_snapshot_v1("
+            f"{sql_text(ACCOUNT_ID)},pg_catalog.clock_timestamp(),"
+            f"{sql_text(RELEASE_SHA)})",
+        )
+
+    def assert_projection(
+        snapshot: dict[str, Any],
+        expected: dict[str, datetime],
+        *,
+        label: str,
+        heartbeat_at: datetime,
+    ) -> None:
+        if snapshot.get("latest_heartbeat_status") != "ok":
+            raise VerificationError(f"{label} heartbeat status was not projected")
+        if snapshot.get("latest_heartbeat_release_sha") != RELEASE_SHA:
+            raise VerificationError(f"{label} heartbeat release was not projected")
+        if _timestamp(snapshot.get("latest_heartbeat_at")) != heartbeat_at:
+            raise VerificationError(f"{label} heartbeat time was not projected")
+        for stage, expected_at in expected.items():
+            field = f"{stage}_last_completed_at"
+            if _timestamp(snapshot.get(field)) != expected_at:
+                raise VerificationError(
+                    f"{label} projection mismatch: field={field}, "
+                    f"snapshot={snapshot!r}"
+                )
+
+    legacy_now = database_now(container)
+    legacy_stage_times = {
+        "commands": legacy_now - timedelta(seconds=11),
+        "execution": legacy_now - timedelta(seconds=12),
+        "settlement": legacy_now - timedelta(seconds=13),
+        "reconciliation": legacy_now - timedelta(seconds=14),
+        "outbox": legacy_now - timedelta(seconds=15),
+    }
+    legacy_details: dict[str, Any] = {
+        "component": "operations_v2",
+        "checkpoint": "independent_scheduler_running",
+        "completed_at": legacy_now.isoformat(),
+        "release_sha": RELEASE_SHA,
+        "stage_last_completed_at": {
+            key: value.isoformat() for key, value in legacy_stage_times.items()
+        },
+    }
+    legacy_receipt = _service_rpc(
+        container,
+        HOLDER_ID,
+        heartbeat_call(legacy_details, legacy_now),
+    )
+    if set(legacy_receipt) != {"heartbeat_id", "created_at"}:
+        raise VerificationError(f"legacy heartbeat receipt mismatch: {legacy_receipt}")
+    if _timestamp(legacy_receipt.get("created_at")) != legacy_now:
+        raise VerificationError("legacy heartbeat did not preserve its observed time")
+    assert_projection(
+        dead_man_snapshot(),
+        legacy_stage_times,
+        label="legacy scheduler",
+        heartbeat_at=legacy_now,
+    )
+
+    durable_now = database_now(container)
+    durable_job_times = {
+        job_key: durable_now - timedelta(seconds=index + 1)
+        for index, job_key in enumerate(JOB_KEYS)
+    }
+    durable_details: dict[str, Any] = {
+        "component": "operations_v2",
+        "checkpoint": "durable_scheduler_running",
+        "completed_at": durable_now.isoformat(),
+        "release_sha": RELEASE_SHA,
+        "job_last_succeeded_at": {
+            key: value.isoformat() for key, value in durable_job_times.items()
+        },
+    }
+    invalid_job_documents: list[dict[str, Any]] = []
+    missing_job = dict(durable_details["job_last_succeeded_at"])
+    missing_job.pop("operations.outbox")
+    invalid_job_documents.append(missing_job)
+    extra_job = dict(durable_details["job_last_succeeded_at"])
+    extra_job["operations.unknown"] = durable_now.isoformat()
+    invalid_job_documents.append(extra_job)
+    null_job = dict(durable_details["job_last_succeeded_at"])
+    null_job["operations.execution"] = None
+    invalid_job_documents.append(null_job)
+    stale_job = dict(durable_details["job_last_succeeded_at"])
+    stale_job["operations.settlement"] = (
+        durable_now - timedelta(hours=2)
+    ).isoformat()
+    invalid_job_documents.append(stale_job)
+    for job_document in invalid_job_documents:
+        invalid_details = dict(durable_details)
+        invalid_details["job_last_succeeded_at"] = job_document
+        _service_failure(
+            container,
+            HOLDER_ID,
+            heartbeat_call(invalid_details, durable_now),
+            "durable_scheduler_heartbeat_job_evidence_invalid",
+        )
+
+    durable_receipt = _service_rpc(
+        container,
+        HOLDER_ID,
+        heartbeat_call(durable_details, durable_now),
+    )
+    if set(durable_receipt) != {"heartbeat_id", "created_at"}:
+        raise VerificationError(f"durable heartbeat receipt mismatch: {durable_receipt}")
+    if _timestamp(durable_receipt.get("created_at")) != durable_now:
+        raise VerificationError("durable heartbeat did not preserve its observed time")
+    durable_stage_times = {
+        job_key.removeprefix("operations."): completed_at
+        for job_key, completed_at in durable_job_times.items()
+    }
+    assert_projection(
+        dead_man_snapshot(),
+        durable_stage_times,
+        label="durable scheduler",
+        heartbeat_at=durable_now,
+    )
+
+    psql(
+        container,
+        "insert into auth.users(id,email) values ("
+        f"{sql_text(HEARTBEAT_VIEWER_ID)}::uuid,"
+        "'durable-heartbeat-viewer@example.invalid');"
+        "insert into private.role_assignments(user_id,role,reason) values ("
+        f"{sql_text(HEARTBEAT_VIEWER_ID)}::uuid,'viewer',"
+        "'durable_heartbeat_verifier');",
+    )
+    desktop = _last_json(
+        container,
+        jwt_claim_sql(HEARTBEAT_VIEWER_ID)
+        + "\nselect api.get_desktop_operations_snapshot_v1();",
+    )
+    runtime_health = desktop.get("runtime_health")
+    if not isinstance(runtime_health, dict):
+        raise VerificationError("desktop snapshot omitted runtime health")
+    components = runtime_health.get("components")
+    if not isinstance(components, list):
+        raise VerificationError("desktop snapshot omitted runtime components")
+    worker_components = [
+        component
+        for component in components
+        if isinstance(component, dict) and component.get("component") == "worker"
+    ]
+    if len(worker_components) != 1 or worker_components[0].get("state") != "fresh":
+        raise VerificationError(
+            f"desktop durable heartbeat freshness mismatch: {worker_components!r}"
+        )
+    if runtime_health.get("worker_release_sha") != RELEASE_SHA:
+        raise VerificationError("desktop snapshot lost the durable worker release")
+    if _timestamp(runtime_health.get("worker_heartbeat_at")) != durable_now:
+        raise VerificationError("desktop snapshot lost the durable heartbeat time")
+    print(
+        "PASS durable_heartbeat_contract validates the exact five-job document, "
+        "preserves legacy projection and marks durable desktop health fresh"
+    )
 
 
 def verify_definition_budget_policy(
@@ -4063,14 +4246,21 @@ def verify_populated_upgrade(container: str) -> None:
     target = MIGRATIONS / MIGRATION_NAME
     conflict_fix = MIGRATIONS / CONFLICT_FIX_MIGRATION_NAME
     budget_policy = MIGRATIONS / BUDGET_POLICY_MIGRATION_NAME
+    heartbeat_contract = MIGRATIONS / HEARTBEAT_CONTRACT_MIGRATION_NAME
     migrations = sorted(MIGRATIONS.glob("*.sql"))
     try:
         target_index = migrations.index(target)
         conflict_fix_index = migrations.index(conflict_fix)
         budget_policy_index = migrations.index(budget_policy)
+        heartbeat_contract_index = migrations.index(heartbeat_contract)
     except ValueError as error:
         raise VerificationError("durable scheduler migration boundary is missing") from error
-    if not target_index < conflict_fix_index < budget_policy_index:
+    if not (
+        target_index
+        < conflict_fix_index
+        < budget_policy_index
+        < heartbeat_contract_index
+    ):
         raise VerificationError("durable scheduler migration tail boundary is invalid")
     for migration in migrations[:target_index]:
         psql(container, migration.read_text(encoding="utf-8"))
@@ -4107,7 +4297,10 @@ def verify_populated_upgrade(container: str) -> None:
         budget_policy,
         int(outer["fencing_token"]),
     )
-    for migration in migrations[budget_policy_index + 1 :]:
+    for migration in migrations[budget_policy_index + 1 : heartbeat_contract_index]:
+        psql(container, migration.read_text(encoding="utf-8"))
+    psql(container, heartbeat_contract.read_text(encoding="utf-8"))
+    for migration in migrations[heartbeat_contract_index + 1 :]:
         psql(container, migration.read_text(encoding="utf-8"))
     spec = definition_spec(
         "operations.outbox",
@@ -4208,6 +4401,7 @@ def main() -> int:
         open_scheduler_account_fixtures(fresh)
         before_domain = domain_snapshot(fresh)
         first_outer = acquire_outer_lease(fresh)
+        verify_durable_heartbeat_contract(fresh, first_outer)
         verify_definition_budget_policy(fresh, first_outer)
         specs, first_claim = verify_definition_digest_and_db_clock(
             fresh,

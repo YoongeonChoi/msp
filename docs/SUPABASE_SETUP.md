@@ -131,7 +131,8 @@ guarantee. Any ambiguous state stops the release.
 48. `20260724210000_durable_operations_scheduler.sql`
 49. `20260724234500_durable_scheduler_conflict_target.sql`
 50. `20260725090000_durable_scheduler_budget_policy.sql`
-51. `seed.sql`
+51. `20260725235840_durable_scheduler_heartbeat_contract.sql`
+52. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -295,6 +296,12 @@ The timestamp migrations extend that boundary in this order:
   lock, rejects any populated row outside that policy with SQLSTATE `23514`,
   and never rewrites an unsafe value into a guessed safe value. Resolve and
   document any rejected definition before retrying the migration.
+- `20260725235840_durable_scheduler_heartbeat_contract.sql` makes the durable
+  five-job success document authoritative across heartbeat admission,
+  dead-man projection, and Desktop worker freshness. It keeps the legacy
+  independent-stage format readable during rolling deployment, rejects
+  missing, extra, null, or stale durable job timestamps, and preserves the
+  existing function ownership and least-privilege execution boundary.
 
 ## Required project configuration
 

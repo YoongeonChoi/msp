@@ -35,7 +35,8 @@ through `0024_operational_upgrade_convergence.sql`, followed in order by
 `20260723162000_desktop_operations_sensitive_projection_gate.sql`, followed by
 `20260724210000_durable_operations_scheduler.sql`, followed by
 `20260724234500_durable_scheduler_conflict_target.sql`, followed by
-`20260725090000_durable_scheduler_budget_policy.sql`.
+`20260725090000_durable_scheduler_budget_policy.sql`, followed by
+`20260725235840_durable_scheduler_heartbeat_contract.sql`.
 
 After the Desktop sensitive-projection migration, run the complete
 `python supabase/verify_g1_g2_migration.py` verifier without

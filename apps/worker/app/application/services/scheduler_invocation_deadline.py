@@ -872,12 +872,151 @@ class SchedulerInvocationFailStopReturned(BaseException):
     """A configured fail-stop violated its non-returning contract."""
 
 
+class _SchedulerDispatchRegistrySeal:
+    """Opaque proof that one exact handler registry was factory-issued.
+
+    Generic scheduler runners deliberately receive no seal.  The production
+    infrastructure factory is the only allow-listed caller of the private
+    issuance function below, so an arbitrary handler cannot make itself the
+    effect issuer merely by supplying an otherwise valid runtime capability.
+    """
+
+    __slots__ = ("_runtime", "_runtime_provenance", "_entries", "_issuance")
+    _entries: tuple[tuple[SchedulerJobKey, object, object], ...]
+    _issuance: _SchedulerInvocationIssuance
+    _runtime: SchedulerRuntimeCapability
+    _runtime_provenance: object
+
+    def __init__(
+        self,
+        runtime: SchedulerRuntimeCapability,
+        entries: tuple[tuple[SchedulerJobKey, object, object], ...],
+        *,
+        runtime_provenance: object,
+        _issuance: object,
+    ) -> None:
+        if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+            raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_not_issued")
+        if type(entries) is not tuple or len(entries) != len(SCHEDULER_JOB_KEYS):
+            raise SchedulerInvariantError("scheduler_dispatch_registry_is_invalid")
+        seen: set[SchedulerJobKey] = set()
+        canonical: list[tuple[SchedulerJobKey, object, object]] = []
+        for entry in entries:
+            if type(entry) is not tuple or len(entry) != 3:
+                raise SchedulerInvariantError("scheduler_dispatch_registry_is_invalid")
+            job_key, handler, validator = entry
+            if (
+                job_key not in SCHEDULER_JOB_KEYS
+                or job_key in seen
+                or not callable(handler)
+                or not callable(validator)
+            ):
+                raise SchedulerInvariantError("scheduler_dispatch_registry_is_invalid")
+            seen.add(job_key)
+            canonical.append((job_key, handler, validator))
+        if seen != SCHEDULER_JOB_KEYS:
+            raise SchedulerInvariantError("scheduler_dispatch_registry_is_invalid")
+        _assert_scheduler_dispatch_runtime_provenance(runtime, runtime_provenance)
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_runtime_provenance", runtime_provenance)
+        object.__setattr__(self, "_entries", tuple(canonical))
+        object.__setattr__(self, "_issuance", _SCHEDULER_INVOCATION_ISSUANCE)
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_not_serializable")
+
+    def assert_authorized(
+        self,
+        runtime: SchedulerRuntimeCapability,
+        *,
+        job_key: SchedulerJobKey,
+        handler: object,
+        validator: object | None = None,
+    ) -> None:
+        try:
+            if (
+                self._issuance is not _SCHEDULER_INVOCATION_ISSUANCE
+                or self._runtime is not runtime
+                or type(self._entries) is not tuple
+                or len(self._entries) != len(SCHEDULER_JOB_KEYS)
+            ):
+                raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_invalid")
+            _assert_scheduler_dispatch_runtime_provenance(
+                runtime,
+                self._runtime_provenance,
+            )
+            matches = tuple(
+                entry
+                for entry in self._entries
+                if entry[0] == job_key and entry[1] is handler
+            )
+            if len(matches) != 1 or (
+                validator is not None and matches[0][2] is not validator
+            ):
+                raise SchedulerInvariantError("scheduler_dispatch_registry_binding_mismatch")
+        except SchedulerInvariantError:
+            raise
+        except Exception:
+            raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_invalid") from None
+
+
+def _issue_scheduler_dispatch_registry_seal(
+    runtime: SchedulerRuntimeCapability,
+    entries: tuple[tuple[SchedulerJobKey, object, object], ...],
+    *,
+    runtime_provenance: object,
+) -> _SchedulerDispatchRegistrySeal:
+    """Private integration hook; production usage is guarded by an AST policy."""
+
+    return _SchedulerDispatchRegistrySeal(
+        runtime,
+        entries,
+        runtime_provenance=runtime_provenance,
+        _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+    )
+
+
+def _assert_scheduler_dispatch_runtime_provenance(
+    runtime: SchedulerRuntimeCapability,
+    runtime_provenance: object,
+) -> None:
+    try:
+        verifier = getattr(runtime, "_assert_dispatch_registry_provenance", None)
+        if not callable(verifier):
+            raise SchedulerInvariantError(
+                "scheduler_dispatch_registry_runtime_provenance_is_invalid"
+            )
+        verifier(runtime_provenance)
+    except SchedulerInvariantError:
+        raise
+    except Exception:
+        raise SchedulerInvariantError(
+            "scheduler_dispatch_registry_runtime_provenance_is_invalid"
+        ) from None
+
+
 class SchedulerInvocationPermit:
     """Single-invocation effect permit with a fixed monotonic cutoff."""
 
     __slots__ = (
         "_deadline",
         "_effect_issuer",
+        "_dispatch_registry_seal",
         "_effect_runtime",
         "_monotonic_clock",
         "_last_monotonic",
@@ -886,6 +1025,7 @@ class SchedulerInvocationPermit:
     )
     _deadline: SchedulerInvocationDeadline
     _effect_issuer: object
+    _dispatch_registry_seal: _SchedulerDispatchRegistrySeal | None
     _effect_runtime: SchedulerRuntimeCapability | None
     _issuance: _SchedulerInvocationIssuance
     _last_monotonic: float
@@ -898,6 +1038,7 @@ class SchedulerInvocationPermit:
         *,
         effect_issuer: object,
         effect_runtime: SchedulerRuntimeCapability | None,
+        dispatch_registry_seal: _SchedulerDispatchRegistrySeal | None,
         _issuance: object,
     ) -> None:
         if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
@@ -906,6 +1047,16 @@ class SchedulerInvocationPermit:
             raise SchedulerInvariantError("scheduler_invocation_deadline_type_is_invalid")
         if not callable(effect_issuer):
             raise SchedulerInvariantError("scheduler_invocation_effect_issuer_is_invalid")
+        if (effect_runtime is None) != (dispatch_registry_seal is None):
+            raise SchedulerInvariantError("scheduler_dispatch_registry_authority_is_invalid")
+        if dispatch_registry_seal is not None:
+            if type(dispatch_registry_seal) is not _SchedulerDispatchRegistrySeal:
+                raise SchedulerInvariantError("scheduler_dispatch_registry_seal_is_invalid")
+            dispatch_registry_seal.assert_authorized(
+                cast(SchedulerRuntimeCapability, effect_runtime),
+                job_key=deadline.binding.job_key,
+                handler=effect_issuer,
+            )
         deadline._assert_intact()
         monotonic_clock = deadline._rpc_start._monotonic_clock
         initial = _read_monotonic(monotonic_clock)
@@ -913,6 +1064,7 @@ class SchedulerInvocationPermit:
             raise SchedulerInvariantError("scheduler_invocation_clock_moved_backwards")
         object.__setattr__(self, "_deadline", deadline)
         object.__setattr__(self, "_effect_issuer", effect_issuer)
+        object.__setattr__(self, "_dispatch_registry_seal", dispatch_registry_seal)
         object.__setattr__(self, "_effect_runtime", effect_runtime)
         object.__setattr__(self, "_monotonic_clock", monotonic_clock)
         object.__setattr__(self, "_last_monotonic", initial)
@@ -1009,6 +1161,22 @@ class SchedulerInvocationPermit:
                 raise SchedulerInvariantError(
                     "scheduler_invocation_effect_issuer_is_invalid"
                 )
+            if (self._effect_runtime is None) != (
+                self._dispatch_registry_seal is None
+            ):
+                raise SchedulerInvariantError(
+                    "scheduler_dispatch_registry_authority_is_invalid"
+                )
+            if self._dispatch_registry_seal is not None:
+                if type(self._dispatch_registry_seal) is not _SchedulerDispatchRegistrySeal:
+                    raise SchedulerInvariantError(
+                        "scheduler_dispatch_registry_seal_is_invalid"
+                    )
+                self._dispatch_registry_seal.assert_authorized(
+                    cast(SchedulerRuntimeCapability, self._effect_runtime),
+                    job_key=self._deadline.binding.job_key,
+                    handler=self._effect_issuer,
+                )
             self._deadline._assert_intact()
             if self._monotonic_clock is not self._deadline._rpc_start._monotonic_clock:
                 raise SchedulerInvariantError("scheduler_invocation_permit_clock_mismatch")
@@ -1063,6 +1231,7 @@ class SchedulerInvocationEffectAuthorization:
         "_binding",
         "_expected_job_key",
         "_effect_issuer",
+        "_dispatch_registry_seal",
         "_captured_outer_lease",
         "_scheduler_port",
         "_persistence_authority",
@@ -1072,6 +1241,7 @@ class SchedulerInvocationEffectAuthorization:
     _captured_outer_lease: WorkerLease
     _expected_job_key: SchedulerJobKey
     _effect_issuer: object
+    _dispatch_registry_seal: _SchedulerDispatchRegistrySeal
     _issuance: _SchedulerInvocationIssuance
     _permit: SchedulerInvocationPermit
     _persistence_authority: PersistenceAuthority
@@ -1086,6 +1256,7 @@ class SchedulerInvocationEffectAuthorization:
         binding: SchedulerInvocationBinding,
         expected_job_key: SchedulerJobKey,
         effect_issuer: object,
+        dispatch_registry_seal: _SchedulerDispatchRegistrySeal,
         _issuance: object,
     ) -> None:
         if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
@@ -1104,11 +1275,27 @@ class SchedulerInvocationEffectAuthorization:
         if permit._effect_runtime is not runtime:
             permit._revoke_first_wins("binding_mismatch")
             raise SchedulerInvocationPermitRevoked("binding_mismatch")
+        if (
+            type(dispatch_registry_seal) is not _SchedulerDispatchRegistrySeal
+            or permit._dispatch_registry_seal is not dispatch_registry_seal
+        ):
+            permit._revoke_first_wins("binding_mismatch")
+            raise SchedulerInvocationPermitRevoked("binding_mismatch")
+        try:
+            dispatch_registry_seal.assert_authorized(
+                runtime,
+                job_key=expected_job_key,
+                handler=effect_issuer,
+            )
+        except SchedulerInvariantError:
+            permit._revoke_first_wins("binding_mismatch")
+            raise SchedulerInvocationPermitRevoked("binding_mismatch") from None
         object.__setattr__(self, "_runtime", runtime)
         object.__setattr__(self, "_permit", permit)
         object.__setattr__(self, "_binding", binding)
         object.__setattr__(self, "_expected_job_key", expected_job_key)
         object.__setattr__(self, "_effect_issuer", effect_issuer)
+        object.__setattr__(self, "_dispatch_registry_seal", dispatch_registry_seal)
         object.__setattr__(
             self,
             "_captured_outer_lease",
@@ -1166,6 +1353,20 @@ class SchedulerInvocationEffectAuthorization:
                 raise SchedulerInvariantError(
                     "scheduler_effect_runtime_identity_mismatch"
                 )
+            if (
+                type(self._dispatch_registry_seal)
+                is not _SchedulerDispatchRegistrySeal
+                or self._permit._dispatch_registry_seal
+                is not self._dispatch_registry_seal
+            ):
+                raise SchedulerInvariantError(
+                    "scheduler_dispatch_registry_seal_identity_mismatch"
+                )
+            self._dispatch_registry_seal.assert_authorized(
+                self._runtime,
+                job_key=expected_job_key,
+                handler=self._effect_issuer,
+            )
             if (
                 expected_job_key not in SCHEDULER_JOB_KEYS
                 or self._expected_job_key != expected_job_key
@@ -1226,6 +1427,7 @@ def issue_scheduler_invocation_effect_authorization(
     *,
     expected_job_key: SchedulerJobKey,
     effect_issuer: object,
+    dispatch_registry_seal: _SchedulerDispatchRegistrySeal,
 ) -> SchedulerInvocationEffectAuthorization:
     """Bind one active invocation to one exact downstream job authority."""
 
@@ -1235,6 +1437,7 @@ def issue_scheduler_invocation_effect_authorization(
         binding=invocation_binding,
         expected_job_key=expected_job_key,
         effect_issuer=effect_issuer,
+        dispatch_registry_seal=dispatch_registry_seal,
         _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
     )
     authorization._require_effect(expected_job_key)
@@ -1611,11 +1814,14 @@ async def run_with_scheduler_deadline[T](
     fail_stop: FailStop,
     effect_issuer: object | None = None,
     effect_runtime: SchedulerRuntimeCapability | None = None,
+    dispatch_registry_seal: _SchedulerDispatchRegistrySeal | None = None,
 ) -> T:
     if not callable(handler) or not callable(fail_stop):
         raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
     if wait_until is not None and not callable(wait_until):
         raise SchedulerInvariantError("scheduler_invocation_waiter_is_invalid")
+    if (effect_runtime is None) != (dispatch_registry_seal is None):
+        _invoke_fail_stop(fail_stop, "scheduler_dispatch_registry_authority_invalid")
     resolved_effect_issuer = handler if effect_issuer is None else effect_issuer
     if not callable(resolved_effect_issuer):
         raise SchedulerInvariantError("scheduler_invocation_effect_issuer_is_invalid")
@@ -1632,9 +1838,16 @@ async def run_with_scheduler_deadline[T](
             deadline,
             effect_issuer=resolved_effect_issuer,
             effect_runtime=effect_runtime,
+            dispatch_registry_seal=dispatch_registry_seal,
             _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
         )
-    except SchedulerInvariantError:
+    except SchedulerInvariantError as exc:
+        reason = str(exc)
+        if reason.startswith("scheduler_dispatch_registry_"):
+            _invoke_fail_stop(
+                fail_stop,
+                "scheduler_dispatch_registry_authority_invalid",
+            )
         _invoke_fail_stop(fail_stop, "scheduler_deadline_clock_corrupt")
     initial_state = permit._time_state()
     if initial_state == "clock_corrupt":

@@ -29,6 +29,7 @@ from app.application.services.risk_service import RiskService
 from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationBinding,
     SchedulerInvocationEffectAuthorization,
+    SchedulerInvocationFailStopReturned,
     SchedulerInvocationPermit,
     SchedulerInvocationPermitRevoked,
     _claim_scheduler_invocation_with_clock,
@@ -51,6 +52,8 @@ from app.application.use_cases.reconcile_execution_v2 import (
 )
 from app.application.use_cases.run_durable_scheduler import (
     SCHEDULER_RESULT_VALIDATORS,
+    ConvergeDurableSchedulerDefinitions,
+    RunDurableSchedulerOnce,
     SchedulerJobBinding,
 )
 from app.application.use_cases.run_execution_supervisor_v2 import (
@@ -73,10 +76,12 @@ from app.domain.scheduler.models import (
     SchedulerInvariantError,
     SchedulerJobKey,
 )
+from app.infrastructure import scheduler_runtime_capability_factory as capability_factory
 from app.infrastructure.authenticated_webhook import ReceiverAckKeyRing
 from app.infrastructure.scheduler_runtime_capability_factory import (
-    create_scheduler_runtime_capability,
-    create_supabase_scheduler_job_bindings,
+    _create_scheduler_runtime_capability,
+    _create_supabase_scheduler_binding_registry,
+    create_supabase_durable_scheduler_facade,
     require_supabase_scheduler_runtime_capability,
 )
 
@@ -121,7 +126,7 @@ class _RuntimeGraph:
     outbox: DispatchAlertOutbox
 
     def issue(self) -> SchedulerRuntimeCapability:
-        return create_scheduler_runtime_capability(
+        return _create_scheduler_runtime_capability(
             scheduler=self.scheduler,
             worker_api=self.worker_api,
             lease_manager=self.lease_manager,
@@ -221,6 +226,7 @@ async def _capture_runtime_permit(
     job_key: SchedulerJobKey,
     *,
     effect_issuer: object,
+    dispatch_registry_seal: Any | None,
 ) -> tuple[
     SchedulerInvocationPermit,
     SchedulerInvocationBinding,
@@ -262,7 +268,8 @@ async def _capture_runtime_permit(
             wait_until=_wait_for_scheduler_deadline,
             fail_stop=_must_not_fail_stop,
             effect_issuer=effect_issuer,
-            effect_runtime=capability,
+            effect_runtime=(capability if dispatch_registry_seal is not None else None),
+            dispatch_registry_seal=dispatch_registry_seal,
         )
     )
     await entered.wait()
@@ -309,7 +316,7 @@ async def test_infrastructure_gate_rejects_structural_capability_fake(
     with pytest.raises(SchedulerInvariantError, match="capability_type"):
         require_supabase_scheduler_runtime_capability(StructuralFake())
     with pytest.raises(SchedulerInvariantError, match="capability_type"):
-        create_supabase_scheduler_job_bindings(StructuralFake())
+        _create_supabase_scheduler_binding_registry(StructuralFake())
 
     capability = runtime_graph.issue()
     assert require_supabase_scheduler_runtime_capability(capability) is capability
@@ -327,7 +334,8 @@ async def test_infrastructure_gate_rejects_structural_capability_fake(
 async def test_scheduler_binding_factory_is_fixed_and_uses_exact_validators(
     runtime_graph: _RuntimeGraph,
 ) -> None:
-    bindings = create_supabase_scheduler_job_bindings(runtime_graph.issue())
+    registry = _create_supabase_scheduler_binding_registry(runtime_graph.issue())
+    bindings = registry._bindings
 
     assert tuple(bindings) == _SCHEDULER_HANDLER_ORDER
     assert frozenset(bindings) == SCHEDULER_JOB_KEYS
@@ -338,14 +346,26 @@ async def test_scheduler_binding_factory_is_fixed_and_uses_exact_validators(
         assert binding.result_validator is SCHEDULER_RESULT_VALIDATORS[job_key]
     with pytest.raises(TypeError):
         cast(Any, bindings)["operations.commands"] = bindings["operations.outbox"]
+    registry.assert_intact()
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_binding_registry_is_immutable",
+    ):
+        cast(Any, registry)._bindings = {}
+    with pytest.raises(TypeError, match="scheduler_binding_registry_is_not_copyable"):
+        copy.copy(registry)
+    with pytest.raises(
+        TypeError,
+        match="scheduler_binding_registry_is_not_serializable",
+    ):
+        pickle.dumps(registry)
 
 
 async def test_scheduler_binding_handlers_are_immutable_and_non_serializable(
     runtime_graph: _RuntimeGraph,
 ) -> None:
-    handler = create_supabase_scheduler_job_bindings(runtime_graph.issue())[
-        "operations.commands"
-    ].handler
+    registry = _create_supabase_scheduler_binding_registry(runtime_graph.issue())
+    handler = registry._bindings["operations.commands"].handler
 
     assert not hasattr(handler, "__dict__")
     with pytest.raises(
@@ -362,6 +382,302 @@ async def test_scheduler_binding_handlers_are_immutable_and_non_serializable(
         copy.copy(handler)
     with pytest.raises(TypeError, match="scheduler_runtime_handler_is_not_serializable"):
         pickle.dumps(handler)
+
+
+async def test_durable_scheduler_facade_hides_raw_authority_and_is_immutable(
+    runtime_graph: _RuntimeGraph,
+) -> None:
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=runtime_graph.scheduler,
+        worker_api=runtime_graph.worker_api,
+        lease_manager=runtime_graph.lease_manager,
+        commands=runtime_graph.commands,
+        execution=runtime_graph.execution,
+        settlement=runtime_graph.settlement,
+        reconciliation=runtime_graph.reconciliation,
+        outbox=runtime_graph.outbox,
+        settings=_settings(),
+        fail_stop=_must_not_fail_stop,
+    )
+
+    facade.assert_intact()
+    assert not hasattr(facade, "runtime")
+    assert not hasattr(facade, "registry")
+    assert not hasattr(facade, "bindings")
+    assert not hasattr(facade, "seal")
+    assert not hasattr(facade, "definitions")
+    assert not hasattr(facade, "__dict__")
+    with pytest.raises(SchedulerInvariantError, match="scheduler_facade_is_immutable"):
+        cast(Any, facade)._runtime = object()
+    with pytest.raises(SchedulerInvariantError, match="scheduler_facade_is_immutable"):
+        del cast(Any, facade)._registry
+    with pytest.raises(TypeError, match="scheduler_facade_is_not_copyable"):
+        copy.copy(facade)
+    with pytest.raises(TypeError, match="scheduler_facade_is_not_copyable"):
+        copy.deepcopy(facade)
+    with pytest.raises(TypeError, match="scheduler_facade_is_not_serializable"):
+        pickle.dumps(facade)
+
+
+async def test_durable_scheduler_facade_uses_exact_production_definitions(
+    runtime_graph: _RuntimeGraph,
+) -> None:
+    settings = _settings()
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=runtime_graph.scheduler,
+        worker_api=runtime_graph.worker_api,
+        lease_manager=runtime_graph.lease_manager,
+        commands=runtime_graph.commands,
+        execution=runtime_graph.execution,
+        settlement=runtime_graph.settlement,
+        reconciliation=runtime_graph.reconciliation,
+        outbox=runtime_graph.outbox,
+        settings=settings,
+        fail_stop=_must_not_fail_stop,
+    )
+    intervals: dict[SchedulerJobKey, int] = {
+        "operations.commands": settings.operations_command_interval_sec,
+        "operations.execution": settings.operations_execution_interval_sec,
+        "operations.settlement": settings.operations_settlement_interval_sec,
+        "operations.reconciliation": settings.operations_reconciliation_interval_sec,
+        "operations.outbox": settings.operations_outbox_interval_sec,
+    }
+    expected = tuple(
+        ScheduledJobDefinitionV1(
+            job_key=job_key,
+            interval_seconds=intervals[job_key],
+            lease_ttl_seconds=settings.worker_lease_ttl_sec,
+            max_attempts=1 if job_key in SCHEDULER_EFFECTFUL_JOB_KEYS else 3,
+            retry_base_seconds=2,
+            retry_max_seconds=8,
+            max_manual_replays=0 if job_key in SCHEDULER_EFFECTFUL_JOB_KEYS else 1,
+            enabled=True,
+        )
+        for job_key in _SCHEDULER_HANDLER_ORDER
+    )
+
+    assert facade._definitions == expected
+    assert tuple(item.job_key for item in facade._definitions) == (_SCHEDULER_HANDLER_ORDER)
+
+
+async def test_durable_scheduler_facade_serializes_convergence_and_normal_claim(
+    runtime_graph: _RuntimeGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_graph.lease_manager.current = _scheduler_outer_lease()
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=runtime_graph.scheduler,
+        worker_api=runtime_graph.worker_api,
+        lease_manager=runtime_graph.lease_manager,
+        commands=runtime_graph.commands,
+        execution=runtime_graph.execution,
+        settlement=runtime_graph.settlement,
+        reconciliation=runtime_graph.reconciliation,
+        outbox=runtime_graph.outbox,
+        settings=_settings(),
+        fail_stop=_must_not_fail_stop,
+    )
+    object.__setattr__(facade, "_converged_generation", facade._current_generation())
+    convergence_entered = asyncio.Event()
+    release_convergence = asyncio.Event()
+    normal_claim_entered = asyncio.Event()
+
+    class BlockingConvergence:
+        async def run_step(self) -> None:
+            convergence_entered.set()
+            await release_convergence.wait()
+            raise RuntimeError("convergence_probe_complete")
+
+    class NormalClaimProbe:
+        async def run_once(self) -> None:
+            normal_claim_entered.set()
+
+    def create_blocking_convergence(
+        _cls: type[ConvergeDurableSchedulerDefinitions],
+        _registry: object,
+        _definitions: object,
+        *,
+        fail_stop: object,
+    ) -> BlockingConvergence:
+        assert fail_stop is _must_not_fail_stop
+        return BlockingConvergence()
+
+    def create_normal_claim_probe(
+        _cls: type[RunDurableSchedulerOnce],
+        _registry: object,
+        *,
+        fail_stop: object,
+    ) -> NormalClaimProbe:
+        assert fail_stop is _must_not_fail_stop
+        return NormalClaimProbe()
+
+    monkeypatch.setattr(
+        ConvergeDurableSchedulerDefinitions,
+        "_effect_authorized",
+        classmethod(create_blocking_convergence),
+    )
+    monkeypatch.setattr(
+        RunDurableSchedulerOnce,
+        "_effect_authorized",
+        classmethod(create_normal_claim_probe),
+    )
+
+    convergence_task = asyncio.create_task(facade.converge_step())
+    await convergence_entered.wait()
+    assert facade._converged_generation is None
+
+    normal_claim_task = asyncio.create_task(facade.run_once())
+    await asyncio.sleep(0)
+    assert not normal_claim_entered.is_set()
+
+    release_convergence.set()
+    with pytest.raises(RuntimeError, match="convergence_probe_complete"):
+        await convergence_task
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_definitions_not_converged_for_outer_lease",
+    ):
+        await normal_claim_task
+    assert not normal_claim_entered.is_set()
+
+
+async def test_durable_scheduler_facade_treats_returned_fail_stop_as_base_exception(
+    runtime_graph: _RuntimeGraph,
+) -> None:
+    reasons: list[str] = []
+
+    def returning_fail_stop(reason: str) -> None:
+        reasons.append(reason)
+
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=runtime_graph.scheduler,
+        worker_api=runtime_graph.worker_api,
+        lease_manager=runtime_graph.lease_manager,
+        commands=runtime_graph.commands,
+        execution=runtime_graph.execution,
+        settlement=runtime_graph.settlement,
+        reconciliation=runtime_graph.reconciliation,
+        outbox=runtime_graph.outbox,
+        settings=_settings(),
+        fail_stop=cast(Any, returning_fail_stop),
+    )
+    object.__setattr__(facade, "_issuance", object())
+
+    with pytest.raises(SchedulerInvocationFailStopReturned):
+        await facade.run_once()
+    assert reasons == ["scheduler_facade_integrity_changed"]
+
+
+async def test_durable_scheduler_facade_fail_stops_on_lock_state_corruption(
+    runtime_graph: _RuntimeGraph,
+) -> None:
+    reasons: list[str] = []
+
+    def returning_fail_stop(reason: str) -> None:
+        reasons.append(reason)
+
+    facade = create_supabase_durable_scheduler_facade(
+        scheduler=runtime_graph.scheduler,
+        worker_api=runtime_graph.worker_api,
+        lease_manager=runtime_graph.lease_manager,
+        commands=runtime_graph.commands,
+        execution=runtime_graph.execution,
+        settlement=runtime_graph.settlement,
+        reconciliation=runtime_graph.reconciliation,
+        outbox=runtime_graph.outbox,
+        settings=_settings(),
+        fail_stop=cast(Any, returning_fail_stop),
+    )
+    await facade._operation_lock.acquire()
+    try:
+        with pytest.raises(SchedulerInvocationFailStopReturned):
+            await facade.run_once()
+    finally:
+        facade._operation_lock.release()
+
+    assert reasons == ["scheduler_facade_operation_lock_corrupt"]
+
+
+def test_raw_scheduler_binding_factory_is_not_public() -> None:
+    assert not hasattr(
+        capability_factory,
+        "create_supabase_scheduler_job_bindings",
+    )
+    assert not hasattr(
+        capability_factory,
+        "create_supabase_scheduler_binding_registry",
+    )
+
+
+async def test_generic_handler_cannot_self_mint_registry_authority(
+    runtime_graph: _RuntimeGraph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = runtime_graph.issue()
+    registry = _create_supabase_scheduler_binding_registry(capability)
+
+    async def arbitrary_handler(_permit: SchedulerInvocationPermit) -> None:
+        await asyncio.sleep(0)
+
+    arbitrary_entries = tuple(
+        (
+            job_key,
+            arbitrary_handler,
+            SCHEDULER_RESULT_VALIDATORS[job_key],
+        )
+        for job_key in _SCHEDULER_HANDLER_ORDER
+    )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_runtime_dispatch_registry_provenance_is_invalid",
+    ):
+        deadline_module._issue_scheduler_dispatch_registry_seal(
+            capability,
+            arbitrary_entries,
+            runtime_provenance=object(),
+        )
+    with pytest.raises(SchedulerInvariantError, match="binding_registry"):
+        cast(Any, capability)._issue_dispatch_registry_seal(object())
+
+    permit, invocation_binding, run_task = await _capture_runtime_permit(
+        runtime_graph,
+        capability,
+        monkeypatch,
+        "operations.commands",
+        effect_issuer=arbitrary_handler,
+        dispatch_registry_seal=None,
+    )
+    try:
+        with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
+            issue_scheduler_invocation_effect_authorization(
+                capability,
+                permit,
+                invocation_binding,
+                expected_job_key="operations.commands",
+                effect_issuer=arbitrary_handler,
+                dispatch_registry_seal=registry._seal,
+            )
+        assert revoked.value.reason == "binding_mismatch"
+    finally:
+        await _cancel_runtime_permit(run_task)
+
+
+async def test_registry_revalidation_rejects_runtime_provenance_drift(
+    runtime_graph: _RuntimeGraph,
+) -> None:
+    capability = runtime_graph.issue()
+    registry = _create_supabase_scheduler_binding_registry(capability)
+    object.__setattr__(
+        cast(Any, capability),
+        "_dispatch_registry_provenance",
+        object(),
+    )
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_runtime_dispatch_registry_provenance_is_invalid",
+    ):
+        registry.assert_intact()
 
 
 @pytest.mark.parametrize(
@@ -382,13 +698,15 @@ async def test_scheduler_binding_dispatches_only_its_fixed_scheduled_stage(
     scheduled_method: str,
 ) -> None:
     capability = runtime_graph.issue()
-    bindings = create_supabase_scheduler_job_bindings(capability)
+    registry = _create_supabase_scheduler_binding_registry(capability)
+    bindings = registry._bindings
     permit, invocation_binding, run_task = await _capture_runtime_permit(
         runtime_graph,
         capability,
         monkeypatch,
         job_key,
         effect_issuer=bindings[job_key].handler,
+        dispatch_registry_seal=registry._seal,
     )
     stage = getattr(runtime_graph, stage_attribute)
     marker = object()
@@ -423,15 +741,15 @@ async def test_effect_runtime_rejects_structural_fake_with_the_exact_issuer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     capability = runtime_graph.issue()
-    binding = create_supabase_scheduler_job_bindings(capability)[
-        "operations.commands"
-    ]
+    registry = _create_supabase_scheduler_binding_registry(capability)
+    binding = registry._bindings["operations.commands"]
     permit, invocation_binding, run_task = await _capture_runtime_permit(
         runtime_graph,
         capability,
         monkeypatch,
         "operations.commands",
         effect_issuer=binding.handler,
+        dispatch_registry_seal=registry._seal,
     )
 
     class StructuralFake:
@@ -455,6 +773,7 @@ async def test_effect_runtime_rejects_structural_fake_with_the_exact_issuer(
                 invocation_binding,
                 expected_job_key="operations.commands",
                 effect_issuer=binding.handler,
+                dispatch_registry_seal=registry._seal,
             )
         assert revoked.value.reason == "binding_mismatch"
     finally:
@@ -468,15 +787,17 @@ async def test_effect_runtime_rejects_cross_graph_handler_with_same_metadata(
     second_graph = _runtime_graph()
     first_capability = runtime_graph.issue()
     second_capability = second_graph.issue()
-    second_binding = create_supabase_scheduler_job_bindings(second_capability)[
-        "operations.commands"
-    ]
+    first_registry = _create_supabase_scheduler_binding_registry(first_capability)
+    first_binding = first_registry._bindings["operations.commands"]
+    second_registry = _create_supabase_scheduler_binding_registry(second_capability)
+    second_binding = second_registry._bindings["operations.commands"]
     permit, invocation_binding, run_task = await _capture_runtime_permit(
         runtime_graph,
         first_capability,
         monkeypatch,
         "operations.commands",
-        effect_issuer=second_binding.handler,
+        effect_issuer=first_binding.handler,
+        dispatch_registry_seal=first_registry._seal,
     )
     try:
         with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
@@ -544,13 +865,15 @@ async def test_scheduler_handler_blocks_runtime_drift_before_stage_effect(
     mutate_runtime: _RuntimeAuthorizationMutation,
 ) -> None:
     capability = runtime_graph.issue()
-    bindings = create_supabase_scheduler_job_bindings(capability)
+    registry = _create_supabase_scheduler_binding_registry(capability)
+    bindings = registry._bindings
     permit, invocation_binding, run_task = await _capture_runtime_permit(
         runtime_graph,
         capability,
         monkeypatch,
         "operations.commands",
         effect_issuer=bindings["operations.commands"].handler,
+        dispatch_registry_seal=registry._seal,
     )
     effect_reached = False
 
@@ -752,9 +1075,7 @@ def _change_unknown_port(graph: _RuntimeGraph) -> None:
 
 
 def _change_unknown_provider(graph: _RuntimeGraph) -> None:
-    cast(Any, graph.reconciliation.unknown).lease_provider = (
-        lambda: graph.lease_manager.current
-    )
+    cast(Any, graph.reconciliation.unknown).lease_provider = lambda: graph.lease_manager.current
 
 
 def _change_generic_port(graph: _RuntimeGraph) -> None:
@@ -762,9 +1083,7 @@ def _change_generic_port(graph: _RuntimeGraph) -> None:
 
 
 def _change_generic_provider(graph: _RuntimeGraph) -> None:
-    cast(Any, graph.reconciliation.generic).lease_provider = (
-        lambda: graph.lease_manager.current
-    )
+    cast(Any, graph.reconciliation.generic).lease_provider = lambda: graph.lease_manager.current
 
 
 def _change_reconciliation_recovery(graph: _RuntimeGraph) -> None:
@@ -883,8 +1202,8 @@ async def test_capability_rejects_outbox_effective_transport_replacement(
         client._transport = replacement
 
         with pytest.raises(
-                SchedulerInvariantError,
-                match="scheduler_http_client_route",
+            SchedulerInvariantError,
+            match="scheduler_http_client_route",
         ):
             capability.assert_intact()
     finally:
@@ -911,8 +1230,8 @@ async def test_capability_rejects_instance_shadowed_outbox_send(
         client.send = replacement_send
 
         with pytest.raises(
-                SchedulerInvariantError,
-                match="scheduler_http_client_route",
+            SchedulerInvariantError,
+            match="scheduler_http_client_route",
         ):
             capability.assert_intact()
     finally:

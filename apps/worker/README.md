@@ -51,10 +51,10 @@ py -m pytest app/tests/unit/test_toss_readonly.py -q
 
 ## V2 control/operations runtime
 
-이 runtime 자체는 trading candidate를 만들지 않습니다. command, execution,
-cash settlement, reconciliation(승인된 Unknown V2 전용 apply 포함), alert outbox를
-독립 cadence로 실행합니다. 안정적인 UUID worker identity를 배포 설정으로
-고정해야 합니다.
+이 runtime 자체는 trading candidate를 만들지 않습니다. 내구성 스케줄러가
+command, execution, cash settlement, reconciliation(승인된 Unknown V2 전용 apply
+포함), alert outbox의 cadence와 재시작 복구를 직렬화합니다. 안정적인 UUID worker
+identity를 배포 설정으로 고정해야 합니다.
 
 ```powershell
 $env:EXECUTION_V2_ENABLED="true"
@@ -66,11 +66,13 @@ $env:SUPABASE_SECRET_KEY="<worker-only-secret>"
 py -m app.tools.run_execution_v2_operations
 ```
 
-지속 loop로 실행할 때만 명시적으로 `--loop`를 사용합니다.
+위 도구는 정의 수렴과 최대 한 건의 정상 claim만 수행하는 진단용 단일 cycle입니다.
+지속 실행은 배포 worker의 `py -m app.main` 진입점이 담당하며, 호출자가 별도의
+`--loop` 또는 `--interval-sec` cadence를 주입할 수 없습니다.
 
-```powershell
-py -m app.tools.run_execution_v2_operations --loop --interval-sec 30
-```
+현재 `render.yaml`의 V2 runtime 플래그는 비활성 상태를 유지합니다. 내구성
+스케줄러가 현재 deployment lock과 target SHA를 읽고 모든 신규 claim을 멈췄다는
+증거 계약이 배포되기 전에는 프로덕션에서 해당 플래그를 활성화하지 않습니다.
 
 로컬 환경에서 `ALERT_WEBHOOK_URL`이 없으면 outbox 항목은 전달 완료로 가장하지
 않고 retryable failure로 기록됩니다. `ENV=production|prod`에서는 URL과 current

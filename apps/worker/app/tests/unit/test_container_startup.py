@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -14,9 +14,6 @@ from app.adapters.persistence.execution_kernel_v2 import InMemoryExecutionKernel
 from app.adapters.persistence.supabase_paper_execution_source import (
     SupabasePaperExecutionCommandSource,
 )
-from app.adapters.persistence.unavailable_paper_execution_source import (
-    UnavailablePaperExecutionCommandSource,
-)
 from app.application.use_cases.apply_unknown_execution_resolutions_v2 import (
     ApplyUnknownExecutionResolutionsV2,
     RunExecutionReconciliationStageV2,
@@ -24,7 +21,7 @@ from app.application.use_cases.apply_unknown_execution_resolutions_v2 import (
 from app.application.use_cases.reconcile_execution_v2 import ReconcileExecutionV2
 from app.application.use_cases.run_execution_supervisor_v2 import RunExecutionSupervisorV2
 from app.config import Settings
-from app.container import build_container, build_operations_v2_runtime
+from app.container import OperationsV2Runtime, build_container, build_operations_v2_runtime
 from app.infrastructure.graceful_shutdown import ShutdownFlag
 
 
@@ -90,6 +87,7 @@ async def test_operations_runtime_wires_real_v2_executor_into_execution_stage(
         "SupabasePaperExecutionCommandSource",
         FakePaperExecutionSource,
     )
+    graph = _patch_durable_scheduler(monkeypatch)
     settings = Settings(
         EXECUTION_V2_ENABLED=True,
         EXECUTION_V2_WORKER_API_ENABLED=True,
@@ -98,17 +96,17 @@ async def test_operations_runtime_wires_real_v2_executor_into_execution_stage(
     )
 
     runtime = build_operations_v2_runtime(settings, ShutdownFlag())
-    supervisor = cast(
-        RunExecutionSupervisorV2,
-        runtime.operations_loop.run_operations.execution,
-    )
+    supervisor = cast(RunExecutionSupervisorV2, graph["execution"])
 
     assert supervisor.execution is runtime.run_execution_v2
     assert runtime.run_execution_v2.durable_port is runtime.worker_api
     assert isinstance(runtime.execution_source, FakePaperExecutionSource)
     assert supervisor.source is runtime.execution_source
+    assert not hasattr(runtime.scheduler_loop, "runtime")
+    assert cast(Any, runtime.scheduler_loop)._runtime is graph["facade"]
     await runtime.close()
     assert runtime.execution_source.closed is True
+    assert cast(FakeDurableScheduler, runtime.scheduler).closed is True
     assert cast(FakeWorkerApi, runtime.worker_api).closed is True
 
 
@@ -121,6 +119,7 @@ async def test_operations_runtime_wires_dedicated_unknown_resolution_stage(
         "SupabasePaperExecutionCommandSource",
         FakePaperExecutionSource,
     )
+    graph = _patch_durable_scheduler(monkeypatch)
     settings = Settings(
         EXECUTION_V2_ENABLED=True,
         EXECUTION_V2_WORKER_API_ENABLED=True,
@@ -129,10 +128,7 @@ async def test_operations_runtime_wires_dedicated_unknown_resolution_stage(
     )
 
     runtime = build_operations_v2_runtime(settings, ShutdownFlag())
-    stage = cast(
-        RunExecutionReconciliationStageV2,
-        runtime.operations_loop.run_operations.reconciliation,
-    )
+    stage = cast(RunExecutionReconciliationStageV2, graph["reconciliation"])
     unknown = cast(ApplyUnknownExecutionResolutionsV2, stage.unknown)
     generic = cast(ReconcileExecutionV2, stage.generic)
 
@@ -142,22 +138,17 @@ async def test_operations_runtime_wires_dedicated_unknown_resolution_stage(
     await runtime.close()
 
 
-def test_contract_test_operations_runtime_keeps_paper_source_fail_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(container_module, "SupabaseWorkerApi", FakeWorkerApi)
+def test_contract_test_operations_runtime_is_rejected_before_composition() -> None:
     settings = Settings(
-        MOCK_PROVIDERS=True,
         EXECUTION_V2_ENABLED=True,
-        EXECUTION_V2_ENVIRONMENT="contract_test",
         EXECUTION_V2_WORKER_API_ENABLED=True,
         EXECUTION_V2_WORKER_ID="00000000-0000-4000-8000-000000000001",
-        EXECUTION_V2_ACCOUNT_ID="contract-test-primary",
+        EXECUTION_V2_ACCOUNT_ID="paper-primary",
     )
+    settings.execution_v2_environment = "contract_test"
 
-    runtime = build_operations_v2_runtime(settings, ShutdownFlag())
-
-    assert isinstance(runtime.execution_source, UnavailablePaperExecutionCommandSource)
+    with pytest.raises(ValueError, match="worker_api_runtime_requires_paper_environment"):
+        build_operations_v2_runtime(settings, ShutdownFlag())
 
 
 async def test_main_receiver_key_ring_is_wired_to_legacy_and_outbox_paths(
@@ -182,15 +173,20 @@ async def test_main_receiver_key_ring_is_wired_to_legacy_and_outbox_paths(
     )
 
     monkeypatch.setattr(container_module, "SupabaseWorkerApi", FakeWorkerApi)
+    monkeypatch.setattr(
+        container_module,
+        "SupabasePaperExecutionCommandSource",
+        FakePaperExecutionSource,
+    )
+    _patch_durable_scheduler(monkeypatch)
     operations = build_operations_v2_runtime(
         Settings.model_validate(
             webhook_values
             | {
                 "EXECUTION_V2_ENABLED": True,
-                "EXECUTION_V2_ENVIRONMENT": "contract_test",
                 "EXECUTION_V2_WORKER_API_ENABLED": True,
                 "EXECUTION_V2_WORKER_ID": ("00000000-0000-4000-8000-000000000001"),
-                "EXECUTION_V2_ACCOUNT_ID": "contract-test-primary",
+                "EXECUTION_V2_ACCOUNT_ID": "paper-primary",
             }
         ),
         ShutdownFlag(),
@@ -220,6 +216,33 @@ def test_mutated_production_settings_are_rechecked_at_container_composition() ->
         build_container(settings, ShutdownFlag())
 
 
+async def test_operations_runtime_close_attempts_every_resource_once() -> None:
+    lifecycle: list[str] = []
+    source = FakeCloseResource("source", lifecycle)
+    destination = FakeCloseResource(
+        "destination",
+        lifecycle,
+        failure=RuntimeError("destination_close_failed"),
+    )
+    scheduler = FakeCloseResource("scheduler", lifecycle)
+    worker_api = FakeCloseResource("worker_api", lifecycle)
+    runtime = OperationsV2Runtime(
+        scheduler_loop=cast(Any, object()),
+        worker_api=cast(Any, worker_api),
+        scheduler=cast(Any, scheduler),
+        destination=cast(Any, destination),
+        run_execution_v2=cast(Any, object()),
+        execution_source=cast(Any, source),
+    )
+
+    with pytest.raises(RuntimeError, match="destination_close_failed"):
+        await runtime.close()
+
+    assert lifecycle == ["source", "destination", "scheduler", "worker_api"]
+    await runtime.close()
+    assert lifecycle == ["source", "destination", "scheduler", "worker_api"]
+
+
 class FakeWorkerApi:
     release_sha = "a" * 40
 
@@ -229,6 +252,9 @@ class FakeWorkerApi:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def record_worker_heartbeat(self, **_kwargs: object) -> object:
+        return object()
 
 
 class FakePaperExecutionSource(SupabasePaperExecutionCommandSource):
@@ -246,3 +272,71 @@ class FakePaperExecutionSource(SupabasePaperExecutionCommandSource):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class FakeDurableScheduler:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        release_sha: str,
+    ) -> None:
+        del settings
+        assert release_sha == "a" * 40
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeDurableFacade:
+    def assert_intact(self) -> None:
+        return None
+
+    async def converge_step(self) -> object:
+        raise AssertionError("container_test_must_not_run_scheduler")
+
+    async def run_once(self) -> object:
+        raise AssertionError("container_test_must_not_run_scheduler")
+
+
+class FakeCloseResource:
+    def __init__(
+        self,
+        name: str,
+        lifecycle: list[str],
+        *,
+        failure: BaseException | None = None,
+    ) -> None:
+        self.name = name
+        self.lifecycle = lifecycle
+        self.failure = failure
+
+    async def close(self) -> None:
+        self.lifecycle.append(self.name)
+        if self.failure is not None:
+            raise self.failure
+
+
+def _patch_durable_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    graph: dict[str, object] = {}
+    facade = FakeDurableFacade()
+
+    def create_facade(**kwargs: object) -> FakeDurableFacade:
+        graph.update(kwargs)
+        graph["facade"] = facade
+        return facade
+
+    monkeypatch.setattr(
+        container_module,
+        "SupabaseDurableScheduler",
+        FakeDurableScheduler,
+    )
+    monkeypatch.setattr(
+        container_module,
+        "create_supabase_durable_scheduler_facade",
+        create_facade,
+    )
+    return graph

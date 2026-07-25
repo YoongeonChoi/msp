@@ -721,21 +721,21 @@ async def test_worker_api_rejects_ok_heartbeat_without_completion_evidence() -> 
     assert calls == 0
 
 
-async def test_worker_api_accepts_complete_independent_scheduler_heartbeat() -> None:
+async def test_worker_api_accepts_complete_durable_scheduler_heartbeat() -> None:
     seen_payloads: list[object] = []
     worker_id = "00000000-0000-4000-8000-000000000001"
     now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
-    stage_time = (now - timedelta(seconds=1)).isoformat()
+    job_time = (now - timedelta(seconds=1)).isoformat()
     details: JsonObject = {
         "component": "operations_v2",
-        "checkpoint": "independent_scheduler_running",
+        "checkpoint": "durable_scheduler_running",
         "completed_at": now.isoformat(),
-        "stage_last_completed_at": {
-            "commands": stage_time,
-            "execution": stage_time,
-            "settlement": stage_time,
-            "reconciliation": stage_time,
-            "outbox": stage_time,
+        "job_last_succeeded_at": {
+            "operations.commands": job_time,
+            "operations.execution": job_time,
+            "operations.settlement": job_time,
+            "operations.reconciliation": job_time,
+            "operations.outbox": job_time,
         },
     }
 
@@ -745,7 +745,7 @@ async def test_worker_api_accepts_complete_independent_scheduler_heartbeat() -> 
             200,
             json=[
                 {
-                    "heartbeat_id": "00000000-0000-4000-8000-000000000004",
+                    "heartbeat_id": "00000000-0000-4000-8000-000000000005",
                     "created_at": now.isoformat(),
                 }
             ],
@@ -775,7 +775,7 @@ async def test_worker_api_accepts_complete_independent_scheduler_heartbeat() -> 
     ]
 
 
-async def test_worker_api_rejects_incomplete_scheduler_heartbeat_before_network() -> None:
+async def test_worker_api_rejects_incomplete_durable_scheduler_heartbeat() -> None:
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -784,6 +784,13 @@ async def test_worker_api_rejects_incomplete_scheduler_heartbeat_before_network(
         return httpx.Response(500)
 
     now = datetime(2026, 7, 14, 9, 0, 30, tzinfo=UTC)
+    job_times: JsonObject = {
+        "operations.commands": now.isoformat(),
+        "operations.execution": now.isoformat(),
+        "operations.settlement": now.isoformat(),
+        "operations.reconciliation": now.isoformat(),
+        "operations.outbox": None,
+    }
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         adapter = SupabaseWorkerApi(
             _enabled_settings(),
@@ -792,22 +799,16 @@ async def test_worker_api_rejects_incomplete_scheduler_heartbeat_before_network(
         )
         with pytest.raises(
             ExecutionInvariantError,
-            match="scheduler_heartbeat_stages_invalid",
+            match="durable_scheduler_heartbeat_jobs_invalid",
         ):
             await adapter.record_worker_heartbeat(
                 worker_id="00000000-0000-4000-8000-000000000001",
                 status="ok",
                 details={
                     "component": "operations_v2",
-                    "checkpoint": "independent_scheduler_running",
+                    "checkpoint": "durable_scheduler_running",
                     "completed_at": now.isoformat(),
-                    "stage_last_completed_at": {
-                        "commands": now.isoformat(),
-                        "execution": now.isoformat(),
-                        "settlement": now.isoformat(),
-                        "reconciliation": now.isoformat(),
-                        "outbox": None,
-                    },
+                    "job_last_succeeded_at": job_times,
                 },
                 now=now,
             )

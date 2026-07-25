@@ -31,6 +31,8 @@ from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationSettlementWindowExceeded,
     _claim_scheduler_invocation_with_clock,
     _converge_scheduler_definition_invocation_with_clock,
+    _issue_scheduler_dispatch_registry_seal,
+    _SchedulerDispatchRegistrySeal,
     begin_scheduler_invocation_settlement,
     complete_scheduler_invocation_settlement,
     fail_scheduler_invocation_settlement,
@@ -64,9 +66,48 @@ _HOLDER_ID = "33333333-3333-4333-8333-333333333333"
 _RELEASE_SHA = "a" * 40
 _PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "b" * 64
 _OTHER_PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "c" * 64
+_TEST_DISPATCH_REGISTRY_ORDER: tuple[SchedulerJobKey, ...] = (
+    "operations.commands",
+    "operations.execution",
+    "operations.settlement",
+    "operations.reconciliation",
+    "operations.outbox",
+)
 
 
 _Clock = deadline_module._SchedulerTestMonotonicClock
+
+
+async def _unused_scheduler_effect_issuer(_permit: object) -> None:
+    raise AssertionError("unused scheduler effect issuer was invoked")
+
+
+def _validate_test_scheduler_result(_value: object) -> None:
+    return None
+
+
+def _issue_test_dispatch_registry_seal(
+    runtime: _RuntimeStub,
+    *,
+    job_key: SchedulerJobKey,
+    effect_issuer: object,
+) -> _SchedulerDispatchRegistrySeal:
+    return _issue_scheduler_dispatch_registry_seal(
+        cast(Any, runtime),
+        tuple(
+            (
+                registered_job_key,
+                (
+                    effect_issuer
+                    if registered_job_key == job_key
+                    else _unused_scheduler_effect_issuer
+                ),
+                _validate_test_scheduler_result,
+            )
+            for registered_job_key in _TEST_DISPATCH_REGISTRY_ORDER
+        ),
+        runtime_provenance=runtime.dispatch_registry_provenance,
+    )
 
 
 class _ManualWaiter:
@@ -217,6 +258,7 @@ class _RuntimeStub:
     integrity_checks: int
     outer_lease: WorkerLease
     scheduler_port: Any
+    dispatch_registry_provenance: object
 
     def __init__(self, port: _SchedulerPortStub, outer_lease: WorkerLease) -> None:
         self.scheduler_port = cast(Any, port)
@@ -226,12 +268,19 @@ class _RuntimeStub:
         self.release_sha = _RELEASE_SHA
         self.persistence_authority = _PERSISTENCE_AUTHORITY
         self.integrity_checks = 0
+        self.dispatch_registry_provenance = object()
 
     def assert_intact(self) -> None:
         self.integrity_checks += 1
 
     def current_outer_lease(self) -> WorkerLease:
         return self.outer_lease
+
+    def _assert_dispatch_registry_provenance(self, value: object) -> None:
+        if value is not self.dispatch_registry_provenance:
+            raise SchedulerInvariantError(
+                "scheduler_dispatch_registry_runtime_provenance_is_invalid"
+            )
 
 
 def _definition(job_key: SchedulerJobKey) -> ScheduledJobDefinitionV1:
@@ -436,11 +485,17 @@ async def _capture_active_effect_authorization(
             invocation.binding,
             expected_job_key=job_key,
             effect_issuer=handler,
+            dispatch_registry_seal=dispatch_registry_seal,
         )
         captured.append((authorization, permit))
         started.set()
         await asyncio.Event().wait()
 
+    dispatch_registry_seal = _issue_test_dispatch_registry_seal(
+        runtime,
+        job_key=job_key,
+        effect_issuer=handler,
+    )
     run_task = asyncio.create_task(
         run_with_scheduler_deadline(
             handler,
@@ -448,6 +503,7 @@ async def _capture_active_effect_authorization(
             wait_until=_ManualWaiter(),
             fail_stop=_must_not_fail_stop,
             effect_runtime=cast(Any, runtime),
+            dispatch_registry_seal=dispatch_registry_seal,
         )
     )
     await started.wait()
@@ -1163,6 +1219,7 @@ async def test_deadline_and_permit_reject_public_self_minting() -> None:
             deadline,
             effect_issuer=lambda _permit: None,
             effect_runtime=None,
+            dispatch_registry_seal=None,
             _issuance=object(),
         )
 
@@ -1215,6 +1272,77 @@ async def test_permit_is_immutable_non_copyable_and_non_serializable() -> None:
     ):
         pickle.dumps(permit)
     await _cancel_run(run_task)
+
+
+async def test_effect_runtime_without_dispatch_registry_seal_is_rejected() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+    handler_called = False
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        nonlocal handler_called
+        handler_called = True
+
+    with pytest.raises(_FailStopTriggered) as rejected:
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_raise_fail_stop,
+            effect_runtime=cast(Any, runtime),
+        )
+
+    assert rejected.value.reason == "scheduler_dispatch_registry_authority_invalid"
+    assert not handler_called
+
+
+async def test_dispatch_registry_seal_rejects_unknown_runtime_provenance() -> None:
+    _invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_dispatch_registry_runtime_provenance_is_invalid",
+    ):
+        _issue_scheduler_dispatch_registry_seal(
+            cast(Any, runtime),
+            tuple(
+                (
+                    job_key,
+                    _unused_scheduler_effect_issuer,
+                    _validate_test_scheduler_result,
+                )
+                for job_key in _TEST_DISPATCH_REGISTRY_ORDER
+            ),
+            runtime_provenance=object(),
+        )
+
+
+async def test_registry_provenance_drift_has_exact_fail_stop_reason() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+    handler_called = False
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        nonlocal handler_called
+        handler_called = True
+
+    seal = _issue_test_dispatch_registry_seal(
+        runtime,
+        job_key="operations.commands",
+        effect_issuer=handler,
+    )
+    runtime.dispatch_registry_provenance = object()
+
+    with pytest.raises(_FailStopTriggered) as rejected:
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_raise_fail_stop,
+            effect_runtime=cast(Any, runtime),
+            dispatch_registry_seal=seal,
+        )
+
+    assert rejected.value.reason == "scheduler_dispatch_registry_authority_invalid"
+    assert not handler_called
 
 
 async def test_effect_authorization_is_exact_immutable_and_non_transferable() -> None:
@@ -1301,6 +1429,7 @@ async def test_effect_authorization_rejects_wrong_job_and_cross_run_binding() ->
             second_binding,
             expected_job_key="operations.commands",
             effect_issuer=cast(Any, first_permit)._effect_issuer,
+            dispatch_registry_seal=cast(Any, first_permit)._dispatch_registry_seal,
         )
     assert cross_run.value.reason == "binding_mismatch"
 
@@ -1323,8 +1452,69 @@ async def test_effect_authorization_rejects_a_different_issuer_identity() -> Non
             binding,
             expected_job_key="operations.commands",
             effect_issuer=cloned_handler,
+            dispatch_registry_seal=cast(Any, permit)._dispatch_registry_seal,
         )
     assert wrong_issuer.value.reason == "binding_mismatch"
+    with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+    assert revoked.value.reason == "binding_mismatch"
+
+    await _cancel_run(run_task)
+
+
+async def test_effect_authorization_rejects_a_different_registry_seal() -> None:
+    authorization, permit, binding, runtime, run_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+    effect_issuer = cast(Any, permit)._effect_issuer
+    different_seal = _issue_test_dispatch_registry_seal(
+        runtime,
+        job_key="operations.commands",
+        effect_issuer=effect_issuer,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as wrong_seal:
+        issue_scheduler_invocation_effect_authorization(
+            cast(Any, runtime),
+            permit,
+            binding,
+            expected_job_key="operations.commands",
+            effect_issuer=effect_issuer,
+            dispatch_registry_seal=different_seal,
+        )
+    assert wrong_seal.value.reason == "binding_mismatch"
+    with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
+        require_scheduler_invocation_effect_authorization(
+            authorization,
+            expected_job_key="operations.commands",
+        )
+    assert revoked.value.reason == "binding_mismatch"
+
+    await _cancel_run(run_task)
+
+
+async def test_effect_authorization_rejects_a_different_runtime_identity() -> None:
+    authorization, permit, binding, runtime, run_task = (
+        await _capture_active_effect_authorization(_Clock(100.0))
+    )
+    different_runtime = _RuntimeStub(
+        cast(_SchedulerPortStub, runtime.scheduler_port),
+        runtime.outer_lease,
+    )
+
+    with pytest.raises(SchedulerInvocationPermitRevoked) as wrong_runtime:
+        issue_scheduler_invocation_effect_authorization(
+            cast(Any, different_runtime),
+            permit,
+            binding,
+            expected_job_key="operations.commands",
+            effect_issuer=cast(Any, permit)._effect_issuer,
+            dispatch_registry_seal=cast(Any, permit)._dispatch_registry_seal,
+        )
+    assert wrong_runtime.value.reason == "binding_mismatch"
     with pytest.raises(SchedulerInvocationPermitRevoked) as revoked:
         require_scheduler_invocation_effect_authorization(
             authorization,
@@ -1348,10 +1538,16 @@ async def test_effect_authorization_is_revoked_after_handler_exit() -> None:
                 invocation.binding,
                 expected_job_key="operations.commands",
                 effect_issuer=handler,
+                dispatch_registry_seal=dispatch_registry_seal,
             )
         )
         return "completed"
 
+    dispatch_registry_seal = _issue_test_dispatch_registry_seal(
+        runtime,
+        job_key="operations.commands",
+        effect_issuer=handler,
+    )
     assert (
         await run_with_scheduler_deadline(
             handler,
@@ -1359,6 +1555,7 @@ async def test_effect_authorization_is_revoked_after_handler_exit() -> None:
             wait_until=_ManualWaiter(),
             fail_stop=_must_not_fail_stop,
             effect_runtime=cast(Any, runtime),
+            dispatch_registry_seal=dispatch_registry_seal,
         )
         == "completed"
     )
