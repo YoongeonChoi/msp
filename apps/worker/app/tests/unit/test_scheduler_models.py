@@ -61,6 +61,7 @@ def test_scheduler_retry_receipt_preserves_original_transition_schedule() -> Non
         observed_at=NOW + timedelta(seconds=30),
     )
 
+    assert receipt.next_attempt_at is not None
     assert receipt.next_attempt_at < receipt.observed_at
     assert scheduler_retry_delay(definition, 4) == timedelta(seconds=8)
 
