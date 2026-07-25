@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -25,8 +26,11 @@ from app.domain.common.errors import KnownFailClosedError
 from app.domain.execution_v2.models import WorkerLease
 from app.domain.scheduler.models import (
     SCHEDULER_JOB_KEYS,
+    SCHEDULER_RETRYABLE_REASONS,
     ScheduledJobClaimV1,
+    ScheduledJobCompletionReceiptV1,
     ScheduledJobDefinitionV1,
+    ScheduledJobFailureReceiptV1,
     SchedulerDefinitionConvergenceReceiptV1,
     SchedulerInvariantError,
     SchedulerJobKey,
@@ -42,17 +46,31 @@ DeadlineWaiter = Callable[[float], Awaitable[None]]
 FailStop = Callable[[str], Never]
 type InvocationHandler[T] = Callable[["SchedulerInvocationPermit"], Awaitable[T]]
 SchedulerInvocationTimeState = Literal["active", "deadline", "clock_corrupt"]
+SchedulerInvocationSettlementState = Literal[
+    "pending",
+    "ready",
+    "authorized",
+    "dispatched_complete",
+    "dispatched_fail",
+    "expired",
+]
+SchedulerInvocationSettlementTransition = Literal["complete", "fail"]
 TimerCancellationResult = Literal["cancelled", "fired", "failed", "stalled"]
 
 SCHEDULER_INVOCATION_CANCELLATION_GRACE_SECONDS = 0.25
 SCHEDULER_INVOCATION_VALIDATION_RESERVE_SECONDS = 1.75
+SCHEDULER_INVOCATION_SETTLEMENT_START_RESERVE = timedelta(
+    seconds=DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS
+)
 SCHEDULER_INVOCATION_SETTLEMENT_RESERVE = timedelta(
     seconds=(
-        DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS
-        + SCHEDULER_INVOCATION_CANCELLATION_GRACE_SECONDS
+        SCHEDULER_INVOCATION_CANCELLATION_GRACE_SECONDS
         + SCHEDULER_INVOCATION_VALIDATION_RESERVE_SECONDS
     )
-)
+) + SCHEDULER_INVOCATION_SETTLEMENT_START_RESERVE
+
+_SCHEDULER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SCHEDULER_REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 
 
 class _SchedulerInvocationIssuance:
@@ -60,6 +78,24 @@ class _SchedulerInvocationIssuance:
 
 
 _SCHEDULER_INVOCATION_ISSUANCE = _SchedulerInvocationIssuance()
+
+
+class _SchedulerTestMonotonicClock:
+    """Exact, callback-free manual clock for deterministic scheduler tests."""
+
+    __slots__ = ("value", "fail")
+    value: float
+    fail: bool
+
+    def __init__(self, value: float) -> None:
+        _require_exact_monotonic(value, "scheduler_test_clock_is_invalid")
+        self.value = value
+        self.fail = False
+
+    def __call__(self) -> float:
+        if self.fail:
+            raise RuntimeError("scheduler_test_clock_failure")
+        return self.value
 
 
 class SchedulerClaimRpcStart:
@@ -317,6 +353,14 @@ class SchedulerInvocationDeadline:
     def monotonic_deadline(self) -> float:
         return self._monotonic_deadline
 
+    @property
+    def database_settlement_start_cutoff_at(self) -> datetime:
+        return _database_settlement_start_cutoff_for_binding(self._binding)
+
+    @property
+    def monotonic_settlement_start_deadline(self) -> float:
+        return _monotonic_settlement_start_deadline(self)
+
     def _assert_intact(self) -> None:
         try:
             if self._issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
@@ -358,6 +402,8 @@ class SchedulerClaimedInvocation:
         "_scheduler_port",
         "_persistence_authority",
         "_consumed",
+        "_settlement_baseline_monotonic",
+        "_settlement_state",
         "_issuance",
     )
     _consumed: bool
@@ -365,6 +411,8 @@ class SchedulerClaimedInvocation:
     _issuance: _SchedulerInvocationIssuance
     _persistence_authority: PersistenceAuthority
     _scheduler_port: DurableSchedulerPort
+    _settlement_baseline_monotonic: float | None
+    _settlement_state: SchedulerInvocationSettlementState
 
     def __init__(
         self,
@@ -394,6 +442,8 @@ class SchedulerClaimedInvocation:
         object.__setattr__(self, "_scheduler_port", scheduler_port)
         object.__setattr__(self, "_persistence_authority", persistence_authority)
         object.__setattr__(self, "_consumed", False)
+        object.__setattr__(self, "_settlement_baseline_monotonic", None)
+        object.__setattr__(self, "_settlement_state", "pending")
         object.__setattr__(self, "_issuance", _SCHEDULER_INVOCATION_ISSUANCE)
 
     def __setattr__(self, _name: str, _value: object) -> Never:
@@ -443,6 +493,34 @@ class SchedulerClaimedInvocation:
             self._deadline._assert_intact()
             if type(self._consumed) is not bool:
                 raise SchedulerInvariantError("scheduler_claimed_invocation_state_is_invalid")
+            if self._settlement_state not in {
+                "pending",
+                "ready",
+                "authorized",
+                "dispatched_complete",
+                "dispatched_fail",
+                "expired",
+            }:
+                raise SchedulerInvariantError("scheduler_invocation_settlement_state_is_invalid")
+            baseline = self._settlement_baseline_monotonic
+            if self._settlement_state == "pending":
+                if baseline is not None:
+                    raise SchedulerInvariantError(
+                        "scheduler_invocation_settlement_state_is_invalid"
+                    )
+            else:
+                if baseline is None:
+                    raise SchedulerInvariantError(
+                        "scheduler_invocation_settlement_state_is_invalid"
+                    )
+                _require_exact_monotonic(
+                    baseline,
+                    "scheduler_invocation_settlement_baseline_is_invalid",
+                )
+                if not self._consumed or baseline < self.deadline.rpc_started_monotonic:
+                    raise SchedulerInvariantError(
+                        "scheduler_invocation_settlement_state_is_invalid"
+                    )
             if (
                 not callable(getattr(self._scheduler_port, "claim_due_job", None))
                 or self._scheduler_port.release_sha != self.binding.release_sha
@@ -461,6 +539,21 @@ class SchedulerClaimedInvocation:
             raise SchedulerInvariantError("scheduler_claimed_invocation_is_consumed")
         object.__setattr__(self, "_consumed", True)
         return self._deadline
+
+    def _authorize_settlement(self, baseline_monotonic: float) -> None:
+        self._assert_intact()
+        _require_exact_monotonic(
+            baseline_monotonic,
+            "scheduler_invocation_settlement_baseline_is_invalid",
+        )
+        if (
+            not self._consumed
+            or self._settlement_state != "pending"
+            or baseline_monotonic < self.deadline.rpc_started_monotonic
+        ):
+            raise SchedulerInvariantError("scheduler_invocation_settlement_state_is_invalid")
+        object.__setattr__(self, "_settlement_baseline_monotonic", baseline_monotonic)
+        object.__setattr__(self, "_settlement_state", "ready")
 
 
 class SchedulerConvergenceClaimResult:
@@ -544,6 +637,179 @@ class SchedulerConvergenceClaimResult:
             raise SchedulerInvariantError("scheduler_convergence_result_is_invalid") from None
 
 
+class SchedulerInvocationSettlementAuthorization:
+    """One-shot settlement start bound to the latest same-generation lease."""
+
+    __slots__ = (
+        "_invocation",
+        "_runtime",
+        "_outer_lease",
+        "_observed_at",
+        "_issuance",
+    )
+    _invocation: SchedulerClaimedInvocation
+    _issuance: _SchedulerInvocationIssuance
+    _observed_at: datetime
+    _outer_lease: WorkerLease
+    _runtime: SchedulerRuntimeCapability
+
+    def __init__(
+        self,
+        *,
+        invocation: SchedulerClaimedInvocation,
+        runtime: SchedulerRuntimeCapability,
+        outer_lease: WorkerLease,
+        observed_at: datetime,
+        _issuance: object,
+    ) -> None:
+        if _issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+            raise SchedulerInvariantError("scheduler_settlement_authorization_is_not_issued")
+        if type(invocation) is not SchedulerClaimedInvocation:
+            raise SchedulerInvariantError("scheduler_claimed_invocation_is_not_issued")
+        canonical_outer_lease = canonical_scheduler_outer_lease(outer_lease)
+        canonical_observed_at = canonical_scheduler_datetime(
+            observed_at,
+            "scheduler_settlement_authorized_at",
+        )
+        object.__setattr__(self, "_invocation", invocation)
+        object.__setattr__(self, "_runtime", runtime)
+        object.__setattr__(self, "_outer_lease", canonical_outer_lease)
+        object.__setattr__(self, "_observed_at", canonical_observed_at)
+        object.__setattr__(self, "_issuance", _SCHEDULER_INVOCATION_ISSUANCE)
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_immutable")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_immutable")
+
+    def __copy__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_not_copyable")
+
+    def __deepcopy__(self, _memo: object) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_not_copyable")
+
+    def __reduce__(self) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_not_serializable")
+
+    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
+        raise SchedulerInvariantError("scheduler_settlement_authorization_is_not_serializable")
+
+    def _prepare_dispatch(
+        self,
+        transition: SchedulerInvocationSettlementTransition,
+        *,
+        fail_stop: FailStop,
+        failure_reason_code: str | None = None,
+        retryable: bool | None = None,
+    ) -> tuple[DurableSchedulerPort, ScheduledJobClaimV1, WorkerLease]:
+        if not callable(fail_stop):
+            raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
+        if transition not in {"complete", "fail"}:
+            raise SchedulerInvariantError("scheduler_settlement_transition_is_invalid")
+        try:
+            if self._issuance is not _SCHEDULER_INVOCATION_ISSUANCE:
+                raise SchedulerInvariantError(
+                    "scheduler_settlement_authorization_is_not_issued"
+                )
+            if type(self._invocation) is not SchedulerClaimedInvocation:
+                raise SchedulerInvariantError("scheduler_claimed_invocation_is_not_issued")
+            self._invocation._assert_intact()
+            _assert_settlement_clock_source(self._invocation)
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        except Exception:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        if self._invocation._settlement_state != "authorized":
+            raise SchedulerInvariantError("scheduler_invocation_settlement_is_consumed")
+        if transition == "fail":
+            if failure_reason_code is None or retryable is None:
+                raise SchedulerInvariantError("scheduler_settlement_failure_is_invalid")
+            if (
+                retryable
+                and failure_reason_code
+                not in SCHEDULER_RETRYABLE_REASONS[self._invocation.binding.job_key]
+            ):
+                raise SchedulerInvariantError(
+                    "scheduler_retry_classification_is_not_allowed"
+                )
+        elif failure_reason_code is not None or retryable is not None:
+            raise SchedulerInvariantError("scheduler_settlement_completion_is_invalid")
+        try:
+            _assert_settlement_runtime_identity(self._runtime, self._invocation)
+            canonical_observed_at = canonical_scheduler_datetime(
+                self._observed_at,
+                "scheduler_settlement_authorized_at",
+            )
+            canonical_outer_lease = canonical_scheduler_outer_lease(self._outer_lease)
+            current_outer_lease = canonical_scheduler_outer_lease(
+                self._runtime.current_outer_lease()
+            )
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        except Exception:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        try:
+            current = _read_monotonic(
+                self._invocation.deadline._rpc_start._monotonic_clock
+            )
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+        try:
+            _assert_settlement_runtime_identity(self._runtime, self._invocation)
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        except Exception:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        try:
+            final_current = _read_monotonic(
+                self._invocation.deadline._rpc_start._monotonic_clock
+            )
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+        if final_current < current:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+        try:
+            baseline = self._invocation._settlement_baseline_monotonic
+            if baseline is None or final_current < baseline:
+                raise SchedulerInvariantError("scheduler_settlement_clock_corrupt")
+            current_observed_at = self._invocation.deadline.claim_observed_at + timedelta(
+                seconds=final_current
+                - self._invocation.deadline.rpc_started_monotonic
+            )
+            if current_observed_at < canonical_observed_at:
+                raise SchedulerInvariantError("scheduler_settlement_clock_corrupt")
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+        except (OverflowError, TypeError, ValueError):
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+        try:
+            _refresh_same_generation_outer_lease(
+                canonical_outer_lease,
+                current_outer_lease,
+                observed_at=current_observed_at,
+            )
+        except SchedulerInvariantError:
+            _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+        if final_current >= _monotonic_settlement_start_deadline(
+            self._invocation.deadline
+        ):
+            object.__setattr__(self._invocation, "_settlement_state", "expired")
+            raise SchedulerInvocationSettlementWindowExceeded(
+                self._invocation.binding.job_key
+            )
+        object.__setattr__(
+            self._invocation,
+            "_settlement_state",
+            "dispatched_complete" if transition == "complete" else "dispatched_fail",
+        )
+        return (
+            self._invocation._scheduler_port,
+            self._invocation.claim,
+            current_outer_lease,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulerDeadlineFailure:
     reason_code: str
@@ -593,6 +859,13 @@ class SchedulerInvocationDeadlineExceeded(KnownFailClosedError):
         self.reason_code = failure.reason_code
         self.retryable = failure.retryable
         super().__init__("durable_scheduler", failure.reason_code)
+
+
+class SchedulerInvocationSettlementWindowExceeded(KnownFailClosedError):
+    def __init__(self, job_key: SchedulerJobKey) -> None:
+        self.job_key = job_key
+        self.reason_code = "scheduler_settlement_window_expired"
+        super().__init__("durable_scheduler", self.reason_code)
 
 
 class SchedulerInvocationFailStopReturned(BaseException):
@@ -758,6 +1031,150 @@ def require_scheduler_invocation_permit(
     permit = value
     permit.assert_effect_allowed(expected_binding=expected_binding)
     return permit
+
+
+def begin_scheduler_invocation_settlement(
+    runtime: SchedulerRuntimeCapability,
+    invocation: SchedulerClaimedInvocation,
+    *,
+    fail_stop: FailStop,
+) -> SchedulerInvocationSettlementAuthorization:
+    """Consume the one settlement start after handler termination is observed."""
+
+    if not callable(fail_stop):
+        raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
+    if type(invocation) is not SchedulerClaimedInvocation:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    try:
+        _assert_settlement_runtime_identity(runtime, invocation)
+        invocation._assert_intact()
+        _assert_settlement_clock_source(invocation)
+    except (SchedulerInvariantError, AttributeError, TypeError):
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    if invocation._settlement_state == "pending":
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    if invocation._settlement_state != "ready":
+        raise SchedulerInvariantError("scheduler_invocation_settlement_is_consumed")
+    baseline = invocation._settlement_baseline_monotonic
+    try:
+        current = _read_monotonic(invocation.deadline._rpc_start._monotonic_clock)
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    if baseline is None or current < baseline:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    try:
+        current_outer_lease = canonical_scheduler_outer_lease(
+            runtime.current_outer_lease()
+        )
+        _assert_settlement_runtime_identity(runtime, invocation)
+    except (SchedulerInvariantError, AttributeError, OverflowError, TypeError, ValueError):
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    try:
+        final_current = _read_monotonic(invocation.deadline._rpc_start._monotonic_clock)
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    if final_current < current or final_current < baseline:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    try:
+        _assert_settlement_runtime_identity(runtime, invocation)
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    try:
+        sealed_current = _read_monotonic(
+            invocation.deadline._rpc_start._monotonic_clock
+        )
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    if sealed_current < final_current or sealed_current < baseline:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    try:
+        observed_at = invocation.deadline.claim_observed_at + timedelta(
+            seconds=sealed_current - invocation.deadline.rpc_started_monotonic
+        )
+    except (OverflowError, TypeError, ValueError):
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_clock_corrupt")
+    try:
+        current_outer_lease = _refresh_same_generation_outer_lease(
+            invocation.outer_lease,
+            current_outer_lease,
+            observed_at=observed_at,
+        )
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    if sealed_current >= _monotonic_settlement_start_deadline(invocation.deadline):
+        object.__setattr__(invocation, "_settlement_state", "expired")
+        raise SchedulerInvocationSettlementWindowExceeded(invocation.binding.job_key)
+    object.__setattr__(invocation, "_settlement_state", "authorized")
+    try:
+        return SchedulerInvocationSettlementAuthorization(
+            invocation=invocation,
+            runtime=runtime,
+            outer_lease=current_outer_lease,
+            observed_at=observed_at,
+            _issuance=_SCHEDULER_INVOCATION_ISSUANCE,
+        )
+    except SchedulerInvariantError:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+
+
+async def complete_scheduler_invocation_settlement(
+    authorization: SchedulerInvocationSettlementAuthorization,
+    *,
+    result_sha256: str,
+    fail_stop: FailStop,
+) -> ScheduledJobCompletionReceiptV1:
+    """Start exactly one completion RPC through an unexpired authorization."""
+
+    if not callable(fail_stop):
+        raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
+    if type(authorization) is not SchedulerInvocationSettlementAuthorization:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    _require_scheduler_sha256(result_sha256, "scheduler_completion_result_sha256")
+    scheduler_port, claim, outer_lease = authorization._prepare_dispatch(
+        "complete",
+        fail_stop=fail_stop,
+    )
+    return await scheduler_port.complete_job_run(
+        claim,
+        outer_lease=outer_lease,
+        result_sha256=result_sha256,
+    )
+
+
+async def fail_scheduler_invocation_settlement(
+    authorization: SchedulerInvocationSettlementAuthorization,
+    *,
+    failure_reason_code: str,
+    failure_sha256: str,
+    retryable: bool,
+    fail_stop: FailStop,
+) -> ScheduledJobFailureReceiptV1:
+    """Start exactly one failure RPC through an unexpired authorization."""
+
+    if not callable(fail_stop):
+        raise SchedulerInvariantError("scheduler_invocation_callable_is_invalid")
+    if type(authorization) is not SchedulerInvocationSettlementAuthorization:
+        _invoke_fail_stop(fail_stop, "scheduler_settlement_provenance_invalid")
+    _require_scheduler_reason(
+        failure_reason_code,
+        "scheduler_failure_reason_code",
+    )
+    _require_scheduler_sha256(failure_sha256, "scheduler_failure_sha256")
+    if type(retryable) is not bool:
+        raise SchedulerInvariantError("scheduler_retryable_flag_is_invalid")
+    scheduler_port, claim, outer_lease = authorization._prepare_dispatch(
+        "fail",
+        fail_stop=fail_stop,
+        failure_reason_code=failure_reason_code,
+        retryable=retryable,
+    )
+    return await scheduler_port.fail_job_run(
+        claim,
+        outer_lease=outer_lease,
+        failure_reason_code=failure_reason_code,
+        failure_sha256=failure_sha256,
+        retryable=retryable,
+    )
 
 
 async def claim_scheduler_invocation(
@@ -996,6 +1413,7 @@ async def run_with_scheduler_deadline[T](
         _invoke_fail_stop(fail_stop, "scheduler_deadline_clock_corrupt")
     if initial_state == "deadline":
         permit._revoke_first_wins("deadline")
+        _authorize_scheduler_settlement(invocation, permit)
         raise SchedulerInvocationDeadlineExceeded(job_key)
 
     resolved_waiter: DeadlineWaiter = wait_until or (
@@ -1059,6 +1477,7 @@ async def run_with_scheduler_deadline[T](
                     fail_stop,
                     "scheduler_handler_cancellation_suppressed",
                 )
+            _authorize_scheduler_settlement(invocation, permit)
             raise SchedulerInvocationDeadlineExceeded(job_key)
 
         timer_result = await _cancel_timer(timer_task)
@@ -1080,14 +1499,31 @@ async def run_with_scheduler_deadline[T](
                     "scheduler_deadline_clock_corrupt_or_timer_early",
                 )
             permit._revoke_first_wins("deadline")
+            _authorize_scheduler_settlement(invocation, permit)
             raise SchedulerInvocationDeadlineExceeded(job_key)
         if permit.revocation_reason != "handler_exit":
             _invoke_fail_stop(
                 fail_stop,
                 "scheduler_invocation_permit_state_invalid",
             )
-        return await handler_task
+        try:
+            handler_result = await handler_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _authorize_scheduler_settlement(invocation, permit)
+            raise
+        _authorize_scheduler_settlement(invocation, permit)
+        return handler_result
     except asyncio.CancelledError:
+        current_task = asyncio.current_task()
+        if (
+            current_task is not None
+            and current_task.cancelling() == 0
+            and handler_task.done()
+            and handler_task.cancelled()
+        ):
+            raise
         permit._revoke_first_wins("external_cancel")
         timer_result = await _cancel_timer(timer_task)
         acknowledged = await _cancel_and_observe(
@@ -1123,6 +1559,16 @@ async def wait_until_scheduler_deadline(
         previous = current
 
 
+def _authorize_scheduler_settlement(
+    invocation: SchedulerClaimedInvocation,
+    permit: SchedulerInvocationPermit,
+) -> None:
+    permit._assert_intact()
+    if permit.revocation_reason not in {"handler_exit", "deadline"}:
+        raise SchedulerInvariantError("scheduler_invocation_settlement_state_is_invalid")
+    invocation._authorize_settlement(permit._last_monotonic)
+
+
 async def _invoke_handler[T](
     handler: InvocationHandler[T],
     permit: SchedulerInvocationPermit,
@@ -1139,7 +1585,7 @@ async def _cancel_and_observe[T](
 ) -> bool:
     if task.done() or not task.cancel():
         await asyncio.gather(task, return_exceptions=True)
-        return True
+        return _completed_handler_allows_settlement(task, allowed_reasons)
     try:
         await asyncio.wait_for(
             asyncio.shield(task),
@@ -1152,6 +1598,25 @@ async def _cancel_and_observe[T](
     except BaseException:
         return False
     return False
+
+
+def _completed_handler_allows_settlement[T](
+    task: asyncio.Task[T],
+    allowed_reasons: frozenset[str],
+) -> bool:
+    if not task.done() or task.cancelled():
+        return False
+    try:
+        error = task.exception()
+    except BaseException:
+        return False
+    if error is None:
+        return True
+    if isinstance(error, SchedulerInvocationPermitRevoked):
+        return error.reason in allowed_reasons
+    if isinstance(error, Exception):
+        return True
+    raise error
 
 
 async def _cancel_timer(
@@ -1211,6 +1676,39 @@ def _validate_invocation_context(
         raise SchedulerInvariantError("scheduler_invocation_context_binding_is_invalid")
 
 
+def _assert_settlement_runtime_identity(
+    runtime: SchedulerRuntimeCapability,
+    invocation: SchedulerClaimedInvocation,
+) -> None:
+    try:
+        runtime.assert_intact()
+        binding = invocation.binding
+        scheduler_port = runtime.scheduler_port
+        if (
+            scheduler_port is not invocation._scheduler_port
+            or runtime.account_id != binding.account_id
+            or runtime.holder_id != binding.holder_id
+            or runtime.release_sha != binding.release_sha
+            or runtime.persistence_authority != invocation.persistence_authority
+            or scheduler_port.release_sha != binding.release_sha
+            or scheduler_port.persistence_authority != invocation.persistence_authority
+        ):
+            raise SchedulerInvariantError("scheduler_settlement_runtime_identity_mismatch")
+    except SchedulerInvariantError:
+        raise
+    except Exception:
+        raise SchedulerInvariantError("scheduler_settlement_runtime_identity_mismatch") from None
+
+
+def _assert_settlement_clock_source(invocation: SchedulerClaimedInvocation) -> None:
+    monotonic_clock = invocation.deadline._rpc_start._monotonic_clock
+    if (
+        monotonic_clock is not monotonic
+        and type(monotonic_clock) is not _SchedulerTestMonotonicClock
+    ):
+        raise SchedulerInvariantError("scheduler_settlement_clock_is_not_sealed")
+
+
 def _refresh_same_generation_outer_lease(
     captured: WorkerLease,
     current: WorkerLease,
@@ -1249,6 +1747,37 @@ def _database_cutoff_for_binding(
         raise SchedulerInvariantError("scheduler_invocation_database_cutoff_is_invalid") from None
 
 
+def _database_settlement_start_cutoff_for_binding(
+    binding: SchedulerInvocationBinding,
+) -> datetime:
+    binding._assert_intact()
+    try:
+        return (
+            min(
+                binding._claim.lease.lease_expires_at,
+                binding._outer_lease.expires_at,
+            )
+            - SCHEDULER_INVOCATION_SETTLEMENT_START_RESERVE
+        )
+    except (OverflowError, ValueError):
+        raise SchedulerInvariantError(
+            "scheduler_invocation_settlement_cutoff_is_invalid"
+        ) from None
+
+
+def _monotonic_settlement_start_deadline(
+    deadline: SchedulerInvocationDeadline,
+) -> float:
+    deadline._assert_intact()
+    return _convert_database_cutoff_to_monotonic(
+        claim_observed_at=deadline.claim_observed_at,
+        database_cutoff_at=_database_settlement_start_cutoff_for_binding(
+            deadline.binding
+        ),
+        rpc_started_monotonic=deadline.rpc_started_monotonic,
+    )
+
+
 def _convert_database_cutoff_to_monotonic(
     *,
     claim_observed_at: datetime,
@@ -1273,6 +1802,16 @@ def _convert_database_cutoff_to_monotonic(
         "scheduler_invocation_monotonic_deadline_is_invalid",
     )
     return monotonic_deadline
+
+
+def _require_scheduler_sha256(value: object, field_name: str) -> None:
+    if type(value) is not str or _SCHEDULER_SHA256_RE.fullmatch(value) is None:
+        raise SchedulerInvariantError(f"{field_name}_is_invalid")
+
+
+def _require_scheduler_reason(value: object, field_name: str) -> None:
+    if type(value) is not str or _SCHEDULER_REASON_RE.fullmatch(value) is None:
+        raise SchedulerInvariantError(f"{field_name}_is_invalid")
 
 
 def _invoke_fail_stop(fail_stop: FailStop, reason: str) -> Never:

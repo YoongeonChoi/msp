@@ -11,10 +11,12 @@ from typing import Any, Literal, Never, cast
 
 import pytest
 
+from app.application.ports.durable_scheduler_port import SchedulerMutationOutcomeUnknownError
 from app.application.services import scheduler_invocation_deadline as deadline_module
 from app.application.services.scheduler_invocation_deadline import (
     SCHEDULER_DEADLINE_FAILURES,
     SCHEDULER_INVOCATION_SETTLEMENT_RESERVE,
+    SCHEDULER_INVOCATION_SETTLEMENT_START_RESERVE,
     FailStop,
     SchedulerClaimedInvocation,
     SchedulerConvergenceClaimResult,
@@ -24,8 +26,13 @@ from app.application.services.scheduler_invocation_deadline import (
     SchedulerInvocationFailStopReturned,
     SchedulerInvocationPermit,
     SchedulerInvocationPermitRevoked,
+    SchedulerInvocationSettlementAuthorization,
+    SchedulerInvocationSettlementWindowExceeded,
     _claim_scheduler_invocation_with_clock,
     _converge_scheduler_definition_invocation_with_clock,
+    begin_scheduler_invocation_settlement,
+    complete_scheduler_invocation_settlement,
+    fail_scheduler_invocation_settlement,
     require_scheduler_invocation_permit,
     run_with_scheduler_deadline,
 )
@@ -35,8 +42,10 @@ from app.domain.scheduler.models import (
     SCHEDULER_RETRYABLE_REASONS,
     ScheduledJobClaimReceiptV1,
     ScheduledJobClaimV1,
+    ScheduledJobCompletionReceiptV1,
     ScheduledJobConvergenceDefinitionV1,
     ScheduledJobDefinitionV1,
+    ScheduledJobFailureReceiptV1,
     ScheduledJobLeaseV1,
     ScheduledJobRunV1,
     SchedulerDefinitionConvergenceReceiptV1,
@@ -54,18 +63,7 @@ _PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "b" * 64
 _OTHER_PERSISTENCE_AUTHORITY = "supabase-worker-api:" + "c" * 64
 
 
-class _Clock:
-    value: float
-    fail: bool
-
-    def __init__(self, value: float) -> None:
-        self.value = value
-        self.fail = False
-
-    def __call__(self) -> float:
-        if self.fail:
-            raise RuntimeError("untrusted_clock_failure")
-        return self.value
+_Clock = deadline_module._SchedulerTestMonotonicClock
 
 
 class _ManualWaiter:
@@ -106,8 +104,11 @@ def _must_not_fail_stop(reason: str) -> Never:
 
 class _SchedulerPortStub:
     after_claim: Callable[[], None] | None
+    completion_calls: list[tuple[ScheduledJobClaimV1, WorkerLease, str]]
+    completion_error: BaseException | None
     convergence_receipt: SchedulerDefinitionConvergenceReceiptV1 | None
     converged_definitions: list[ScheduledJobDefinitionV1]
+    failure_calls: list[tuple[ScheduledJobClaimV1, WorkerLease, str, str, bool]]
     receipt: ScheduledJobClaimReceiptV1
     release_sha: str
     persistence_authority: str
@@ -125,7 +126,10 @@ class _SchedulerPortStub:
         self.receipt = receipt
         self.after_claim = after_claim
         self.convergence_receipt = convergence_receipt
+        self.completion_calls = []
+        self.completion_error = None
         self.converged_definitions = []
+        self.failure_calls = []
         self.received_outer_leases = []
 
     async def claim_due_job(
@@ -151,6 +155,55 @@ class _SchedulerPortStub:
         if self.convergence_receipt is None:
             raise AssertionError("unexpected convergence")
         return self.convergence_receipt
+
+    async def complete_job_run(
+        self,
+        claim: ScheduledJobClaimV1,
+        *,
+        outer_lease: WorkerLease,
+        result_sha256: str,
+    ) -> ScheduledJobCompletionReceiptV1:
+        self.completion_calls.append((claim, outer_lease, result_sha256))
+        if self.completion_error is not None:
+            raise self.completion_error
+        return ScheduledJobCompletionReceiptV1(
+            run_id=claim.run.run_id,
+            run_revision=claim.run.revision + 1,
+            attempt_count=claim.lease.attempt_number,
+            next_attempt_at=None,
+            failure_reason_code=None,
+            result_sha256=result_sha256,
+            observed_at=claim.observed_at,
+        )
+
+    async def fail_job_run(
+        self,
+        claim: ScheduledJobClaimV1,
+        *,
+        outer_lease: WorkerLease,
+        failure_reason_code: str,
+        failure_sha256: str,
+        retryable: bool,
+    ) -> ScheduledJobFailureReceiptV1:
+        self.failure_calls.append(
+            (
+                claim,
+                outer_lease,
+                failure_reason_code,
+                failure_sha256,
+                retryable,
+            )
+        )
+        return ScheduledJobFailureReceiptV1(
+            run_id=claim.run.run_id,
+            run_revision=claim.run.revision + 1,
+            attempt_count=claim.lease.attempt_number,
+            state="retry_wait" if retryable else "dead_letter",
+            failure_reason_code=failure_reason_code,
+            result_sha256=failure_sha256,
+            next_attempt_at=(claim.observed_at + timedelta(seconds=1) if retryable else None),
+            observed_at=claim.observed_at,
+        )
 
 
 class _RuntimeStub:
@@ -300,16 +353,30 @@ async def _deadline(
     job_key: SchedulerJobKey = "operations.commands",
     remaining_seconds: float = 10.0,
 ) -> SchedulerClaimedInvocation:
+    invocation, _runtime = await _deadline_context(
+        clock,
+        job_key=job_key,
+        remaining_seconds=remaining_seconds,
+    )
+    return invocation
+
+
+async def _deadline_context(
+    clock: Callable[[], float],
+    *,
+    job_key: SchedulerJobKey = "operations.commands",
+    remaining_seconds: float = 10.0,
+) -> tuple[SchedulerClaimedInvocation, _RuntimeStub]:
     lease_seconds = remaining_seconds + SCHEDULER_INVOCATION_SETTLEMENT_RESERVE.total_seconds()
     claim = _claim(job_key=job_key, lease_seconds=lease_seconds)
-    invocation, _port, _runtime = await _claim_once(
+    invocation, _port, runtime = await _claim_once(
         clock,
         claim=claim,
         outer_lease=_outer_lease(lease_seconds=lease_seconds),
         observed_at=claim.observed_at,
     )
     assert invocation is not None
-    return invocation
+    return invocation, runtime
 
 
 async def _capture_active_permit(
@@ -362,9 +429,14 @@ async def test_deadline_uses_earliest_lease_and_reserves_full_settlement_budget(
     assert port.received_outer_leases == [_outer_lease(lease_seconds=30)]
     assert runtime.integrity_checks == 2
     assert SCHEDULER_INVOCATION_SETTLEMENT_RESERVE.total_seconds() == 6.0
+    assert SCHEDULER_INVOCATION_SETTLEMENT_START_RESERVE.total_seconds() == 4.0
     assert deadline.database_cutoff_at == _OBSERVED_AT + timedelta(seconds=14)
+    assert deadline.database_settlement_start_cutoff_at == (
+        _OBSERVED_AT + timedelta(seconds=16)
+    )
     assert deadline.rpc_started_monotonic == 100.0
     assert deadline.monotonic_deadline == 114.0
+    assert deadline.monotonic_settlement_start_deadline == 116.0
     assert deadline.monotonic_deadline - 103.0 == 11.0
 
 
@@ -1195,6 +1267,585 @@ async def test_normal_handler_return_revokes_the_permit() -> None:
         captured[0].assert_effect_allowed(expected_binding=deadline.binding)
 
 
+async def test_handler_completion_authorizes_exactly_one_settlement_start() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(permit: SchedulerInvocationPermit) -> str:
+        clock.value = 105.0
+        require_scheduler_invocation_permit(
+            permit,
+            expected_binding=invocation.binding,
+        )
+        return "completed"
+
+    assert (
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_must_not_fail_stop,
+        )
+        == "completed"
+    )
+    clock.value = 111.999
+
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    assert not hasattr(authorization, "binding")
+    assert not hasattr(authorization, "outer_lease")
+    assert not hasattr(authorization, "__dict__")
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_settlement_authorization_is_immutable",
+    ):
+        authorization._outer_lease = _outer_lease()
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_settlement_authorization_is_not_copyable",
+    ):
+        copy.copy(authorization)
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_settlement_authorization_is_not_serializable",
+    ):
+        pickle.dumps(authorization)
+    result_sha256 = "d" * 64
+    receipt = await complete_scheduler_invocation_settlement(
+        authorization,
+        result_sha256=result_sha256,
+        fail_stop=_must_not_fail_stop,
+    )
+    scheduler_port = cast(_SchedulerPortStub, runtime.scheduler_port)
+    assert receipt.result_sha256 == result_sha256
+    assert scheduler_port.completion_calls == [
+        (invocation.claim, runtime.outer_lease, result_sha256)
+    ]
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_settlement_is_consumed",
+    ):
+        await fail_scheduler_invocation_settlement(
+            authorization,
+            failure_reason_code="handler_error",
+            failure_sha256="e" * 64,
+            retryable=False,
+            fail_stop=_must_not_fail_stop,
+        )
+    assert scheduler_port.failure_calls == []
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_settlement_is_consumed",
+    ):
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_must_not_fail_stop,
+        )
+
+
+async def test_unknown_completion_outcome_never_opens_failure_dispatch() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    scheduler_port = cast(_SchedulerPortStub, runtime.scheduler_port)
+    scheduler_port.completion_error = SchedulerMutationOutcomeUnknownError()
+
+    with pytest.raises(SchedulerMutationOutcomeUnknownError):
+        await complete_scheduler_invocation_settlement(
+            authorization,
+            result_sha256="d" * 64,
+            fail_stop=_must_not_fail_stop,
+        )
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_settlement_is_consumed",
+    ):
+        await fail_scheduler_invocation_settlement(
+            authorization,
+            failure_reason_code="handler_error",
+            failure_sha256="e" * 64,
+            retryable=False,
+            fail_stop=_must_not_fail_stop,
+        )
+
+    assert len(scheduler_port.completion_calls) == 1
+    assert scheduler_port.failure_calls == []
+
+
+async def test_in_flight_completion_blocks_concurrent_failure_dispatch() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    scheduler_port = cast(_SchedulerPortStub, runtime.scheduler_port)
+    complete_job_run = scheduler_port.complete_job_run
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_complete_job_run(
+        claim: ScheduledJobClaimV1,
+        *,
+        outer_lease: WorkerLease,
+        result_sha256: str,
+    ) -> ScheduledJobCompletionReceiptV1:
+        entered.set()
+        await release.wait()
+        return await complete_job_run(
+            claim,
+            outer_lease=outer_lease,
+            result_sha256=result_sha256,
+        )
+
+    cast(Any, scheduler_port).complete_job_run = blocking_complete_job_run
+    completion_task = asyncio.create_task(
+        complete_scheduler_invocation_settlement(
+            authorization,
+            result_sha256="d" * 64,
+            fail_stop=_must_not_fail_stop,
+        )
+    )
+    await entered.wait()
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_settlement_is_consumed",
+    ):
+        await fail_scheduler_invocation_settlement(
+            authorization,
+            failure_reason_code="handler_error",
+            failure_sha256="e" * 64,
+            retryable=False,
+            fail_stop=_must_not_fail_stop,
+        )
+
+    release.set()
+    await completion_task
+    assert len(scheduler_port.completion_calls) == 1
+    assert scheduler_port.failure_calls == []
+
+
+async def test_settlement_start_rejects_the_exact_rpc_reserve_cutoff() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> str:
+        return "completed"
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 112.0
+
+    with pytest.raises(SchedulerInvocationSettlementWindowExceeded) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_must_not_fail_stop,
+        )
+
+    assert exc_info.value.job_key == "operations.commands"
+    assert exc_info.value.reason_code == "scheduler_settlement_window_expired"
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_invocation_settlement_is_consumed",
+    ):
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_must_not_fail_stop,
+        )
+
+
+async def test_settlement_start_rechecks_time_after_runtime_provenance() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 111.999
+    current_outer_lease = runtime.current_outer_lease
+
+    def advance_clock_at_provenance_check() -> WorkerLease:
+        clock.value = 112.0
+        return current_outer_lease()
+
+    cast(Any, runtime).current_outer_lease = advance_clock_at_provenance_check
+
+    with pytest.raises(SchedulerInvocationSettlementWindowExceeded):
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_must_not_fail_stop,
+        )
+
+
+async def test_settlement_start_rechecks_cutoff_after_final_attestation() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 111.999
+    assert_intact = runtime.assert_intact
+    attestation_count = 0
+
+    def cross_cutoff_during_final_attestation() -> None:
+        nonlocal attestation_count
+        attestation_count += 1
+        assert_intact()
+        if attestation_count == 3:
+            clock.value = 112.0
+
+    cast(Any, runtime).assert_intact = cross_cutoff_during_final_attestation
+
+    with pytest.raises(SchedulerInvocationSettlementWindowExceeded):
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_must_not_fail_stop,
+        )
+
+
+async def test_settlement_authorization_expires_at_the_start_cutoff() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 111.999
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 112.0
+
+    with pytest.raises(SchedulerInvocationSettlementWindowExceeded):
+        await complete_scheduler_invocation_settlement(
+            authorization,
+            result_sha256="d" * 64,
+            fail_stop=_must_not_fail_stop,
+        )
+    assert cast(_SchedulerPortStub, runtime.scheduler_port).completion_calls == []
+
+
+async def test_settlement_start_fail_stops_clock_regression() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(permit: SchedulerInvocationPermit) -> None:
+        clock.value = 105.0
+        require_scheduler_invocation_permit(
+            permit,
+            expected_binding=invocation.binding,
+        )
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 104.0
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_clock_corrupt"
+
+
+async def test_settlement_start_fail_stops_clock_failure() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.fail = True
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_clock_corrupt"
+
+
+async def test_settlement_requires_observed_handler_termination() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_provenance_invalid"
+
+
+async def test_settlement_rejects_an_unsealed_monotonic_callback() -> None:
+    def unsealed_clock() -> float:
+        return 100.0
+
+    invocation, runtime = await _deadline_context(unsealed_clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_provenance_invalid"
+
+
+async def test_settlement_authorization_rejects_public_self_minting() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    with pytest.raises(
+        SchedulerInvariantError,
+        match="scheduler_settlement_authorization_is_not_issued",
+    ):
+        SchedulerInvocationSettlementAuthorization(
+            invocation=invocation,
+            runtime=cast(Any, runtime),
+            outer_lease=runtime.outer_lease,
+            observed_at=_OBSERVED_AT,
+            _issuance=object(),
+        )
+
+
+async def test_settlement_uses_a_same_generation_outer_lease_renewal() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    renewed = replace(
+        runtime.outer_lease,
+        expires_at=runtime.outer_lease.expires_at + timedelta(seconds=5),
+    )
+    runtime.outer_lease = renewed
+
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    result_sha256 = "d" * 64
+    await complete_scheduler_invocation_settlement(
+        authorization,
+        result_sha256=result_sha256,
+        fail_stop=_must_not_fail_stop,
+    )
+    assert cast(_SchedulerPortStub, runtime.scheduler_port).completion_calls == [
+        (invocation.claim, renewed, result_sha256)
+    ]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("runtime_port", "runtime_release", "port_authority", "outer_generation"),
+)
+async def test_settlement_fail_stops_runtime_or_lease_drift(drift: str) -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    if drift == "runtime_port":
+        runtime.scheduler_port = cast(
+            Any,
+            _SchedulerPortStub(
+                ScheduledJobClaimReceiptV1(claim=None, observed_at=_OBSERVED_AT)
+            ),
+        )
+    elif drift == "runtime_release":
+        runtime.release_sha = "c" * 40
+    elif drift == "port_authority":
+        scheduler_port = cast(Any, invocation._scheduler_port)
+        scheduler_port.persistence_authority = _OTHER_PERSISTENCE_AUTHORITY
+    else:
+        runtime.outer_lease = replace(runtime.outer_lease, fencing_token=8)
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_provenance_invalid"
+
+
+async def test_settlement_dispatch_rejects_outer_lease_callback_runtime_drift() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+
+    current_outer_lease = runtime.current_outer_lease
+
+    def mutate_during_outer_lease_read() -> WorkerLease:
+        runtime.release_sha = "c" * 40
+        return current_outer_lease()
+
+    cast(Any, runtime).current_outer_lease = mutate_during_outer_lease_read
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        await complete_scheduler_invocation_settlement(
+            authorization,
+            result_sha256="d" * 64,
+            fail_stop=_raise_fail_stop,
+        )
+
+    assert exc_info.value.reason == "scheduler_settlement_provenance_invalid"
+    assert cast(_SchedulerPortStub, invocation._scheduler_port).completion_calls == []
+
+
+async def test_settlement_dispatch_rechecks_cutoff_after_runtime_attestation() -> None:
+    clock = _Clock(100.0)
+    invocation, runtime = await _deadline_context(clock)
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        return None
+
+    await run_with_scheduler_deadline(
+        handler,
+        invocation=invocation,
+        wait_until=_ManualWaiter(),
+        fail_stop=_must_not_fail_stop,
+    )
+    clock.value = 111.999
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    assert_intact = runtime.assert_intact
+    attestation_count = 0
+
+    def cross_cutoff_during_second_attestation() -> None:
+        nonlocal attestation_count
+        attestation_count += 1
+        assert_intact()
+        if attestation_count == 2:
+            clock.value = 112.0
+
+    cast(Any, runtime).assert_intact = cross_cutoff_during_second_attestation
+
+    with pytest.raises(SchedulerInvocationSettlementWindowExceeded):
+        await complete_scheduler_invocation_settlement(
+            authorization,
+            result_sha256="d" * 64,
+            fail_stop=_must_not_fail_stop,
+        )
+
+    assert cast(_SchedulerPortStub, runtime.scheduler_port).completion_calls == []
+
+
 async def test_claimed_invocation_can_run_only_once() -> None:
     invocation = await _deadline(_Clock(100.0))
 
@@ -1245,7 +1896,7 @@ async def test_claimed_invocation_rejects_port_identity_tampering() -> None:
 
 async def test_handler_error_is_preserved_and_revokes_the_permit() -> None:
     waiter = _ManualWaiter()
-    deadline = await _deadline(_Clock(100.0))
+    invocation, runtime = await _deadline_context(_Clock(100.0))
     captured: list[SchedulerInvocationPermit] = []
 
     async def handler(permit: SchedulerInvocationPermit) -> None:
@@ -1255,12 +1906,35 @@ async def test_handler_error_is_preserved_and_revokes_the_permit() -> None:
     with pytest.raises(RuntimeError, match="handler_failed"):
         await run_with_scheduler_deadline(
             handler,
-            invocation=deadline,
+            invocation=invocation,
             wait_until=waiter,
             fail_stop=_must_not_fail_stop,
         )
 
     assert captured[0].revocation_reason == "handler_exit"
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        invocation,
+        fail_stop=_must_not_fail_stop,
+    )
+    failure_sha256 = "e" * 64
+    receipt = await fail_scheduler_invocation_settlement(
+        authorization,
+        failure_reason_code="handler_error",
+        failure_sha256=failure_sha256,
+        retryable=False,
+        fail_stop=_must_not_fail_stop,
+    )
+    assert receipt.failure_reason_code == "handler_error"
+    assert cast(_SchedulerPortStub, runtime.scheduler_port).failure_calls == [
+        (
+            invocation.claim,
+            runtime.outer_lease,
+            "handler_error",
+            failure_sha256,
+            False,
+        )
+    ]
 
 
 async def test_handler_cannot_hide_a_transient_clock_failure() -> None:
@@ -1369,7 +2043,7 @@ async def test_deadline_cancels_the_handler_and_maps_job_failure_policy(
     waiter = _ManualWaiter()
     started = asyncio.Event()
     captured: list[SchedulerInvocationPermit] = []
-    deadline = await _deadline(clock, job_key=job_key)
+    deadline, runtime = await _deadline_context(clock, job_key=job_key)
 
     async def handler(permit: SchedulerInvocationPermit) -> None:
         captured.append(permit)
@@ -1395,6 +2069,29 @@ async def test_deadline_cancels_the_handler_and_maps_job_failure_policy(
     assert exc_info.value.reason_code == reason_code
     assert exc_info.value.retryable is retryable
     assert captured[0].revocation_reason == "deadline"
+    clock.value = 111.0
+    authorization = begin_scheduler_invocation_settlement(
+        cast(Any, runtime),
+        deadline,
+        fail_stop=_must_not_fail_stop,
+    )
+    failure_sha256 = "e" * 64
+    await fail_scheduler_invocation_settlement(
+        authorization,
+        failure_reason_code=reason_code,
+        failure_sha256=failure_sha256,
+        retryable=retryable,
+        fail_stop=_must_not_fail_stop,
+    )
+    assert cast(_SchedulerPortStub, runtime.scheduler_port).failure_calls == [
+        (
+            deadline.claim,
+            runtime.outer_lease,
+            reason_code,
+            failure_sha256,
+            retryable,
+        )
+    ]
 
 
 async def test_deadline_wins_when_handler_and_timer_complete_together() -> None:
@@ -1428,6 +2125,61 @@ async def test_deadline_wins_when_handler_and_timer_complete_together() -> None:
 
     assert exc_info.value.reason_code == "execution_deadline_effect_unknown"
     assert not exc_info.value.retryable
+
+
+@pytest.mark.parametrize("outcome", ["fail_stop", "self_cancel"])
+async def test_deadline_same_tick_unsafe_handler_never_authorizes_settlement(
+    outcome: str,
+) -> None:
+    clock = _Clock(100.0)
+    gate = asyncio.Event()
+    handler_started = asyncio.Event()
+    waiter_started = asyncio.Event()
+    invocation, runtime = await _deadline_context(
+        clock,
+        job_key="operations.execution",
+    )
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        handler_started.set()
+        await gate.wait()
+        if outcome == "fail_stop":
+            raise _FailStopTriggered("handler_fail_stop")
+        raise asyncio.CancelledError("handler_self_cancelled")
+
+    async def waiter(_cutoff: float) -> None:
+        waiter_started.set()
+        await gate.wait()
+
+    run_task = asyncio.create_task(
+        run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=waiter,
+            fail_stop=_raise_fail_stop,
+        )
+    )
+    await handler_started.wait()
+    await waiter_started.wait()
+    clock.value = 110.0
+    gate.set()
+
+    with pytest.raises(_FailStopTriggered) as exc_info:
+        await run_task
+
+    expected_reason = (
+        "handler_fail_stop"
+        if outcome == "fail_stop"
+        else "scheduler_handler_cancellation_suppressed"
+    )
+    assert exc_info.value.reason == expected_reason
+    with pytest.raises(_FailStopTriggered) as settlement_exc:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+    assert settlement_exc.value.reason == "scheduler_settlement_provenance_invalid"
 
 
 async def test_deadline_path_cancels_a_timer_that_has_not_fired() -> None:
@@ -1591,7 +2343,7 @@ async def test_stalled_timer_cancellation_triggers_fail_stop_without_task_leak()
 async def test_external_cancellation_is_preserved_after_children_acknowledge() -> None:
     started = asyncio.Event()
     captured: list[SchedulerInvocationPermit] = []
-    deadline = await _deadline(_Clock(100.0))
+    deadline, runtime = await _deadline_context(_Clock(100.0))
 
     async def handler(permit: SchedulerInvocationPermit) -> None:
         captured.append(permit)
@@ -1614,6 +2366,60 @@ async def test_external_cancellation_is_preserved_after_children_acknowledge() -
 
     assert exc_info.value.args == ("outer_stop",)
     assert captured[0].revocation_reason == "external_cancel"
+    with pytest.raises(_FailStopTriggered) as settlement_exc:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            deadline,
+            fail_stop=_raise_fail_stop,
+        )
+    assert settlement_exc.value.reason == "scheduler_settlement_provenance_invalid"
+
+
+async def test_handler_self_cancellation_never_authorizes_settlement() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        raise asyncio.CancelledError("handler_cancelled")
+
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_must_not_fail_stop,
+        )
+
+    assert exc_info.value.args == ("handler_cancelled",)
+    with pytest.raises(_FailStopTriggered) as settlement_exc:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+    assert settlement_exc.value.reason == "scheduler_settlement_provenance_invalid"
+
+
+async def test_handler_fail_stop_base_exception_never_authorizes_settlement() -> None:
+    invocation, runtime = await _deadline_context(_Clock(100.0))
+
+    async def handler(_permit: SchedulerInvocationPermit) -> None:
+        raise _FailStopTriggered("handler_fail_stop")
+
+    with pytest.raises(_FailStopTriggered, match="handler_fail_stop"):
+        await run_with_scheduler_deadline(
+            handler,
+            invocation=invocation,
+            wait_until=_ManualWaiter(),
+            fail_stop=_must_not_fail_stop,
+        )
+
+    with pytest.raises(_FailStopTriggered) as settlement_exc:
+        begin_scheduler_invocation_settlement(
+            cast(Any, runtime),
+            invocation,
+            fail_stop=_raise_fail_stop,
+        )
+    assert settlement_exc.value.reason == "scheduler_settlement_provenance_invalid"
 
 
 @pytest.mark.parametrize("suppression", ["return", "error", "wrong_revoke"])
