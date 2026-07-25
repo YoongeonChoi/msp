@@ -24,6 +24,7 @@ from app.domain.scheduler.models import (
 
 _ACCOUNT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 _MAX_DATABASE_BIGINT = 9_223_372_036_854_775_807
+DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS = 4.0
 
 
 class SchedulerMutationOutcomeUnknownError(KnownFailClosedError):

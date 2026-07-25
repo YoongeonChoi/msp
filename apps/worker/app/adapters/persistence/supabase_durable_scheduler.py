@@ -14,6 +14,7 @@ from app.adapters.persistence.supabase_durable_scheduler_wire import (
     DurableSchedulerWireCodec,
 )
 from app.application.ports.durable_scheduler_port import (
+    DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS,
     SchedulerMutationOutcomeUnknownError,
     SchedulerTransitionRejectedError,
     canonical_scheduler_outer_lease,
@@ -71,7 +72,6 @@ DURABLE_SCHEDULER_RPC_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 DURABLE_SCHEDULER_MAX_RPC_RESPONSE_BYTES = 64 * 1024
-DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS = 4.0
 DURABLE_SCHEDULER_DETERMINISTIC_REJECTION_STATUSES: frozenset[int] = frozenset(
     {400, 401, 403, 404, 405, 406, 409, 415, 422}
 )

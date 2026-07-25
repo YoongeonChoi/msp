@@ -17,13 +17,13 @@ from app.adapters.persistence.supabase_durable_scheduler import (
     DURABLE_SCHEDULER_DETERMINISTIC_REJECTION_STATUSES,
     DURABLE_SCHEDULER_MAX_RPC_RESPONSE_BYTES,
     DURABLE_SCHEDULER_RPC_ALLOWLIST,
-    DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS,
     SupabaseDurableScheduler,
 )
 from app.adapters.persistence.supabase_durable_scheduler_wire import (
     DurableSchedulerWireCodec,
 )
 from app.application.ports.durable_scheduler_port import (
+    DURABLE_SCHEDULER_TOTAL_RPC_TIMEOUT_SECONDS,
     SchedulerMutationOutcomeUnknownError,
     SchedulerTransitionRejectedError,
 )
