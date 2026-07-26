@@ -122,7 +122,7 @@ export function IncidentCenter({
             const acknowledgeReasonId = `incident-acknowledge-blocked-${incident.incident_id}`;
             const resolveReasonId = `incident-resolve-blocked-${incident.incident_id}`;
             return (
-              <article key={incident.incident_id} className="rounded-xl border border-line p-4">
+              <article key={incident.incident_id} className="rounded-lg border border-lineSubtle p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="flex items-center gap-2 font-semibold text-ink">

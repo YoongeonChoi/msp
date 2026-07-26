@@ -7,30 +7,30 @@ export type Tone = "neutral" | "safe" | "danger" | "warning" | "info";
 export type ButtonTone = "primary" | "neutral" | "warning" | "danger";
 
 const toneClasses: Record<Tone, string> = {
-  neutral: "border-line bg-surface text-ink",
-  safe: "border-success/25 bg-successSoft text-success",
-  danger: "border-danger/25 bg-dangerSoft text-danger",
-  warning: "border-warning/25 bg-warningSoft text-warning",
-  info: "border-primary/25 bg-primarySoft text-primary"
+  neutral: "bg-surfaceRaised text-ink",
+  safe: "bg-successSoft text-success",
+  danger: "bg-dangerSoft text-danger",
+  warning: "bg-warningSoft text-warning",
+  info: "bg-primarySoft text-primary"
 };
 
 const buttonToneClasses: Record<ButtonTone, string> = {
-  primary: "border-primary bg-primary text-white hover:bg-blue-700 active:scale-[0.98] motion-reduce:transform-none",
-  neutral: "border-controlLine bg-surface text-ink hover:bg-canvas active:scale-[0.98] motion-reduce:transform-none",
-  warning: "border-warning bg-warningSoft text-warning hover:bg-amber-100 active:scale-[0.98] motion-reduce:transform-none",
-  danger: "border-danger bg-danger text-white hover:bg-red-800 active:scale-[0.98] motion-reduce:transform-none"
+  primary: "border-primaryAction bg-primaryAction text-white hover:brightness-110 active:scale-[0.98] motion-reduce:transform-none",
+  neutral: "border-controlLine bg-surface text-ink hover:bg-surfaceRaised active:scale-[0.98] motion-reduce:transform-none",
+  warning: "border-warning/40 bg-warningSoft text-warning hover:brightness-110 active:scale-[0.98] motion-reduce:transform-none",
+  danger: "border-danger/40 bg-dangerSoft text-danger hover:brightness-110 active:scale-[0.98] motion-reduce:transform-none"
 };
 
 export function Pill({ children, tone = "neutral" }: { readonly children: ReactNode; readonly tone?: Tone }) {
   return (
-    <span className={clsx("inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium", toneClasses[tone])}>
+    <span className={clsx("status-pill inline-flex items-center gap-1 rounded-sm border border-transparent px-2.5 py-1 text-xs font-medium", toneClasses[tone])}>
       {children}
     </span>
   );
 }
 
 export function Panel({ children, className = "" }: { readonly children: ReactNode; readonly className?: string }) {
-  return <section className={clsx("surface-gradient-border rounded-xl p-5", className)}>{children}</section>;
+  return <section className={clsx("matte-surface rounded-lg p-5", className)}>{children}</section>;
 }
 
 export function Metric({
@@ -72,7 +72,7 @@ export function SectionTitle({
 
 export function LoadingState({ label = "불러오는 중" }: { readonly label?: string }) {
   return (
-    <div className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-line bg-canvas p-4 text-sm text-mutedStrong">
+    <div className="flex min-h-28 items-center justify-center rounded-lg border border-dashed border-lineSubtle bg-canvas p-4 text-sm text-mutedStrong">
       <Loader2 className="mr-2 animate-spin motion-reduce:animate-none" size={16} aria-hidden="true" />
       {label}
     </div>
@@ -87,7 +87,7 @@ export function EmptyState({
   readonly detail: string;
 }) {
   return (
-    <div className="rounded-lg border border-dashed border-line bg-canvas p-6 text-center">
+    <div className="rounded-lg border border-dashed border-lineSubtle bg-canvas p-6 text-center">
       <p className="font-medium text-ink">{title}</p>
       <p className="mt-1 text-sm text-mutedStrong">{detail}</p>
     </div>
@@ -115,7 +115,7 @@ export function KeyValue({
   readonly value: ReactNode;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(7rem,0.65fr)_minmax(0,1fr)] items-start gap-3 border-b border-line py-2 text-sm last:border-b-0">
+    <div className="grid min-w-0 grid-cols-[minmax(7rem,0.65fr)_minmax(0,1fr)] items-start gap-3 border-b border-lineSubtle py-2 text-sm last:border-b-0">
       <span className="text-mutedStrong">{label}</span>
       <span className="min-w-0 overflow-wrap-anywhere text-right font-medium text-ink [overflow-wrap:anywhere]">{value}</span>
     </div>

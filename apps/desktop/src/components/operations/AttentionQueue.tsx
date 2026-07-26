@@ -292,7 +292,7 @@ export function AttentionQueue(props: AttentionQueueProps) {
         <AttentionList items={visibleItems} onAction={openItem} />
       )}
       {items.length > 0 ? (
-        <div className="mt-4 flex justify-end border-t border-line pt-4">
+        <div className="mt-4 flex justify-end border-t border-lineSubtle pt-4">
           <button
             type="button"
             className={pageButtonClass("neutral")}
@@ -332,7 +332,7 @@ function AttentionList({
   readonly compact?: boolean;
 }) {
   return (
-    <ul className="divide-y divide-line" aria-label="운영 확인 대기열">
+    <ul className="divide-y divide-lineSubtle" aria-label="운영 확인 대기열">
       {items.map((item) => (
         <AttentionRow key={item.id} item={item} compact={compact} onAction={() => onAction(item)} />
       ))}
@@ -368,7 +368,7 @@ function AttentionRow({
             <Pill tone={presentation.tone}>{item.severityLabel}</Pill>
             <h3 className="min-w-0 font-semibold text-ink">{item.title}</h3>
           </div>
-          <p className="mt-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm text-mutedStrong" title={item.cause}>
+          <p className="mt-1 text-sm leading-5 text-mutedStrong">
             {item.cause}
           </p>
           <p className="mt-1 text-xs font-medium text-muted">{item.timing}</p>
@@ -383,8 +383,9 @@ function AttentionRow({
               ) : null}
               <button
                 type="button"
-                className={`${pageButtonClass("neutral")} w-full lg:w-auto`}
+                className={`${pageButtonClass("neutral")} w-full justify-center lg:w-auto lg:min-w-32 lg:whitespace-nowrap`}
                 disabled={disabledReason !== undefined}
+                aria-label={`${item.title} · ${item.action.label}`}
                 aria-describedby={disabledReason !== undefined ? reasonId : undefined}
                 onClick={onAction}
               >

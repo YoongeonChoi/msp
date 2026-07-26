@@ -27,7 +27,19 @@ assert.doesNotMatch(
 assert.doesNotMatch(appSource, /useRealtimeInvalidation|DashboardPage|OrdersPage|StrategyLabPage|WatchlistPage/);
 assert.match(appSource, /ControlPage/);
 assert.match(appSource, /SettingsPage/);
-assert.match(navigationSource, /export type PageKey = "control" \| "settings"/);
+for (const pageKey of [
+  "control",
+  "approvals",
+  "portfolio",
+  "reconciliation",
+  "incidents",
+  "records",
+  "runtime",
+  "access",
+  "settings"
+]) {
+  assert.match(navigationSource, new RegExp(`\\| "${pageKey}"`), `navigation keeps the ${pageKey} control-plane workspace`);
+}
 assert.equal(existsSync(resolve(sourceRoot, "lib/rows.ts")), false, "silent-default row parser must be removed");
 assert.equal(existsSync(resolve(sourceRoot, "lib/supabaseData.ts")), false, "legacy public adapter must be removed");
 assert.doesNotMatch(authSource, /fetchOperationsSnapshot/);

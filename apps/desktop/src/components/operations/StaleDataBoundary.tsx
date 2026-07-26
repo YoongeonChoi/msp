@@ -25,7 +25,7 @@ export function StaleDataBoundary({
     <div className="space-y-4">
       {blocked ? (
         <div
-          className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950"
+          className="rounded-md border border-warning/40 bg-warningSoft p-4 text-sm text-warning"
           role="alert"
           aria-live="assertive"
         >

@@ -109,7 +109,7 @@ export function createMfaDataApi(client: MfaClient): MfaDataApi {
         client.auth.mfa.getAuthenticatorAssuranceLevel()
       ]);
       if (factorResult.error || factorResult.data === null || assuranceResult.error || assuranceResult.data === null) {
-        throw new MfaOperationError("status", "TOTP 등록 상태와 2단계 인증을 확인하지 못했습니다.");
+        throw new MfaOperationError("status", "2단계 인증 등록 상태를 확인하지 못했습니다.");
       }
 
       const verifiedTotpFactors = factorResult.data.totp
@@ -145,7 +145,7 @@ export function createMfaDataApi(client: MfaClient): MfaDataApi {
         qrCode.length > 200_000 ||
         !isSafeTotpUri(totpUri, totpSecret)
       ) {
-        throw new MfaOperationError("enroll", "TOTP 등록 QR을 안전하게 생성하지 못했습니다.");
+        throw new MfaOperationError("enroll", "2단계 인증 등록 QR을 안전하게 생성하지 못했습니다.");
       }
 
       // Deliberately return neither totp.secret nor totp.uri. The QR data is
@@ -158,7 +158,7 @@ export function createMfaDataApi(client: MfaClient): MfaDataApi {
       }
       const challengeResult = await client.auth.mfa.challenge({ factorId });
       if (challengeResult.error || challengeResult.data === null || !challengeResult.data.id) {
-        throw new MfaOperationError("challenge", "TOTP 검증 challenge를 만들지 못했습니다.");
+        throw new MfaOperationError("challenge", "2단계 인증 확인 요청을 만들지 못했습니다.");
       }
       const verifyResult = await client.auth.mfa.verify({
         factorId,
@@ -166,7 +166,7 @@ export function createMfaDataApi(client: MfaClient): MfaDataApi {
         code
       });
       if (verifyResult.error) {
-        throw new MfaOperationError("verify", "TOTP 코드 검증에 실패했습니다.");
+        throw new MfaOperationError("verify", "2단계 인증 코드 확인에 실패했습니다.");
       }
     }
   };
@@ -176,13 +176,13 @@ export const mfaDataApi: MfaDataApi = hasSupabaseConfig && supabase !== null
   ? createMfaDataApi(supabase as unknown as MfaClient)
   : {
       fetchStatus: async () => {
-        throw new MfaOperationError("status", "Supabase Auth 설정이 없어 MFA 상태를 확인할 수 없습니다.");
+        throw new MfaOperationError("status", "Supabase Auth 설정이 없어 2단계 인증 상태를 확인할 수 없습니다.");
       },
       enrollTotp: async () => {
-        throw new MfaOperationError("enroll", "Supabase Auth 설정이 없어 TOTP를 등록할 수 없습니다.");
+        throw new MfaOperationError("enroll", "Supabase Auth 설정이 없어 2단계 인증을 등록할 수 없습니다.");
       },
       verifyTotp: async () => {
-        throw new MfaOperationError("verify", "Supabase Auth 설정이 없어 TOTP를 검증할 수 없습니다.");
+        throw new MfaOperationError("verify", "Supabase Auth 설정이 없어 2단계 인증을 확인할 수 없습니다.");
       }
     };
 

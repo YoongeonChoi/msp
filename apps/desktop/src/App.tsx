@@ -10,7 +10,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AppLayout, type DeviceConnectionState } from "./components/Layout";
 import { AuthRequiredState } from "./components/AuthRequiredState";
-import { parsePageKey } from "./lib/navigation";
+import { getPageLabel, pageRequiresConnection, parsePageKey } from "./lib/navigation";
 import type { PageKey } from "./lib/navigation";
 import { OperationsSnapshotProvider, useOperationsSnapshot } from "./lib/operationsSnapshotContext";
 import {
@@ -149,7 +149,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (page !== "control" || connectionState === "checking" || connectionState === "connected") {
+    if (!pageRequiresConnection(page) || connectionState === "checking" || connectionState === "connected") {
       return;
     }
 
@@ -182,12 +182,14 @@ function App() {
         preloadPage={preloadPage}
         connectionState={connectionState}
       >
-        {page === "control" && connectionState === "connected" ? <ControlPage /> : null}
-        {page === "control" && connectionState === "checking" ? (
+        {pageRequiresConnection(page) && connectionState === "connected" ? (
+          <ControlPage surface={page} />
+        ) : null}
+        {pageRequiresConnection(page) && connectionState === "checking" ? (
           <LoadingState label="저장된 기기 연결을 확인하는 중" />
         ) : null}
-        {page === "control" && connectionState !== "connected" && connectionState !== "checking" ? (
-          <AuthRequiredState surface="운영 제어" />
+        {pageRequiresConnection(page) && connectionState !== "connected" && connectionState !== "checking" ? (
+          <AuthRequiredState surface={getPageLabel(page)} />
         ) : null}
         {page === "settings" ? (
           <LazySurfaceBoundary

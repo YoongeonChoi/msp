@@ -238,7 +238,7 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
   }
   if (role.error && !cleanupRequired) {
     return (
-      <div className="mx-auto max-w-2xl space-y-4">
+      <div className="mx-auto max-w-3xl space-y-4">
         <ErrorState message="저장된 운영 세션을 확인하지 못했습니다." />
         <button
           className={pageButtonClass("neutral")}
@@ -263,7 +263,7 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
 
   if (!signedIn) {
     return (
-      <div className="mx-auto max-w-2xl space-y-4">
+      <div className="mx-auto max-w-3xl space-y-4">
         {cleanupRequired ? (
           <section className="rounded-xl border border-danger/30 bg-dangerSoft p-5 text-danger" role="alert">
             <h2 className="font-bold">취소한 기기 연결 정리가 필요합니다</h2>
@@ -286,7 +286,7 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
             </button>
           </section>
         ) : null}
-        <section className="surface-gradient-border rounded-xl p-6">
+        <section className="matte-surface rounded-xl p-6">
           <div>
             <p className="text-xs font-semibold text-primary">단일 사용자 기기</p>
             <h2 className="mt-1 text-xl font-bold">이 기기는 아직 연결되지 않았습니다</h2>
@@ -313,9 +313,9 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
           </button>
         </section>
 
-        <details className="rounded-lg border border-line bg-surface px-4 py-2">
+        <details className="rounded-lg border border-lineSubtle bg-surface px-4 py-2">
           <summary className="flex min-h-control cursor-pointer items-center font-semibold">연결 정보 보기</summary>
-          <div className="border-t border-line py-3">
+          <div className="border-t border-lineSubtle py-3">
             <ConnectionDetails configured={supabaseReady} />
           </div>
         </details>
@@ -375,12 +375,12 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
   }
 
   return (
-    <div className="space-y-5">
-      <section className="surface-gradient-border rounded-xl p-5">
+    <div className="mx-auto max-w-3xl space-y-5">
+      <section className="matte-surface rounded-xl p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <p className="text-xs font-semibold text-primary">이 기기에 연결된 운영 계정</p>
-            <h2 ref={connectedHeadingRef} tabIndex={-1} className="mt-1 text-xl font-bold outline-none">
+            <h2 ref={connectedHeadingRef} tabIndex={-1} className="mt-1 w-fit rounded-sm text-xl font-bold">
               {role.data?.email ?? "계정 확인 불가"}
             </h2>
             <p className="mt-1 text-sm text-mutedStrong">저장된 세션을 자동으로 복구하며, 위험 작업의 2단계 인증은 별도로 유지됩니다.</p>
@@ -394,13 +394,13 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
       </section>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <button type="button" className="surface-gradient-border min-h-32 rounded-xl p-5 text-left" onClick={() => setDrawer({ kind: "mfa" })}>
+        <button type="button" className="matte-surface min-h-32 rounded-xl p-5 text-left" onClick={() => setDrawer({ kind: "mfa" })}>
           <KeyRound className="text-primary" size={22} aria-hidden="true" />
-          <span className="mt-3 block text-[17px] font-bold">TOTP 관리</span>
+          <span className="mt-3 block text-[17px] font-bold">2단계 인증 관리</span>
           <span className="mt-1 block text-sm text-mutedStrong">인증 수단 등록·선택과 2단계 인증 재확인</span>
         </button>
         {platformAdmin ? (
-          <button type="button" className="surface-gradient-border min-h-32 rounded-xl p-5 text-left" onClick={() => setDrawer({ kind: "access" })}>
+          <button type="button" className="matte-surface min-h-32 rounded-xl p-5 text-left" onClick={() => setDrawer({ kind: "access" })}>
             <UserCog className="text-primary" size={22} aria-hidden="true" />
             <span className="mt-3 block text-[17px] font-bold">접근권한 작업</span>
             <span className="mt-1 block text-sm text-mutedStrong">독립 검토가 필요한 역할 부여·회수</span>
@@ -415,9 +415,9 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
         )}
       </div>
 
-      <details className="rounded-lg border border-line bg-surface px-4 py-2">
+      <details className="rounded-lg border border-lineSubtle bg-surface px-4 py-2">
         <summary className="flex min-h-control cursor-pointer items-center font-semibold">연결 정보 보기</summary>
-        <div className="border-t border-line py-3">
+        <div className="border-t border-lineSubtle py-3">
           <ConnectionDetails
             configured={supabaseReady}
             disconnecting={disconnectDevice.isPending}
@@ -456,7 +456,7 @@ export function SettingsPage({ authApi = defaultSettingsAuthApi }: { readonly au
       />
 
       {drawer?.kind === "mfa" ? (
-        <DrawerSurface open readOnly={false} title="TOTP 관리" description="비밀값과 코드는 이 상세 화면을 닫으면 메모리에서 제거됩니다." onRequestClose={() => setDrawer(null)}>
+        <DrawerSurface open readOnly={false} title="2단계 인증 관리" description="비밀값과 인증 코드는 이 상세 화면을 닫으면 메모리에서 제거됩니다." onRequestClose={() => setDrawer(null)}>
           <MfaSecurityPanel />
         </DrawerSurface>
       ) : null}
@@ -476,7 +476,7 @@ function SummaryItem({ label, value, tone }: { readonly label: string; readonly 
 function ConnectionSetupRequired() {
   const developmentBuild = import.meta.env?.DEV === true;
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
+    <div className="mx-auto max-w-3xl space-y-4">
       <section className="rounded-xl border border-warning/30 bg-warningSoft p-5 text-warning" role="alert">
         <div className="flex items-start gap-3">
           <AlertTriangle className="mt-0.5 shrink-0" size={19} aria-hidden="true" />
@@ -531,7 +531,7 @@ function ConnectionDetails({
       <KeyValue label="public 테이블 직접 접근" value={<Pill tone="safe">비활성화</Pill>} />
       <KeyValue label="앱 버전" value={appVersion} />
       {onDisconnect ? (
-        <div className="mt-4 border-t border-line pt-4">
+        <div className="mt-4 border-t border-lineSubtle pt-4">
           <p className="mb-3 text-sm text-mutedStrong">이 작업은 현재 기기에 저장된 운영 세션과 휘발성 작업 입력을 제거합니다.</p>
           <button className={pageButtonClass("warning")} type="button" onClick={onDisconnect} disabled={disconnecting}>
             <Unplug size={17} aria-hidden="true" />

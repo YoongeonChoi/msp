@@ -27,7 +27,7 @@ const itemIcons: Record<SafetyRailItemKey, LucideIcon> = {
 };
 
 const toneClasses: Record<SafetyRailTone, { readonly icon: string; readonly value: string }> = {
-  neutral: { icon: "bg-slate-100 text-mutedStrong", value: "text-ink" },
+  neutral: { icon: "bg-surfaceRaised text-mutedStrong", value: "text-ink" },
   safe: { icon: "bg-successSoft text-success", value: "text-success" },
   warning: { icon: "bg-warningSoft text-warning", value: "text-warning" },
   danger: { icon: "bg-dangerSoft text-danger", value: "text-danger" },
@@ -64,25 +64,30 @@ export function OperationsStatusRailView({
     : [...model.criticalMessages, `운영 데이터 확인 실패: ${errorMessage}`];
 
   return (
-    <section className="border-t border-line/80" aria-label="운영 상태 레일">
-      <div className="mx-auto max-w-[1440px] px-4 py-3 md:px-6" aria-live="polite">
-        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line lg:grid-cols-3 xl:grid-cols-6">
+    <section className="operations-status-rail" aria-label="운영 상태 레일">
+      <div
+        className="operations-status-rail__viewport"
+        role="region"
+        aria-label="운영 상태 항목"
+        tabIndex={0}
+      >
+        <dl className="operations-status-rail__grid" aria-live="polite">
           {model.items.map((item) => {
             const Icon = itemIcons[item.key];
             const tone = toneClasses[item.tone];
             return (
-              <div key={item.key} className="min-w-0 bg-surface px-3 py-3">
-                <dt className="flex items-center gap-2 text-xs font-medium text-mutedStrong">
-                  <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full ${tone.icon}`}>
+              <div key={item.key} className="operations-status-rail__item">
+                <dt>
+                  <span className={`operations-status-rail__icon ${tone.icon}`}>
                     <Icon size={14} aria-hidden={true} />
                   </span>
                   {item.label}
                 </dt>
-                <dd className="mt-2 min-w-0 pl-9">
-                  <span className={`block truncate text-sm font-bold ${tone.value}`} title={item.value}>
+                <dd>
+                  <span className={`operations-status-rail__value ${tone.value}`} title={item.value}>
                     {item.value}
                   </span>
-                  <span className="mt-0.5 block [overflow-wrap:anywhere] text-xs text-mutedStrong" title={item.detail}>
+                  <span className="operations-status-rail__detail" title={item.detail}>
                     {item.detail}
                   </span>
                 </dd>
@@ -94,11 +99,11 @@ export function OperationsStatusRailView({
 
       {criticalMessages.length > 0 ? (
         <div
-          className="border-t border-danger/25 bg-dangerSoft px-4 py-2.5 text-sm font-medium text-danger md:px-6"
+          className="operations-status-rail__alert"
           role="alert"
           aria-live="assertive"
         >
-          <div className="mx-auto flex max-w-[1392px] items-start gap-2">
+          <div>
             <AlertTriangle className="mt-0.5 shrink-0" size={17} aria-hidden={true} />
             <span>중요 경고 · {criticalMessages.join(" · ")}</span>
           </div>

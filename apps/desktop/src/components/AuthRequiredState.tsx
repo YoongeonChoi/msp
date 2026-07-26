@@ -3,7 +3,7 @@ import { Panel, Pill } from "./ui";
 
 export function AuthRequiredState({ surface = "운영 데이터" }: { readonly surface?: string }) {
   return (
-    <Panel className="border-amber-200 bg-amber-50">
+    <Panel className="!border-warning/30 !bg-warningSoft">
       <AuthRequiredBlock surface={surface} />
     </Panel>
   );
@@ -11,7 +11,7 @@ export function AuthRequiredState({ surface = "운영 데이터" }: { readonly s
 
 export function AuthRequiredBlock({ surface = "운영 데이터" }: { readonly surface?: string }) {
   return (
-    <div className="space-y-2 text-sm text-amber-900">
+    <div className="space-y-2 text-sm text-warning">
       <div className="flex flex-wrap items-center gap-2 font-semibold">
         <AlertTriangle size={16} aria-hidden="true" />
         <span>데이터 접근 권한 필요</span>

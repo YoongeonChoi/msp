@@ -11,6 +11,7 @@ import { operationsSnapshotQueryKey } from "../src/lib/operationsData";
 import type { OperationsDataApi } from "../src/lib/operationsData";
 import type { OperationCommandReceipt, OperationsSnapshot } from "../src/lib/operationsContracts";
 import { buildSafetyRailModel } from "../src/lib/operationsStatusModel";
+import type { PageKey } from "../src/lib/navigation";
 import {
   canMutateIncidentOperations,
   canMutateOperations,
@@ -20,6 +21,7 @@ import {
 import { makeOperationsSnapshot } from "./operationsFixture";
 
 interface RenderOptions {
+  readonly surface?: PageKey;
   readonly offline?: boolean;
   readonly stale?: boolean;
   readonly aal1?: boolean;
@@ -30,6 +32,7 @@ interface RenderOptions {
 }
 
 function renderOperations({
+  surface = "control",
   offline = false,
   stale = false,
   aal1 = false,
@@ -83,8 +86,9 @@ function renderOperations({
   };
   const markup = renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <AppLayout page="control" setPage={() => undefined} connectionState="connected">
+      <AppLayout page={surface} setPage={() => undefined} connectionState="connected">
         <OperationsPage
+          surface={surface}
           dataApi={dataApi}
           onlineOverride={!offline}
           nowFactory={() => new Date("2099-07-14T00:00:00.000Z")}
@@ -99,12 +103,12 @@ const freshDocument = renderOperations();
 const freshText = freshDocument.body.textContent ?? "";
 const appHeader = freshDocument.querySelector('header[aria-label="앱 헤더"]');
 assert.ok(appHeader, "the unified AppHeader is rendered");
-const primaryNavigation = appHeader.querySelector('nav[aria-label="주 탐색"]');
+const primaryNavigation = freshDocument.querySelector('nav[aria-label="주 탐색"]');
 assert.ok(primaryNavigation);
 assert.deepEqual(
   Array.from(primaryNavigation.querySelectorAll("button"), (button) => button.textContent?.trim()),
-  ["운영 제어", "계정·보안"],
-  "the AppHeader exposes only the two approved top-level destinations"
+  ["운영 제어", "승인 검토", "주문·보유", "수동 대사", "사고 대응", "명령 기록", "런타임 상태", "접근 권한", "계정·보안"],
+  "the dashboard navigation exposes the nine real operational workspaces"
 );
 assert.ok(freshDocument.querySelector('[aria-label="운영 상태 레일"]'));
 assert.equal((freshText.match(/LIVE 잠금/g) ?? []).length, 1, "LIVE lock is shown once in the shared header rail");
@@ -122,6 +126,21 @@ assert.match(freshText, /Worker 적용 확인 없음/);
 assert.match(freshText, /최근 기록/);
 assert.doesNotMatch(freshText, /실주문 허용 활성화/);
 assert.doesNotMatch(freshText, /샌드박스|broker_sandbox/);
+
+const portfolioText = renderOperations({ surface: "portfolio" }).body.textContent ?? "";
+assert.match(portfolioText, /주문 원장/);
+assert.match(portfolioText, /보유 현황/);
+assert.match(portfolioText, /검증된 read model/);
+
+const recordsText = renderOperations({ surface: "records" }).body.textContent ?? "";
+assert.match(recordsText, /명령 기록/);
+assert.match(recordsText, /감사 이벤트/);
+assert.match(recordsText, /Worker 적용·후조건 상세/);
+
+const runtimeText = renderOperations({ surface: "runtime" }).body.textContent ?? "";
+assert.match(runtimeText, /컴포넌트 상태/);
+assert.match(runtimeText, /신선도 정책/);
+assert.match(runtimeText, /고정된 운영 계약/);
 
 const stoppedPrimaryButtons = commandButtonsByPriority(freshDocument, "primary");
 assert.equal(stoppedPrimaryButtons.length, 1, "stopped runtime exposes exactly one primary CTA");

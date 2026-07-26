@@ -17,14 +17,20 @@ import { useOnlineStatus } from "../lib/useOnlineStatus";
 import { useControlPlaneRealtimeHealth } from "../lib/controlPlaneRealtime";
 import type { ClientRealtimeHealth } from "../lib/controlPlaneRealtime";
 import type { OperationsSnapshotContextValue } from "../lib/operationsSnapshotContext";
+import type { PageKey } from "../lib/navigation";
 import { AttentionQueue } from "../components/operations/AttentionQueue";
+import {
+  OperationsSummaryStrip,
+  PortfolioView,
+  RecordsView,
+  RuntimeHealthView
+} from "../components/operations/OperationsDataViews";
 import {
   commandLabel,
   isCommandPostconditionVerified,
   SafetyCommandCenter
 } from "../components/operations/SafetyCommandCenter";
 import { StaleDataBoundary } from "../components/operations/StaleDataBoundary";
-import { ReadonlyReveal } from "../components/ReadonlyReveal";
 import { KeyValue, LoadingState, Pill } from "../components/ui";
 import { LazySurfaceBoundary } from "../components/LazySurfaceBoundary";
 import type { DrawerState } from "../lib/uiState";
@@ -51,6 +57,9 @@ const ManualReconciliationCase = lazy(async () => ({
 const MfaSecurityPanel = lazy(async () => ({
   default: (await import("../components/operations/MfaSecurityPanel")).MfaSecurityPanel
 }));
+const AccessChangePanel = lazy(async () => ({
+  default: (await import("../components/operations/AccessChangePanel")).AccessChangePanel
+}));
 const DrawerSurface = lazy(async () => ({
   default: (await import("../components/DialogSurface")).DrawerSurface
 }));
@@ -58,6 +67,7 @@ const DrawerSurface = lazy(async () => ({
 const secureOperationId: OperationIdFactory = () => crypto.randomUUID();
 
 export interface OperationsPageProps {
+  readonly surface?: PageKey;
   readonly dataApi?: OperationsDataApi;
   readonly unknownDataApi?: UnknownResolutionDataApi;
   readonly onlineOverride?: boolean;
@@ -75,6 +85,7 @@ export function OperationsPage(props: OperationsPageProps = {}) {
   if (props.snapshotSource) {
     return (
       <OperationsPageContent
+        surface={props.surface}
         dataApi={props.dataApi ?? props.snapshotSource.dataApi}
         unknownDataApi={props.unknownDataApi}
         idFactory={props.idFactory}
@@ -93,6 +104,7 @@ export function OperationsPage(props: OperationsPageProps = {}) {
 }
 
 function StandaloneOperationsPage({
+  surface = "control",
   dataApi = operationsDataApi,
   unknownDataApi = unknownResolutionDataApi,
   onlineOverride,
@@ -111,6 +123,7 @@ function StandaloneOperationsPage({
   return (
     <OperationsPageContent
       dataApi={dataApi}
+      surface={surface}
       unknownDataApi={unknownDataApi}
       idFactory={idFactory}
       nowFactory={nowFactory}
@@ -122,6 +135,7 @@ function StandaloneOperationsPage({
 }
 
 function OperationsPageContent({
+  surface = "control",
   dataApi,
   unknownDataApi = unknownResolutionDataApi,
   idFactory = secureOperationId,
@@ -130,6 +144,7 @@ function OperationsPageContent({
   isOnline,
   clientRealtime
 }: {
+  readonly surface?: PageKey;
   readonly dataApi: OperationsDataApi;
   readonly unknownDataApi?: UnknownResolutionDataApi;
   readonly idFactory?: OperationIdFactory;
@@ -427,6 +442,11 @@ function OperationsPageContent({
     incidentMutation.isPending ||
     unknownRequestMutation.isPending ||
     unknownReviewMutation.isPending;
+  const attentionCount = snapshot.pending_reviews.length +
+    snapshot.incidents.filter((incident) => incident.status !== "resolved").length +
+    snapshot.reconciliation_cases.filter((item) => item.status !== "resolved").length +
+    (unknownSnapshot?.cases.length ?? 0) +
+    snapshot.commands.filter((command) => !isCommandPostconditionVerified(command, snapshot)).length;
 
   const rejectBlockedMutation = () => {
     setNotice("현재 상태에서는 변경할 수 없습니다. 최신 상태와 유효한 온라인 세션을 먼저 확인하세요.");
@@ -440,52 +460,138 @@ function OperationsPageContent({
     >
       <StaleDataBoundary health={snapshot.runtime_health} isOnline={isOnline} clientFresh={clientFresh}>
       {notice ? (
-        <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900" role="status" aria-live="polite">
+        <div className="inline-notice inline-notice--info" role="status" aria-live="polite">
           {notice}
         </div>
       ) : null}
 
-      <div className="grid min-w-0 gap-5 xl:grid-cols-12">
-        <div className="min-w-0 xl:col-span-7">
-          <SafetyCommandCenter
+      {surface === "control" ? (
+        <div className="operations-dashboard">
+          <OperationsSummaryStrip
+            snapshot={snapshot}
+            mutationsAllowed={mutationsAllowed}
+            attentionCount={attentionCount}
+          />
+
+          <div className="operations-dashboard__primary">
+            <div className="min-w-0">
+              <SafetyCommandCenter
+                snapshot={snapshot}
+                mutationsAllowed={mutationsAllowed}
+                pending={pending}
+                onRequest={(commandType, openGuard) => {
+                  if (!mutationsAllowed) {
+                    rejectBlockedMutation();
+                    return;
+                  }
+                  requestMutation.mutate({ commandType, openGuard });
+                }}
+              />
+            </div>
+            <div className="min-w-0">
+              <AttentionQueue
+                snapshot={snapshot}
+                unknownSnapshot={unknownSnapshot}
+                isOnline={isOnline}
+                now={snapshotEvaluationTime}
+                onOpen={setDrawer}
+              />
+            </div>
+          </div>
+
+          <section className="operations-record-shortcuts" aria-labelledby="recent-records-title">
+            <header>
+              <h2 id="recent-records-title">최근 기록</h2>
+              <span>명령 {snapshot.commands.length} · 승인 {snapshot.pending_reviews.length} · 사고 {snapshot.incidents.length}</span>
+            </header>
+            <div>
+              <RecordShortcut label="명령 기록" detail={`${snapshot.commands.length}건 · 최신 상태 확인 포함`} onClick={() => setDrawer({ kind: "command" })} />
+              <RecordShortcut label="승인 기록" detail={`${snapshot.pending_reviews.length}건 · 독립 검토`} onClick={() => setDrawer({ kind: "approval" })} />
+              <RecordShortcut label="사고 기록" detail={`${snapshot.incidents.length}건 · 확인 기한 포함`} onClick={() => setDrawer({ kind: "incident" })} />
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {surface === "approvals" ? (
+        <Suspense fallback={<LoadingState label="승인 작업을 불러오는 중" />}>
+          <ApprovalInbox
             snapshot={snapshot}
             mutationsAllowed={mutationsAllowed}
             pending={pending}
-            onRequest={(commandType, openGuard) => {
-              if (!mutationsAllowed) {
+            onReview={(command, decision, openGuard) => {
+              if (!mutationsAllowed || isSelfReview(snapshot, command)) {
                 rejectBlockedMutation();
                 return;
               }
-              requestMutation.mutate({ commandType, openGuard });
+              reviewMutation.mutate({ commandId: command.command_id, decision, openGuard });
             }}
           />
-        </div>
-        <div className="min-w-0 xl:col-span-5">
-          <AttentionQueue
+        </Suspense>
+      ) : null}
+
+      {surface === "portfolio" ? <PortfolioView snapshot={snapshot} /> : null}
+
+      {surface === "reconciliation" ? (
+        <Suspense fallback={<LoadingState label="수동 대사 작업을 불러오는 중" />}>
+          <ManualReconciliationCase
             snapshot={snapshot}
             unknownSnapshot={unknownSnapshot}
-            isOnline={isOnline}
+            mutationsAllowed={unknownMutationsAllowed}
+            pending={pending}
             now={snapshotEvaluationTime}
-            onOpen={setDrawer}
+            onRequest={(context, evidence, openGuard) => {
+              if (!unknownMutationsAllowed) {
+                rejectBlockedMutation();
+                return;
+              }
+              unknownRequestMutation.mutate({ breakId: context.break_id, evidence, openGuard });
+            }}
+            onReview={(context, decision, openGuard) => {
+              if (!unknownMutationsAllowed) {
+                rejectBlockedMutation();
+                return;
+              }
+              unknownReviewMutation.mutate({ breakId: context.break_id, decision, openGuard });
+            }}
           />
-        </div>
-      </div>
+        </Suspense>
+      ) : null}
 
-      <ReadonlyReveal>
-        <details className="rounded-xl border border-line bg-surface px-5 py-2">
-          <summary className="flex min-h-control cursor-pointer items-center justify-between gap-3 font-semibold">
-            <span>최근 기록</span>
-            <span className="text-xs font-normal text-mutedStrong">
-              명령 {snapshot.commands.length} · 승인 {snapshot.pending_reviews.length} · 사고 {snapshot.incidents.length}
-            </span>
-          </summary>
-          <div className="grid gap-3 border-t border-line py-4 md:grid-cols-3">
-            <RecordShortcut label="명령 기록" detail={`${snapshot.commands.length}건 · 최신 상태 확인 포함`} onClick={() => setDrawer({ kind: "command" })} />
-            <RecordShortcut label="승인 기록" detail={`${snapshot.pending_reviews.length}건 · 독립 검토`} onClick={() => setDrawer({ kind: "approval" })} />
-            <RecordShortcut label="사고 기록" detail={`${snapshot.incidents.length}건 · 확인 기한 포함`} onClick={() => setDrawer({ kind: "incident" })} />
-          </div>
-        </details>
-      </ReadonlyReveal>
+      {surface === "incidents" ? (
+        <Suspense fallback={<LoadingState label="사고 대응 화면을 불러오는 중" />}>
+          <IncidentCenter
+            snapshot={snapshot}
+            mutationsAllowed={incidentMutationsAllowed}
+            pending={pending}
+            onAction={(incident, action, openGuard) => {
+              if (!incidentMutationsAllowed) {
+                rejectBlockedMutation();
+                return;
+              }
+              incidentMutation.mutate({ incidentId: incident.incident_id, action, openGuard });
+            }}
+          />
+        </Suspense>
+      ) : null}
+
+      {surface === "records" ? (
+        <div className="operations-page-stack">
+          <RecordsView snapshot={snapshot} />
+          <section className="command-ledger-detail" aria-labelledby="command-ledger-detail-title">
+            <header><h2 id="command-ledger-detail-title">Worker 적용·후조건 상세</h2></header>
+            <CommandDrawerContent snapshot={snapshot} />
+          </section>
+        </div>
+      ) : null}
+
+      {surface === "runtime" ? <RuntimeHealthView snapshot={snapshot} /> : null}
+
+      {surface === "access" ? (
+        <Suspense fallback={<LoadingState label="접근권한 작업을 불러오는 중" />}>
+          <AccessChangePanel />
+        </Suspense>
+      ) : null}
 
       <Suspense fallback={<LoadingState label="상세 화면을 불러오는 중" />}>
         {drawer?.kind === "command" ? (
@@ -571,7 +677,7 @@ function OperationsPageContent({
 
 function RecordShortcut({ label, detail, onClick }: { readonly label: string; readonly detail: string; readonly onClick: () => void }) {
   return (
-    <button type="button" className="min-h-control rounded-lg border border-line bg-canvas p-4 text-left transition-[transform,opacity] duration-press active:scale-[0.99]" onClick={onClick}>
+    <button type="button" className="record-shortcut min-h-control p-4 text-left transition-[transform,opacity] duration-press active:scale-[0.99]" onClick={onClick}>
       <span className="block font-semibold text-ink">{label}</span>
       <span className="mt-1 block text-xs text-mutedStrong">{detail}</span>
     </button>
@@ -583,14 +689,14 @@ function CommandDrawerContent({ snapshot, commandId }: { readonly snapshot: Oper
     ? snapshot.commands.filter((command) => command.command_id === commandId)
     : snapshot.commands;
   if (commands.length === 0) {
-    return <p className="rounded-lg border border-dashed border-line p-4 text-sm text-mutedStrong">표시할 명령 기록이 없습니다.</p>;
+    return <p className="rounded-lg border border-dashed border-lineSubtle p-4 text-sm text-mutedStrong">표시할 명령 기록이 없습니다.</p>;
   }
   return (
     <div className="space-y-3">
       {commands.map((command) => {
         const complete = isCommandPostconditionVerified(command, snapshot);
         return (
-          <article key={command.command_id} className="rounded-lg border border-line bg-surface p-4">
+          <article key={command.command_id} className="rounded-lg border border-lineSubtle bg-surface p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
                 <h3 className="font-semibold">{commandLabel(command.command_type)}</h3>
