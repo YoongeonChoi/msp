@@ -13,7 +13,6 @@ async def _run() -> int:
     started_at = datetime.now(UTC)
     report = await RunContractQualification().execute(
         started_at=started_at,
-        completed_at=datetime.now(UTC),
     )
     print(json.dumps(report.to_json(), ensure_ascii=False, sort_keys=True))
     return 0 if report.result == "pass" else 1

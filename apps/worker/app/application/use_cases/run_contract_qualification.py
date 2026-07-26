@@ -109,6 +109,7 @@ class _QualificationCheckFailed(RuntimeError):
 
 
 CheckRunner = Callable[[], Awaitable[Mapping[str, ContractMetricValue]]]
+Clock = Callable[[], datetime]
 
 
 class RunContractQualification:
@@ -125,17 +126,22 @@ class RunContractQualification:
         self,
         *,
         contract_artifact_sha256: str = QUALIFIED_TOSS_OPENAPI_SHA256,
+        clock: Clock = lambda: datetime.now(UTC),
     ) -> None:
         self.contract_artifact_sha256 = contract_artifact_sha256
+        self.clock = clock
         self._brokers: list[ContractTestBroker] = []
 
     async def execute(
         self,
         *,
         started_at: datetime,
-        completed_at: datetime,
+        completed_at: datetime | None = None,
     ) -> ContractQualificationReport:
-        _require_aware_window(started_at, completed_at)
+        if completed_at is not None:
+            _require_aware_window(started_at, completed_at)
+        elif started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise ValueError("contract_qualification_window_is_invalid")
         self._brokers = []
         runners: dict[ContractQualificationCheckId, CheckRunner] = {
             "cancel_lifecycle": self._verify_cancel_lifecycle,
@@ -148,11 +154,13 @@ class RunContractQualification:
         checks = tuple(
             [await self._run_check(check_id, runners[check_id]) for check_id in _CHECK_IDS]
         )
+        actual_completed_at = completed_at if completed_at is not None else self.clock()
+        _require_aware_window(started_at, actual_completed_at)
         return ContractQualificationReport(
             suite_version=self.suite_version,
             openapi_sha256=self.contract_artifact_sha256,
             started_at=started_at,
-            completed_at=completed_at,
+            completed_at=actual_completed_at,
             result="pass" if all(check.status == "pass" for check in checks) else "fail",
             checks=checks,
         )
