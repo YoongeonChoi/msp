@@ -52,6 +52,7 @@
     "20260724210000_durable_operations_scheduler.sql": "f7ca9038419682d11c1c957349035fa0bdeea0e708eea8514ba6f9886d359dec",
     "20260724234500_durable_scheduler_conflict_target.sql": "c939a7dcd47b278043a60f4f3e6a81847c0c763dcd8f0f6f0427a45e280ac1eb",
     "20260725090000_durable_scheduler_budget_policy.sql": "9e7ea783cc480f97fc647baa59d43b215caa0df3ee57d9666a9c64ba5f3f1cac",
-    "20260725235840_durable_scheduler_heartbeat_contract.sql": "fe1a359e16ae958f4cfacad17a9c93fbd31702f49583ee1f9de6517b8e8011fa"
+    "20260725235840_durable_scheduler_heartbeat_contract.sql": "fe1a359e16ae958f4cfacad17a9c93fbd31702f49583ee1f9de6517b8e8011fa",
+    "20260726150000_paper_execution_disabled_scheduler_idle.sql": "ddc36230a67cc562d0da90be19899192462b671184d1a7374c72c55007a9af43"
   }
 }

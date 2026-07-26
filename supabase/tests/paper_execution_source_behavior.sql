@@ -302,6 +302,70 @@ select
 from private.qualifications
 where id = 'ffffffff-ffff-4fff-8fff-fffffffffff1';
 
+insert into private.worker_leases (
+  account_id, holder_id, fencing_token, acquired_at, renewed_at,
+  expires_at, release_sha
+) values (
+  'paper-primary', '88888888-8888-4888-8888-888888888888', 1,
+  clock_timestamp() - interval '10 seconds',
+  clock_timestamp() - interval '5 seconds',
+  clock_timestamp() + interval '30 minutes', repeat('a', 40)
+);
+
+set role service_role;
+do $$
+begin
+  perform set_config('request.jwt.claim.role', 'service_role', false);
+end;
+$$;
+create temp table disabled_claim as
+select * from worker_api.claim_paper_execution_v1(
+  'paper-primary', '88888888-8888-4888-8888-888888888888',
+  repeat('a', 40), clock_timestamp(), 30
+);
+do $$
+begin
+  if (select count(*) from disabled_claim) <> 0 then
+    raise exception 'disabled_execution_claim_was_not_idle';
+  end if;
+end;
+$$;
+\echo PASS disabled Paper execution returns an idle claim with a current lease
+
+reset role;
+update private.worker_leases
+set expires_at = clock_timestamp() - interval '1 second'
+where account_id = 'paper-primary';
+set role service_role;
+do $$
+declare
+  caught boolean := false;
+begin
+  begin
+    perform * from worker_api.claim_paper_execution_v1(
+      'paper-primary', '88888888-8888-4888-8888-888888888888',
+      repeat('a', 40), clock_timestamp(), 30
+    );
+  exception when serialization_failure then
+    if position('paper_source_gate_lease_or_qualification_stale' in sqlerrm) > 0 then
+      caught := true;
+    else
+      raise;
+    end if;
+  end;
+  if not caught then
+    raise exception 'disabled_execution_stale_lease_was_not_rejected';
+  end if;
+end;
+$$;
+\echo PASS disabled Paper execution still rejects a stale Worker lease
+
+reset role;
+update private.worker_leases
+set renewed_at = clock_timestamp(),
+    expires_at = clock_timestamp() + interval '30 minutes'
+where account_id = 'paper-primary';
+
 update private.execution_controls as control
 set execution_enabled = true,
     control_epoch = control.control_epoch + 1,
@@ -316,16 +380,6 @@ set execution_enabled = true,
     updated_reason_code = 'paper_source_behavior_verification',
     updated_at = clock_timestamp()
 where control.account_id = 'paper-primary';
-
-insert into private.worker_leases (
-  account_id, holder_id, fencing_token, acquired_at, renewed_at,
-  expires_at, release_sha
-) values (
-  'paper-primary', '88888888-8888-4888-8888-888888888888', 1,
-  clock_timestamp() - interval '10 seconds',
-  clock_timestamp() - interval '5 seconds',
-  clock_timestamp() + interval '30 minutes', repeat('a', 40)
-);
 
 create temp table paper_source_times as
 select
