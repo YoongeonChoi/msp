@@ -55,10 +55,10 @@ assert.match(container.textContent ?? "", /기본 인증/);
 assert.match(container.textContent ?? "", /2단계 인증/);
 assert.doesNotMatch(container.textContent ?? "", /AAL[12]/);
 assert.match(container.textContent ?? "", /운영 변경 차단/);
-const codeInput = container.querySelector('[aria-label="TOTP 6자리 코드"]');
+const codeInput = container.querySelector('[aria-label="2단계 인증 6자리 코드"]');
 assert.ok(codeInput instanceof dom.window.HTMLInputElement);
 fireEvent.change(codeInput, { target: { value: "123456" } });
-const verifyButton = buttonByText(dom, container, "TOTP로 2단계 인증");
+const verifyButton = buttonByText(dom, container, "2단계 인증 확인");
 await act(async () => verifyButton.click());
 await waitFor(() => verified.length === 1);
 assert.deepEqual(verified[0], { factorId: "factor-verified", code: "123456" });
@@ -108,11 +108,11 @@ const enrollmentRender = render(
   </QueryClientProvider>,
   { container: enrollmentContainer }
 );
-await waitFor(() => enrollmentContainer.textContent?.includes("TOTP 등록 시작") === true);
-await act(async () => buttonByText(dom, enrollmentContainer, "TOTP 등록 시작").click());
-await waitFor(() => enrollmentContainer.querySelector('[alt="TOTP 인증 앱 등록 QR"]') !== null);
+await waitFor(() => enrollmentContainer.textContent?.includes("2단계 인증 등록 시작") === true);
+await act(async () => buttonByText(dom, enrollmentContainer, "2단계 인증 등록 시작").click());
+await waitFor(() => enrollmentContainer.querySelector('[alt="2단계 인증 앱 등록 QR"]') !== null);
 assert.doesNotMatch(enrollmentContainer.textContent ?? "", /secret=|otpauth:/i, "TOTP seed must not render as text");
-const enrollmentCode = enrollmentContainer.querySelector('[aria-label="TOTP 6자리 코드"]');
+const enrollmentCode = enrollmentContainer.querySelector('[aria-label="2단계 인증 6자리 코드"]');
 assert.ok(enrollmentCode instanceof dom.window.HTMLInputElement);
 fireEvent.change(enrollmentCode, { target: { value: "654321" } });
 await act(async () => buttonByText(dom, enrollmentContainer, "등록 및 2단계 인증").click());

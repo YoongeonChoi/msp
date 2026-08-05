@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 import type {
   OperationsSnapshot,
@@ -12,6 +12,7 @@ import {
 } from "../unknownResolutionFixture";
 
 interface CapturedRpc {
+  snapshotReads: number;
   readonly grants: Array<Record<string, unknown>>;
   readonly commands: Array<Record<string, unknown>>;
   readonly reviews: Array<Record<string, unknown>>;
@@ -65,7 +66,8 @@ test.describe("operations RPC safety boundary", () => {
       const mountedDrawers = page.locator('dialog[data-variant="drawer"]');
       await expect(mountedDrawers).toHaveCount(0);
 
-      const pauseButton = page.getByRole("button", { name: "모의거래 일시정지", exact: true });
+      const main = page.getByRole("main");
+      const pauseButton = main.getByRole("button", { name: "모의거래 일시정지", exact: true });
       await expect(pauseButton).toBeEnabled();
       await pauseButton.focus();
       await pauseButton.press("Enter");
@@ -110,11 +112,11 @@ test.describe("operations RPC safety boundary", () => {
         "Worker 적용 확인 전에는 완료가 아닙니다"
       );
 
-      await page.getByRole("button", { name: "승인 검토" }).click();
+      await main.getByRole("button", { name: /· 승인 검토$/ }).click();
       const approvalDrawer = page.getByRole("dialog", { name: "승인 상세" });
       await expect(approvalDrawer).toBeVisible();
       await expect(mountedDrawers).toHaveCount(1);
-      const approveButton = page.getByRole("button", { name: "승인", exact: true });
+      const approveButton = approvalDrawer.getByRole("button", { name: "승인", exact: true });
       await expect(approveButton).toBeEnabled();
       await approveButton.press("Enter");
       await confirmNativeDialog(page, "운영 요청 승인", "승인 전송");
@@ -135,10 +137,10 @@ test.describe("operations RPC safety boundary", () => {
       await approvalDrawer.getByRole("button", { name: "상세 닫기" }).click();
       await expect(approvalDrawer).toHaveCount(0);
       await expect(mountedDrawers).toHaveCount(0);
-      await page.getByRole("button", { name: "사고 확인" }).click();
+      await main.getByRole("button", { name: /· 사고 확인$/ }).click();
       const incidentDrawer = page.getByRole("dialog", { name: "사고 상세" });
       await expect(incidentDrawer).toBeVisible();
-      const incidentButton = page.getByRole("button", { name: "확인 접수" });
+      const incidentButton = incidentDrawer.getByRole("button", { name: "확인 접수", exact: true });
       await expect(incidentButton).toBeEnabled();
       await incidentButton.press("Enter");
       await confirmNativeDialog(page, "사고 확인 접수", "사고 확인 접수");
@@ -156,8 +158,12 @@ test.describe("operations RPC safety boundary", () => {
       );
       expect(blockingViolations).toEqual([]);
       if (viewport.name === "mobile") {
-        await expect(page.getByRole("navigation", { name: "주 탐색" })).toBeVisible();
-        await expect(page.getByRole("button", { name: "계정·보안" })).toBeVisible();
+        await page.getByRole("button", { name: "메뉴 열기" }).click();
+        const mobileMenu = page.getByRole("dialog", { name: "대시보드 메뉴" });
+        const mobileNavigation = mobileMenu.getByRole("navigation", { name: "주 탐색" });
+        await expect(mobileNavigation).toBeVisible();
+        await expect(mobileNavigation.getByRole("button", { name: "계정·보안", exact: true })).toBeVisible();
+        await mobileMenu.getByRole("button", { name: "메뉴 닫기" }).click();
         const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
         expect(horizontalOverflow).toBeLessThanOrEqual(1);
       }
@@ -183,7 +189,7 @@ test.describe("operations RPC safety boundary", () => {
     operationsSnapshot.runtime_health.execution_enabled = true;
     await mockOperationsRpc(page, captured, { operationsSnapshot });
     await page.goto("/?page=control");
-    const pauseButton = page.getByRole("button", { name: "모의거래 일시정지", exact: true });
+    const pauseButton = page.getByRole("main").getByRole("button", { name: "모의거래 일시정지", exact: true });
     await expect(pauseButton).toBeEnabled();
 
     await context.setOffline(true);
@@ -209,7 +215,7 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured, { operationsSnapshot });
     await page.goto("/?page=control");
 
-    await page.getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
+    await page.getByRole("main").getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "모의거래 일시정지" });
     await expect(dialog).toBeVisible();
     await context.setOffline(true);
@@ -240,7 +246,7 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    await page.getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
+    await page.getByRole("main").getByRole("button", { name: "모의거래 일시정지", exact: true }).click();
     await confirmNativeDialog(page, "모의거래 일시정지", "요청 생성");
     await expect.poll(() => captured.grants.length).toBe(1);
     await expect(page.locator('[role="status"][aria-live="polite"]')).toContainText("상태가 변경됨");
@@ -262,10 +268,11 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured, { operationsSnapshot });
     await page.goto("/?page=control");
 
-    await expect(page.getByRole("button", { name: "모의거래 일시정지", exact: true })).toBeDisabled();
+    const main = page.getByRole("main");
+    await expect(main.getByRole("button", { name: "모의거래 일시정지", exact: true })).toBeDisabled();
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
-    await page.getByRole("button", { name: "사고 확인", exact: true }).click();
+    await main.getByRole("button", { name: /· 사고 확인$/ }).click();
     const incidentDrawer = page.getByRole("dialog", { name: "사고 상세" });
     await expect(incidentDrawer).toBeVisible();
     await expect(incidentDrawer.getByRole("button", { name: "확인 접수" })).toBeEnabled();
@@ -282,7 +289,9 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured);
     await page.goto("/?page=control");
 
-    await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+    await page.getByRole("navigation", { name: "주 탐색" })
+      .getByRole("button", { name: "계정·보안", exact: true })
+      .click();
     await expect(page).toHaveURL(/\?page=settings$/);
     const settingsHeading = page.getByRole("heading", { name: "계정·보안", level: 1 });
     await expect(settingsHeading).toBeFocused();
@@ -297,6 +306,42 @@ test.describe("operations RPC safety boundary", () => {
     await expect(page.getByRole("heading", { name: "계정·보안", level: 1 })).toBeFocused();
   });
 
+  test("all nine real workspaces navigate without duplicating snapshot queries", async ({ page }) => {
+    const captured = emptyCapturedRpc();
+    await mockControlPlaneRealtime(page);
+    await mockOperationsRpc(page, captured);
+    await page.goto("/?page=control");
+
+    const workspaces = [
+      { label: "승인 검토", pageKey: "approvals" },
+      { label: "주문·보유", pageKey: "portfolio" },
+      { label: "수동 대사", pageKey: "reconciliation" },
+      { label: "사고 대응", pageKey: "incidents" },
+      { label: "명령 기록", pageKey: "records" },
+      { label: "런타임 상태", pageKey: "runtime" },
+      { label: "접근 권한", pageKey: "access" },
+      { label: "계정·보안", pageKey: "settings" },
+      { label: "운영 제어", pageKey: "control" }
+    ] as const;
+    const primaryNavigation = page.getByRole("navigation", { name: "주 탐색" });
+
+    for (const workspace of workspaces) {
+      await primaryNavigation.getByRole("button", { name: workspace.label, exact: true }).click();
+      await expect(page).toHaveURL(new RegExp(`\\?page=${workspace.pageKey}$`));
+      await expect(page.getByRole("heading", { name: workspace.label, level: 1 })).toBeFocused();
+    }
+
+    await primaryNavigation.getByRole("button", { name: "명령 기록", exact: true }).click();
+    const auditFilter = page.getByRole("main").getByLabel("감사 결과 필터");
+    await auditFilter.selectOption("failed");
+    await expect(auditFilter).toHaveValue("failed");
+    await auditFilter.selectOption("all");
+    await expect(auditFilter).toHaveValue("all");
+
+    expect(captured.snapshotReads).toBeGreaterThan(0);
+    expect(captured.snapshotReads).toBeLessThanOrEqual(3);
+  });
+
   test("a disconnected device is routed to one-time connection without operations errors", async ({ page }) => {
     const captured = emptyCapturedRpc();
     await mockOperationsRpc(page, captured, { authenticatedDevice: false });
@@ -306,7 +351,7 @@ test.describe("operations RPC safety boundary", () => {
     await expect(page.getByRole("heading", { name: "이 기기는 아직 연결되지 않았습니다" })).toBeVisible();
     await expect(page.getByText(/운영 데이터 확인 실패/)).toHaveCount(0);
     await expect(page.getByText(/로그인/)).toHaveCount(0);
-    await page.getByRole("button", { name: "이 기기 연결", exact: true }).click();
+    await page.getByRole("main").getByRole("button", { name: "이 기기 연결", exact: true }).click();
     const deviceConnectionDrawer = page.getByRole("dialog", { name: "이 기기 연결" });
     await expect(deviceConnectionDrawer).toBeVisible();
     await expect(deviceConnectionDrawer.getByLabel("운영 계정 이메일")).toBeVisible();
@@ -333,14 +378,17 @@ test.describe("operations RPC safety boundary", () => {
 
     await page.goto("/?page=control");
 
-    await expect(page.getByText("이 기기 연결됨", { exact: true })).toBeVisible();
+    const appHeader = page.getByRole("banner", { name: "앱 헤더" });
+    await expect(appHeader.getByText("이 기기 연결됨", { exact: true })).toBeVisible();
     const setupGateLabels = page.getByText("운영 API 준비 상태 확인 필요", { exact: true });
     await expect(setupGateLabels).toHaveCount(2);
     await expect(setupGateLabels.first()).toBeVisible();
-    await expect(page.getByText("운영 권한 확인 대기", { exact: true })).toBeVisible();
+    const sidebar = page.getByRole("complementary", { name: "대시보드 내비게이션" });
+    await expect(sidebar.getByText("운영 권한 확인 대기", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "모의거래 일시정지" })).toHaveCount(0);
-    await page.getByText("연결 상세", { exact: true }).click();
-    await expect(page.getByText(/Data API 노출 설정과 스키마 캐시/)).toBeVisible();
+    const main = page.getByRole("main");
+    await main.getByText("연결 상세", { exact: true }).click();
+    await expect(main.getByText(/Data API 노출 설정과 스키마 캐시/)).toBeVisible();
     await expect(page.locator('[role="alert"]')).toHaveCount(1);
     expect(captured.grants).toHaveLength(0);
     expect(captured.commands).toHaveLength(0);
@@ -361,7 +409,8 @@ test.describe("operations RPC safety boundary", () => {
     await mockAuthLifecycle(page, capturedAuth);
     await page.goto("/?page=settings");
 
-    await page.getByRole("button", { name: "이 기기 연결", exact: true }).click();
+    const main = page.getByRole("main");
+    await main.getByRole("button", { name: "이 기기 연결", exact: true }).click();
     const connectionDrawer = page.getByRole("dialog", { name: "이 기기 연결" });
     await connectionDrawer.getByLabel("운영 계정 이메일").fill("operator@example.test");
     await connectionDrawer.getByLabel("비밀번호").fill("test-only-password");
@@ -377,14 +426,14 @@ test.describe("operations RPC safety boundary", () => {
     await expect(page.getByRole("heading", { name: "operator@example.test", level: 2 })).toBeVisible();
     expect(capturedAuth.tokenRequests).toBe(tokenRequestsBeforeReload);
 
-    await page.getByText("연결 정보 보기", { exact: true }).click();
-    const disconnectButton = page.getByRole("button", { name: "이 기기 연결 해제", exact: true });
+    await main.getByText("연결 정보 보기", { exact: true }).click();
+    const disconnectButton = main.getByRole("button", { name: "이 기기 연결 해제", exact: true });
     await disconnectButton.click();
     const disconnectDialog = page.getByRole("dialog", { name: "이 기기 연결을 해제할까요?" });
     await expect(disconnectDialog.getByRole("button", { name: "취소" })).toBeFocused();
     await disconnectDialog.getByRole("button", { name: "연결 해제", exact: true }).click();
     await expect(page.getByRole("heading", { name: "이 기기는 아직 연결되지 않았습니다" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "이 기기 연결", exact: true })).toBeFocused();
+    await expect(main.getByRole("button", { name: "이 기기 연결", exact: true })).toBeFocused();
     expect(capturedAuth.logoutScopes).toEqual(["local"]);
     expect(await page.evaluate(() => localStorage.getItem("sb-e2e-auth-token"))).toBeNull();
   });
@@ -442,7 +491,7 @@ test.describe("operations RPC safety boundary", () => {
     await page.goto("/?page=control");
 
     const fallback = await page.evaluate(() => {
-      const header = document.querySelector(".app-header-glass");
+      const header = document.querySelector(".utility-header");
       const button = document.querySelector("nav button");
       if (!(header instanceof HTMLElement) || !(button instanceof HTMLElement)) {
         throw new Error("fallback fixture elements are required");
@@ -520,12 +569,14 @@ test.describe("operations RPC safety boundary", () => {
 
       await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "instant" }));
       await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
-      await page.getByRole("button", { name: /전체 보기/ }).click();
+      await page.getByRole("main").getByRole("button", { name: /전체 보기/ }).click();
       const queueDrawer = page.getByRole("dialog", { name: "지금 확인할 항목 전체" });
       await expect(queueDrawer).toBeVisible();
       await queueDrawer.getByRole("button", { name: "상세 닫기" }).click();
       await expect(queueDrawer).toBeHidden();
-      await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+      await page.getByRole("navigation", { name: "주 탐색" })
+        .getByRole("button", { name: "계정·보안", exact: true })
+        .click();
       await expect(page.getByRole("heading", { name: "계정·보안", level: 1 })).toBeFocused();
       await page.goBack();
       await expect(page.getByRole("heading", { name: "운영 제어", level: 1 })).toBeFocused();
@@ -571,15 +622,15 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    await openReconciliationDrawer(page);
-    const requestButton = page.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
+    const reconciliationDrawer = await openReconciliationDrawer(page);
+    const requestButton = reconciliationDrawer.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
     await expect(requestButton).toBeDisabled();
     const evidenceSha = "d".repeat(64);
-    await page.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
-    await page.getByLabel("증거 SHA-256").fill(evidenceSha);
-    await page.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
-    await page.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
-    await page.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
+    await reconciliationDrawer.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
+    await reconciliationDrawer.getByLabel("증거 SHA-256").fill(evidenceSha);
+    await reconciliationDrawer.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
+    await reconciliationDrawer.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
+    await reconciliationDrawer.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
     await expect(requestButton).toBeEnabled();
 
     await requestButton.click();
@@ -643,10 +694,10 @@ test.describe("operations RPC safety boundary", () => {
     await mockOperationsRpc(page, captured, { operationsSnapshot, unknownSnapshot });
     await page.goto("/?page=control");
 
-    await openReconciliationDrawer(page);
-    await expect(page.getByText("본인이 요청한 회계 조정은 승인하거나 거절할 수 없습니다.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "증거 승인" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "증거 거절" })).toBeDisabled();
+    const reconciliationDrawer = await openReconciliationDrawer(page);
+    await expect(reconciliationDrawer.getByText("본인이 요청한 회계 조정은 승인하거나 거절할 수 없습니다.")).toBeVisible();
+    await expect(reconciliationDrawer.getByRole("button", { name: "증거 승인" })).toBeDisabled();
+    await expect(reconciliationDrawer.getByRole("button", { name: "증거 거절" })).toBeDisabled();
     expect(captured.unknownGrants).toHaveLength(0);
     expect(captured.unknownReviews).toHaveLength(0);
   });
@@ -661,8 +712,8 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    await openReconciliationDrawer(page);
-    const approveButton = page.getByRole("button", { name: "증거 승인" });
+    const reconciliationDrawer = await openReconciliationDrawer(page);
+    const approveButton = reconciliationDrawer.getByRole("button", { name: "증거 승인" });
     await expect(approveButton).toBeEnabled();
     await approveButton.click();
     await confirmNativeDialog(page, "회계 조정 승인 확인", "승인 전송");
@@ -675,8 +726,8 @@ test.describe("operations RPC safety boundary", () => {
       bound_command_type: "close_unknown_execution",
       command_payload: { decision: "approve", reviewer_role: "risk_approver" }
     });
-    await expect(page.getByText("승인됨 · Worker 적용 확인 대기")).toBeVisible();
-    const timeline = page.getByRole("list", { name: "조정 요청·승인·Worker 적용·회계 반영 타임라인" });
+    await expect(reconciliationDrawer.getByText("승인됨 · Worker 적용 확인 대기")).toBeVisible();
+    const timeline = reconciliationDrawer.getByRole("list", { name: "조정 요청·승인·Worker 적용·회계 반영 타임라인" });
     await expect(timeline.getByText(/Worker 적용 확인/)).toBeVisible();
     await expect(timeline.getByText("미확인 · 대기").first()).toBeVisible();
     await expect(page.getByText("Worker 적용·회계 반영 확인")).toHaveCount(0);
@@ -693,14 +744,14 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    await openReconciliationDrawer(page);
+    const reconciliationDrawer = await openReconciliationDrawer(page);
     const evidenceSha = "d".repeat(64);
-    await page.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
-    await page.getByLabel("증거 SHA-256").fill(evidenceSha);
-    await page.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
-    await page.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
-    await page.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
-    const requestButton = page.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
+    await reconciliationDrawer.getByLabel("증거 자료 위치").fill(`urn:sha256:${evidenceSha}`);
+    await reconciliationDrawer.getByLabel("증거 SHA-256").fill(evidenceSha);
+    await reconciliationDrawer.getByLabel("증거 수집 시각").fill(new Date(Date.now() - 60_000).toISOString());
+    await reconciliationDrawer.getByLabel("확정된 최종 주문 상태").selectOption("canceled");
+    await reconciliationDrawer.getByLabel("누락 체결 목록 (엄격한 JSON 배열)").fill("[]");
+    const requestButton = reconciliationDrawer.getByRole("button", { name: "추가 본인 확인 후 조정 요청" });
     await expect(requestButton).toBeEnabled();
 
     await context.setOffline(true);
@@ -732,8 +783,8 @@ test.describe("operations RPC safety boundary", () => {
     });
     await page.goto("/?page=control");
 
-    await openReconciliationDrawer(page);
-    const evidenceInput = page.getByLabel("증거 자료 위치");
+    const reconciliationDrawer = await openReconciliationDrawer(page);
+    const evidenceInput = reconciliationDrawer.getByLabel("증거 자료 위치");
     await evidenceInput.fill(`urn:sha256:${"d".repeat(64)}`);
     await expect(evidenceInput).toHaveValue(/urn:sha256:/);
 
@@ -757,7 +808,9 @@ test.describe("operations RPC safety boundary", () => {
     expect(captured.unknownRequests).toHaveLength(0);
     expect(await page.evaluate(() => localStorage.getItem("sb-e2e-auth-token"))).toBeNull();
 
-    await page.getByRole("button", { name: "계정·보안", exact: true }).click();
+    await page.getByRole("navigation", { name: "주 탐색" })
+      .getByRole("button", { name: "계정·보안", exact: true })
+      .click();
     await expect(page.getByRole("heading", { name: "이 기기는 아직 연결되지 않았습니다" })).toBeVisible();
   });
 });
@@ -854,6 +907,7 @@ async function mockOperationsRpc(
       return;
     }
     if (path === "/rest/v1/rpc/get_desktop_operations_snapshot_v1") {
+      captured.snapshotReads += 1;
       if (options.snapshotRpcError) {
         await route.fulfill({
           status: options.snapshotRpcError.status,
@@ -1233,6 +1287,7 @@ function rpcArgument(body: Record<string, unknown>, name: string): Record<string
 
 function emptyCapturedRpc(): CapturedRpc {
   return {
+    snapshotReads: 0,
     grants: [],
     commands: [],
     reviews: [],
@@ -1258,9 +1313,16 @@ async function confirmNativeDialog(page: Page, title: string, confirmLabel: stri
   await expect(dialog).toHaveCount(0);
 }
 
-async function openReconciliationDrawer(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "대사 상세" }).first().click();
-  await expect(page.getByRole("dialog", { name: "수동 대사 상세" })).toBeVisible();
+async function openReconciliationDrawer(page: Page): Promise<Locator> {
+  const attentionQueue = page.getByRole("main").getByRole("list", { name: "운영 확인 대기열" });
+  const targetCase = attentionQueue.getByRole("listitem").filter({ hasText: "005930 매수 상태 확인" });
+  await expect(targetCase).toHaveCount(1);
+  const openButton = targetCase.getByRole("button");
+  await expect(openButton).toHaveCount(1);
+  await openButton.click();
+  const drawer = page.getByRole("dialog", { name: "수동 대사 상세" });
+  await expect(drawer).toBeVisible();
+  return drawer;
 }
 
 async function fulfillPreflight(route: Route): Promise<void> {

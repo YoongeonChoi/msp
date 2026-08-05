@@ -102,6 +102,15 @@ async def test_operations_runtime_wires_real_v2_executor_into_execution_stage(
     assert runtime.run_execution_v2.durable_port is runtime.worker_api
     assert isinstance(runtime.execution_source, FakePaperExecutionSource)
     assert supervisor.source is runtime.execution_source
+    lease_manager = cast(Any, graph["lease_manager"])
+    for stage_name in ("commands", "settlement"):
+        lease_provider = cast(Any, graph[stage_name]).lease_provider
+        assert lease_provider.__self__ is lease_manager
+        assert lease_provider.__func__ is type(lease_manager).current_lease
+    reconciliation = cast(Any, graph["reconciliation"])
+    for stage in (reconciliation.unknown, reconciliation.generic):
+        assert stage.lease_provider.__self__ is lease_manager
+        assert stage.lease_provider.__func__ is type(lease_manager).current_lease
     assert not hasattr(runtime.scheduler_loop, "runtime")
     assert cast(Any, runtime.scheduler_loop)._runtime is graph["facade"]
     await runtime.close()

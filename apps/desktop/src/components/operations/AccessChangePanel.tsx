@@ -308,7 +308,7 @@ function AccessChangePanelContent({
     return (
       <Panel className="lg:col-span-2">
         <SectionTitle title="접근권한" detail={<Pill tone="neutral">읽기 전용</Pill>} />
-        <div className="flex items-start gap-3 rounded-lg border border-line bg-canvas p-4">
+        <div className="flex items-start gap-3 rounded-lg bg-canvas p-4">
           <ShieldCheck className="mt-0.5 shrink-0 text-mutedStrong" size={20} aria-hidden="true" />
           <div className="min-w-0">
             <p className="font-semibold text-ink">현재 역할</p>
@@ -446,11 +446,11 @@ function AccessChangePanelContent({
         </div>
       </form>
 
-      <div className="mt-7 border-t border-line pt-6">
+      <div className="mt-7 border-t border-lineSubtle pt-6">
         <SectionTitle title="권한 변경 승인 대기함" detail={<Pill tone="warning">{pendingReceipts.length}건</Pill>} />
         <div className="space-y-3">
           {pendingReceipts.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-line p-4 text-sm text-mutedStrong">검토할 권한 변경 요청이 없습니다.</p>
+            <p className="rounded-lg border border-dashed border-lineSubtle p-4 text-sm text-mutedStrong">검토할 권한 변경 요청이 없습니다.</p>
           ) : pendingReceipts.map((receipt) => {
             const blockedReason = accessReviewBlockedReason({
               snapshot,
@@ -463,7 +463,7 @@ function AccessChangePanelContent({
             const disabled = blockedReason !== null;
             const blockedReasonId = `access-review-blocked-${receipt.request_id}`;
             return (
-              <article key={receipt.request_id} className="rounded-lg border border-line p-4">
+              <article key={receipt.request_id} className="rounded-lg border border-lineSubtle p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="font-semibold text-ink">

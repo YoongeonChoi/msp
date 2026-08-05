@@ -366,6 +366,21 @@ Supabase client 설정이 없으면 앱은 fail-closed 연결 안내를 표시�
 npm --workspace apps/desktop run tauri -- dev
 ```
 
+### Windows 설치 EXE
+
+Windows에서 hosted Supabase URL과 publishable key를 `apps/desktop/.env.local`에
+둔 뒤, 저장소 root에서 다음 한 명령으로 lint/test/E2E/Rust 검사와 NSIS 설치 파일
+생성을 실행합니다.
+
+```powershell
+npm run desktop:bundle:windows
+```
+
+결과는 `apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe`이며 SHA-256과
+서명 상태가 함께 출력됩니다. Desktop은 Worker를 내장하지 않고, unsigned 설치 파일은
+SmartScreen 경고가 날 수 있습니다. 설정, 설치, 서명과 Render 선행 조건은
+[Windows Desktop](docs/WINDOWS_DESKTOP.md)을 따릅니다.
+
 ## Paper V2를 E2E로 실행하려면
 
 안전 Quickstart와 실제 control plane 구성은 의도적으로 분리돼 있습니다.
@@ -558,6 +573,9 @@ cd apps/desktop/src-tauri
 cargo check --locked
 cargo test --locked
 cargo build --locked
+
+# Windows: 공개 설정 사전검사 + 위 검사 + NSIS setup.exe
+npm run desktop:bundle:windows
 ```
 
 Migration과 repository policy:
@@ -666,6 +684,7 @@ pipeline, 대형 Worker API·migration·verifier 수직 분해입니다. 외부 
 - [API Connections](docs/API_CONNECTIONS.md) · [API Gaps](docs/API_GAPS.md)
 - [Cost Limits](docs/COST_LIMITS.md) · [Observability](docs/OBSERVABILITY.md)
 - [Current QA Iteration Scorecard](docs/QA_ITERATION_SCORECARD.md) · [Test Plan](docs/TEST_PLAN.md)
+- [Windows Desktop](docs/WINDOWS_DESKTOP.md) · [Release Process](docs/RELEASE_PROCESS.md)
 
 ## 보안, 기여와 라이선스
 

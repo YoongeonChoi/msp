@@ -7,11 +7,11 @@
   overflow: visible;
   border: 0;
   background: transparent;
-  color: #191f28;
+  color: var(--color-ink);
 }
 
 .dialog-surface::backdrop {
-  background: rgb(25 31 40 / 40%);
+  background: rgb(0 0 0 / 72%);
 }
 
 .dialog-surface[data-variant="drawer"] {
@@ -26,27 +26,27 @@
   max-height: calc(100dvh - 2rem);
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 20px;
-  background:
-    linear-gradient(rgb(255 255 255 / 94%), rgb(255 255 255 / 94%)) padding-box,
-    linear-gradient(145deg, rgb(255 255 255 / 95%), rgb(217 224 234 / 78%)) border-box;
-  box-shadow: 0 24px 64px rgb(25 31 40 / 18%);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 46%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
   animation: dialog-surface-enter 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
   height: 100%;
   max-height: none;
-  border-radius: 20px 0 0 20px;
+  border: 0;
+  border-left: 1px solid var(--color-line);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  box-shadow: -16px 0 36px rgb(0 0 0 / 32%);
   animation-name: dialog-drawer-enter;
 }
 
-/* Only the top-most overlay keeps glass blur when a confirm opens in a drawer. */
 .dialog-surface__panel:has(> .dialog-surface[open]) {
-  background: #fff;
+  background: var(--color-surface);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -61,7 +61,7 @@
 }
 
 .dialog-surface__header--drawer {
-  border-bottom: 1px solid #d9e0ea;
+  border-bottom: 1px solid var(--color-line-subtle);
 }
 
 .dialog-surface__heading-copy {
@@ -70,7 +70,7 @@
 
 .dialog-surface__title {
   margin: 0;
-  color: #191f28;
+  color: var(--color-ink);
   font-size: 20px;
   font-weight: 700;
   line-height: 1.5;
@@ -79,7 +79,7 @@
 
 .dialog-surface__description {
   margin-top: 6px;
-  color: #6b7684;
+  color: var(--color-muted-strong);
   font-size: 15px;
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -89,7 +89,7 @@
   min-height: 0;
   padding: 8px 24px 24px;
   overflow: auto;
-  color: #191f28;
+  color: var(--color-ink);
   font-size: 15px;
   line-height: 1.6;
   overscroll-behavior: contain;
@@ -103,10 +103,10 @@
 .dialog-surface__error {
   margin: 0 24px 16px;
   padding: 12px 14px;
-  border: 1px solid #f1b9b4;
-  border-radius: 12px;
-  background: #fff2f0;
-  color: #b42318;
+  border: 1px solid rgb(226 117 123 / 42%);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -120,7 +120,7 @@
 }
 
 .dialog-surface__footer--drawer {
-  border-top: 1px solid #d9e0ea;
+  border-top: 1px solid var(--color-line-subtle);
   padding-top: 16px;
 }
 
@@ -144,7 +144,7 @@
   align-items: center;
   justify-content: center;
   padding: 0 18px;
-  border-radius: 12px;
+  border-radius: var(--radius-sm);
 }
 
 .dialog-surface__icon-button {
@@ -152,10 +152,10 @@
   flex: 0 0 auto;
   place-items: center;
   padding: 0;
-  border-color: #d9e0ea;
-  border-radius: 12px;
-  background: #fff;
-  color: #191f28;
+  border-color: var(--color-control-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
 }
 
 .dialog-surface__button:active:not(:disabled),
@@ -165,7 +165,7 @@
 
 .dialog-surface__button:focus-visible,
 .dialog-surface__icon-button:focus-visible {
-  outline: 3px solid #2563eb;
+  outline: 3px solid var(--color-focus);
   outline-offset: 2px;
 }
 
@@ -176,32 +176,32 @@
 }
 
 .dialog-surface__button--neutral {
-  border-color: #d9e0ea;
-  background: #fff;
-  color: #191f28;
+  border-color: var(--color-control-line);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
 }
 
 .dialog-surface__button--neutral:hover:not(:disabled),
 .dialog-surface__icon-button:hover:not(:disabled) {
-  background: #f4f7fb;
+  background: #202428;
 }
 
 .dialog-surface__button--primary {
-  background: #2563eb;
+  background: var(--color-action);
   color: #fff;
 }
 
 .dialog-surface__button--primary:hover:not(:disabled) {
-  background: #1d4ed8;
+  background: #315f9e;
 }
 
 .dialog-surface__button--danger {
-  background: #b42318;
+  background: #a83f46;
   color: #fff;
 }
 
 .dialog-surface__button--danger:hover:not(:disabled) {
-  background: #912018;
+  background: #8f343b;
 }
 
 @keyframes dialog-surface-enter {
@@ -241,9 +241,10 @@
   .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
     height: 100%;
     max-height: none;
+    border-left: 0;
     border-radius: 0;
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .dialog-surface__header {
@@ -270,7 +271,7 @@
 
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
   .dialog-surface__panel {
-    background: #fff;
+    background: var(--color-surface);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
@@ -278,12 +279,12 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .dialog-surface::backdrop {
-    background: rgb(25 31 40 / 60%);
+    background: rgb(0 0 0 / 78%);
   }
 
   .dialog-surface__panel,
   .dialog-surface[data-variant="drawer"] .dialog-surface__panel {
-    background: #fff;
+    background: var(--color-surface);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }

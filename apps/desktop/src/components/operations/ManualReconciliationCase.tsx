@@ -194,11 +194,11 @@ export function ManualReconciliationCase({
         승인 후에도 Worker 적용 확인과 회계 반영 결과가 모두 확인되기 전에는 완료로 표시하지 않습니다.
       </p>
       {!canView ? (
-        <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <p className="rounded-md border border-warning/30 bg-warningSoft p-3 text-sm text-warning">
           운영자, 위험 승인자 또는 감사자 역할이 없어 수동 대사 증거를 표시하지 않습니다.
         </p>
       ) : unknownSnapshot === null ? (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900" role="alert">
+        <div className="rounded-md border border-danger/30 bg-dangerSoft p-3 text-sm text-danger" role="alert">
           수동 대사 회계 반영 정보를 확인할 수 없어 요청·승인을 모두 차단했습니다.
         </div>
       ) : cases.length === 0 ? (
@@ -217,7 +217,7 @@ export function ManualReconciliationCase({
             const selfReview = item.request?.requested_by.actor_id === snapshot.access.actor?.actor_id;
             const localError = validationErrors[key];
             return (
-              <article key={item.break_id} className="rounded-md border border-line p-4">
+              <article key={item.break_id} className="rounded-lg border border-lineSubtle p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="flex items-center gap-2 font-semibold text-ink">
@@ -249,7 +249,7 @@ export function ManualReconciliationCase({
                 <ResolutionTimeline context={item} />
 
                 {item.request ? (
-                  <section className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3" aria-label="제출된 회계 조정 증거">
+                  <section className="mt-4 border-y border-lineSubtle bg-canvas py-3" aria-label="제출된 회계 조정 증거">
                     <p className="text-sm font-semibold text-ink">요청자가 고정한 증거·누락 체결</p>
                     <dl className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
                       <EvidenceValue label="요청자" value={item.request.requested_by.display_name} />
@@ -258,13 +258,13 @@ export function ManualReconciliationCase({
                       <EvidenceValue label="요청 요약 해시" value={shortHash(item.request.request_digest_sha256)} />
                     </dl>
                     {item.request.missing_fills.length === 0 ? (
-                      <p className="mt-2 rounded border border-slate-200 bg-white p-2 text-sm text-ink">
+                      <p className="mt-2 rounded-sm bg-surfaceRaised p-2 text-sm text-ink">
                         요청자가 누락 체결 없음(<code>[]</code>)을 명시적으로 제출했습니다.
                       </p>
                     ) : (
                       <ol className="mt-2 space-y-2" aria-label="제출된 누락 체결 목록">
                         {item.request.missing_fills.map((fill) => (
-                          <li key={fill.fill_sequence} className="rounded border border-slate-200 bg-white p-2 text-sm">
+                          <li key={fill.fill_sequence} className="rounded-sm bg-surfaceRaised p-2 text-sm">
                             #{fill.fill_sequence} · {fill.quantity}주 × {fill.price_krw.toLocaleString("ko-KR")}원 ·
                             체결 ID {fill.provider_execution_id} · 결제일 {fill.settlement_date} ·
                             증거 {shortHash(fill.evidence_sha256)}
@@ -276,9 +276,9 @@ export function ManualReconciliationCase({
                 ) : null}
 
                 {requestEligible ? (
-                  <fieldset className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3">
-                    <legend className="px-1 text-sm font-semibold text-amber-950">운영자 회계 조정 요청</legend>
-                    <p className="mb-3 text-xs text-amber-900">
+                  <fieldset className="mt-4 rounded-md border border-warning/30 bg-warningSoft p-3">
+                    <legend className="px-1 text-sm font-semibold text-warning">운영자 회계 조정 요청</legend>
+                    <p className="mb-3 text-xs text-warning">
                       모든 필드를 직접 입력하세요. 누락 체결이 없더라도 <code>[]</code>를 입력해야 하며 자동 기본값은 없습니다.
                     </p>
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -330,7 +330,7 @@ export function ManualReconciliationCase({
                         각 항목은 스키마 버전, 순번, 제공자 ID, 수량·가격·비용, 체결 시각, 결제일, 증거 SHA를 모두 포함해야 합니다.
                       </span>
                     </label>
-                    {localError ? <p className="mt-2 text-sm text-red-800" role="alert">{localError}</p> : null}
+                    {localError ? <p className="mt-2 text-sm text-danger" role="alert">{localError}</p> : null}
                     <button
                       type="button"
                       className={`${pageButtonClass("warning")} mt-3`}
@@ -361,14 +361,14 @@ export function ManualReconciliationCase({
                 ) : null}
 
                 {item.request?.state === "requested" ? (
-                  <section className="mt-4 rounded-md border border-sky-200 bg-sky-50 p-3">
-                    <p className="text-sm font-semibold text-sky-950">위험 승인자 독립 검토</p>
+                  <section className="mt-4 rounded-md border border-primary/30 bg-primarySoft p-3">
+                    <p className="text-sm font-semibold text-primary">위험 승인자 독립 검토</p>
                     {selfReview ? (
-                      <p className="mt-1 text-sm text-red-800" role="alert">
+                      <p className="mt-1 text-sm text-danger" role="alert">
                         본인이 요청한 회계 조정은 승인하거나 거절할 수 없습니다.
                       </p>
                     ) : (
-                      <p className="mt-1 text-sm text-sky-900">
+                      <p className="mt-1 text-sm text-primary">
                         요청 요약 해시, 증거 SHA, 최종 주문 상태와 모든 누락 체결을 검토한 뒤 결정하세요.
                       </p>
                     )}
@@ -514,9 +514,9 @@ function ResolutionTimeline({ context }: { readonly context: UnknownResolutionCo
   return (
     <ol className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4" aria-label="조정 요청·승인·Worker 적용·회계 반영 타임라인">
       {steps.map((step, index) => (
-        <li key={step.label} className="rounded-md border border-line bg-surface p-2 text-sm">
+        <li key={step.label} className="rounded-md border border-lineSubtle bg-surface p-2 text-sm">
           <p className="font-medium text-ink">{index + 1}. {step.label}</p>
-          <p className={step.complete ? "text-emerald-700" : "text-muted"}>
+          <p className={step.complete ? "text-success" : "text-muted"}>
             {step.complete ? "확인됨" : "미확인"} · {step.detail}
           </p>
         </li>

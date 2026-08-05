@@ -10,3 +10,20 @@ max_rows = 1000
 [db]
 port = 54322
 major_version = 17
+
+# The repository's PostgreSQL 17 replay contract requires the pgcrypto
+# preflight to run before the immutable migration history. Local bootstrap is
+# therefore orchestrated by scripts/bootstrap-local-paper.ps1 instead of the
+# CLI's automatic start-time migration/seed pass.
+[db.migrations]
+enabled = false
+
+[db.seed]
+enabled = false
+
+# Local PAPER verification uses real, distinct Supabase Auth sessions. TOTP is
+# explicitly enabled so both human users can satisfy the database's recent-AAL2
+# maker/checker contract; phone and WebAuthn factors remain disabled by default.
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true

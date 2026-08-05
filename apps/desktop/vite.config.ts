@@ -10,27 +10,25 @@ export default defineConfig({
   build: {
     target: "es2022",
     modulePreload: { polyfill: false },
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        manualChunks(id, { getModuleInfo }) {
-          const isStaticEntryDependency = (moduleId: string, visited: Set<string>): boolean => {
-            if (visited.has(moduleId)) {
-              return false;
+        codeSplitting: {
+          groups: [
+            {
+              name: "supabase-sdk",
+              test: /node_modules[\\/]@supabase[\\/]/
             }
-            visited.add(moduleId);
-            const info = getModuleInfo(moduleId);
-            return info?.isEntry === true ||
-              info?.importers.some((importer) => isStaticEntryDependency(importer, visited)) === true;
-          };
-
-          return isStaticEntryDependency(id, new Set()) ? "core-app" : "secondary-ui";
+          ]
         }
       }
     }
   },
   server: {
     port: 1420,
-    strictPort: false
+    strictPort: true,
+    watch: {
+      ignored: ["**/src-tauri/**"]
+    }
   }
 });
 

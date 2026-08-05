@@ -103,7 +103,7 @@ export function ApprovalInbox({
             const disabled = blockedReason !== null;
             const blockedReasonId = `review-blocked-${command.command_id}`;
             return (
-              <article key={command.command_id} className="rounded-xl border border-line p-4">
+              <article key={command.command_id} className="rounded-lg border border-lineSubtle p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <p className="font-semibold text-ink">{commandLabel(command.command_type)}</p>
@@ -116,7 +116,7 @@ export function ApprovalInbox({
                 {blockedReason !== null ? (
                   <p
                     id={blockedReasonId}
-                    className="mt-3 flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-900"
+                    className="mt-3 flex items-center gap-2 rounded-xl bg-warningSoft p-3 text-sm text-warning"
                   >
                     <UserRoundX size={16} aria-hidden="true" className="shrink-0" />
                     {blockedReason}
@@ -149,7 +149,7 @@ export function ApprovalInbox({
           })}
         </div>
       )}
-      {!canReview ? <p className="mt-3 text-sm text-amber-800">현재 역할에는 독립 검토 권한이 없습니다.</p> : null}
+      {!canReview ? <p className="mt-3 text-sm text-warning">현재 역할에는 독립 검토 권한이 없습니다.</p> : null}
       <ConfirmDialog
         open={confirmation !== null}
         title={confirmation?.kind === "approve" ? "운영 요청 승인" : "운영 요청 거절"}

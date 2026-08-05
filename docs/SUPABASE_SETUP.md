@@ -132,7 +132,8 @@ guarantee. Any ambiguous state stops the release.
 49. `20260724234500_durable_scheduler_conflict_target.sql`
 50. `20260725090000_durable_scheduler_budget_policy.sql`
 51. `20260725235840_durable_scheduler_heartbeat_contract.sql`
-52. `seed.sql`
+52. `20260726150000_paper_execution_disabled_scheduler_idle.sql`
+53. `seed.sql`
 
 The first fifteen migrations are legacy-compatible history. Migration `0016`
 starts the V2 private source of truth. Migrations `0017` through `0024` add the
@@ -302,6 +303,12 @@ The timestamp migrations extend that boundary in this order:
   independent-stage format readable during rolling deployment, rejects
   missing, extra, null, or stale durable job timestamps, and preserves the
   existing function ownership and least-privilege execution boundary.
+- `20260726150000_paper_execution_disabled_scheduler_idle.sql` treats the
+  fail-closed `execution_enabled=false` state as an idle execution claim only
+  when the active Worker lease matches the requested holder and release SHA
+  and has not expired. A stale or mismatched lease remains a hard failure, and
+  the enabled path retains the complete qualification, applied resume command,
+  epoch, release, and lease gates.
 
 ## Required project configuration
 

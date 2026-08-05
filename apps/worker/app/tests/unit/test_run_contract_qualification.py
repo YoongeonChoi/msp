@@ -62,6 +62,18 @@ async def test_contract_qualification_is_deterministic_for_same_inputs() -> None
     assert first.to_json() == second.to_json()
 
 
+async def test_contract_qualification_captures_completion_after_checks() -> None:
+    started_at = datetime(2026, 7, 15, 1, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(milliseconds=750)
+
+    report = await RunContractQualification(clock=lambda: completed_at).execute(
+        started_at=started_at,
+    )
+
+    assert report.started_at == started_at
+    assert report.completed_at == completed_at
+
+
 async def test_unpinned_contract_artifact_fails_without_network_evidence() -> None:
     started_at = datetime(2026, 7, 15, 1, 0, tzinfo=UTC)
 

@@ -1,4 +1,6 @@
 await import("./supabaseConfigSecurity.test");
+await import("./desktopReleaseConfig.test");
+await import("./windowsSubsystem.test");
 await import("./operationsContracts.test");
 await import("./unknownResolutionContracts.test");
 await import("./operationRequests.test");
@@ -7,6 +9,9 @@ await import("./accessChangeRequests.test");
 await import("./accessChangePanel.test");
 await import("./operationsDataBoundary.test");
 await import("./operationsPageRender.test");
+await import("./dashboardNavigation.test");
+await import("./responsiveShell.test");
+await import("./operationsDataViews.test");
 await import("./unknownResolutionPageRender.test");
 await import("./operationsPageHydrated.test");
 await import("./operationOpenGuards.test");

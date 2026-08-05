@@ -132,9 +132,9 @@ export function SafetyCommandCenter({
   };
 
   return (
-    <div className="space-y-5">
+    <div className="grid gap-[14px]">
       <Panel className="overflow-hidden !p-0">
-        <div className="p-5 sm:p-6">
+        <div className="p-5">
         <SectionTitle
           title="현재 실행 상태"
           detail={
@@ -168,7 +168,7 @@ export function SafetyCommandCenter({
           />
         </div>
 
-        <div className="mt-5 grid gap-x-6 rounded-xl border border-line bg-slate-50/80 px-4 sm:grid-cols-2">
+        <div className="mt-5 grid gap-x-6 border-y border-lineSubtle bg-canvas px-1 sm:grid-cols-2">
           <KeyValue
             label="운영 준비 확인"
             value={<Pill tone={qualificationReady ? "safe" : "warning"}>{qualificationReady ? "유효" : "차단"}</Pill>}
@@ -179,21 +179,21 @@ export function SafetyCommandCenter({
         </div>
 
         {!canRequest ? (
-          <p className="mt-3 text-sm text-amber-800" role="status">
+          <p className="mt-3 text-sm text-warning" role="status">
             현재 역할은 일반 운영 명령을 요청할 수 없습니다. 비상 정지는 최근 2단계 인증을 완료한 운영 담당자만
             별도 조건으로 요청할 수 있습니다.
           </p>
         ) : null}
       </div>
 
-      <div className="border-t border-line bg-red-50/55 p-5 sm:p-6">
+      <div className="border-t border-lineSubtle bg-dangerSoft p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="max-w-2xl">
-            <div className="flex items-center gap-2 font-semibold text-red-900">
+            <div className="flex items-center gap-2 font-semibold text-danger">
               <ShieldAlert size={18} aria-hidden="true" />
               비상 제어
             </div>
-            <p className="mt-1 text-base leading-6 text-red-800">
+            <p className="mt-1 text-base leading-6 text-danger">
               중대한 이상이 확인된 경우에만 사용합니다. 접수 뒤에도 최신 실행 상태에서 주문 생성 중지를 확인하세요.
             </p>
           </div>
@@ -210,8 +210,8 @@ export function SafetyCommandCenter({
         </div>
       </div>
 
-      <details className="group border-t border-line">
-        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 font-semibold text-ink marker:content-none sm:px-6">
+      <details className="group border-t border-lineSubtle">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 font-semibold text-ink marker:content-none">
           <span>기타 운영 작업</span>
           <ChevronDown
             size={18}
@@ -219,7 +219,7 @@ export function SafetyCommandCenter({
             aria-hidden="true"
           />
         </summary>
-        <div className="grid gap-3 border-t border-line bg-slate-50/60 p-5 sm:grid-cols-2 sm:p-6 xl:grid-cols-3">
+        <div className="grid gap-3 border-t border-lineSubtle bg-canvas p-5 sm:grid-cols-2 xl:grid-cols-3">
           {otherOperationTypes.map((type) => {
             const action = actionFor(type);
             return (
@@ -250,7 +250,7 @@ export function SafetyCommandCenter({
           }
         />
         {urgentCommand === null ? (
-          <p className="rounded-xl border border-dashed border-line p-4 text-sm text-muted">
+          <p className="rounded-lg border border-dashed border-lineSubtle p-4 text-sm text-muted">
             표시할 명령 영수증이 없습니다.
           </p>
         ) : (
@@ -319,13 +319,13 @@ function CommandButton({
   const descriptionId = `${action.type}-description`;
   const primaryClass =
     priority === "primary"
-      ? "min-h-11 shrink-0 !border-blue-600 !bg-blue-600 !text-white shadow-sm hover:!bg-blue-700 focus:ring-blue-500"
+      ? "min-h-11 w-full shrink-0 !border-primaryAction !bg-primaryAction !text-white hover:brightness-110"
       : priority === "danger"
-        ? "min-h-11 shrink-0 !border-red-700 !bg-red-700 !text-white hover:!bg-red-800 focus:ring-red-500"
+        ? "min-h-11 w-full shrink-0 !border-danger !bg-danger !text-canvas hover:brightness-110"
         : "min-h-24 w-full flex-col items-start text-left";
 
   return (
-    <div className={priority === "secondary" ? "min-w-0" : "sm:max-w-sm"}>
+    <div className={priority === "secondary" ? "min-w-0" : "w-full sm:w-[220px] sm:shrink-0"}>
       <button
         type="button"
         className={`${pageButtonClass(priority === "primary" ? "neutral" : action.tone)} ${primaryClass} transition-transform duration-press ease-product active:scale-[0.985] motion-reduce:transform-none motion-reduce:transition-none`}
@@ -344,7 +344,7 @@ function CommandButton({
       </button>
       <p
         id={descriptionId}
-        className={`mt-2 text-xs leading-5 ${blockReason === null ? "text-muted" : "font-medium text-amber-800"}`}
+        className={`mt-2 text-xs leading-5 ${blockReason === null ? "text-muted" : "font-medium text-warning"}`}
       >
         {blockReason ?? action.description}
       </p>
@@ -433,7 +433,7 @@ function CommandTimeline({
   ];
 
   return (
-    <article className="rounded-xl border border-line bg-white p-4" aria-label={`${commandLabel(command.command_type)} 처리 상태`}>
+    <article className="rounded-lg border border-lineSubtle bg-canvas p-4" aria-label={`${commandLabel(command.command_type)} 처리 상태`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-semibold text-ink">{commandLabel(command.command_type)}</p>
@@ -456,7 +456,7 @@ function CommandTimeline({
         제어면 영수증 r{command.control_plane_receipt.revision} · Worker 적용 확인 {workerAckLabel(command)}
       </p>
       {command.worker_ack?.state === "applied" && !postconditionVerified ? (
-        <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-amber-800" role="status">
+        <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-warning" role="status">
           <Clock3 className="mt-0.5 shrink-0" size={14} aria-hidden="true" />
           Worker 적용 보고는 수신했지만 최신 실행 상태에서 결과를 아직 확인하지 못했습니다. 완료로 표시하지 않습니다.
         </p>
@@ -511,21 +511,21 @@ function ProgressIcon({ state }: { readonly state: ProgressState }) {
 
 function progressStepStyle(state: ProgressState): { readonly className: string; readonly stateLabel: string } {
   if (state === "complete") {
-    return { className: "border-emerald-200 bg-emerald-50 text-emerald-900", stateLabel: "확인됨" };
+    return { className: "border-success/30 bg-successSoft text-success", stateLabel: "확인됨" };
   }
   if (state === "current") {
-    return { className: "border-blue-200 bg-blue-50 text-blue-900", stateLabel: "확인 중" };
+    return { className: "border-primary/30 bg-primarySoft text-primary", stateLabel: "확인 중" };
   }
   if (state === "failed") {
-    return { className: "border-red-200 bg-red-50 text-red-900", stateLabel: "중단됨" };
+    return { className: "border-danger/30 bg-dangerSoft text-danger", stateLabel: "중단됨" };
   }
   if (state === "blocked") {
-    return { className: "border-amber-200 bg-amber-50 text-amber-900", stateLabel: "거절됨" };
+    return { className: "border-warning/30 bg-warningSoft text-warning", stateLabel: "거절됨" };
   }
   if (state === "not_applicable") {
-    return { className: "border-dashed border-line bg-slate-50 text-mutedStrong", stateLabel: "해당 없음" };
+    return { className: "border-dashed border-lineSubtle bg-canvas text-mutedStrong", stateLabel: "해당 없음" };
   }
-  return { className: "border-line bg-slate-50 text-mutedStrong", stateLabel: "대기" };
+  return { className: "border-lineSubtle bg-canvas text-mutedStrong", stateLabel: "대기" };
 }
 
 function selectUrgentCommand(
@@ -690,13 +690,13 @@ function terminalCommandState(state: OperationCommandReceipt["state"]): {
   readonly className: string;
 } | null {
   if (state === "failed") {
-    return { message: "Worker 적용이 실패했습니다. 실패 코드를 확인하고 새 요청을 검토하세요.", className: "text-red-800" };
+    return { message: "Worker 적용이 실패했습니다. 실패 코드를 확인하고 새 요청을 검토하세요.", className: "text-danger" };
   }
   if (state === "rejected") {
-    return { message: "독립 검토자가 요청을 거절했습니다. 기존 요청은 다시 전송되지 않습니다.", className: "text-amber-800" };
+    return { message: "독립 검토자가 요청을 거절했습니다. 기존 요청은 다시 전송되지 않습니다.", className: "text-warning" };
   }
   if (state === "expired") {
-    return { message: "유효 시간이 지나 요청이 만료됐습니다. 필요하면 최신 상태에서 새로 요청하세요.", className: "text-amber-800" };
+    return { message: "유효 시간이 지나 요청이 만료됐습니다. 필요하면 최신 상태에서 새로 요청하세요.", className: "text-warning" };
   }
   if (state === "canceled") {
     return { message: "요청이 취소됐습니다. 취소된 요청은 자동 재개되지 않습니다.", className: "text-muted" };

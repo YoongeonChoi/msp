@@ -508,6 +508,12 @@ not register or finalize the release-bound database qualification. Preserve the
 manifest and its hashes for the later maker/checker workflow; do not mark the
 gate complete from console output alone.
 
+The current scheduler tail is
+`20260726150000_paper_execution_disabled_scheduler_idle.sql`. With Paper
+execution disabled, an exact active lease produces an empty execution claim;
+a stale or mismatched lease is still a hard failure. Do not recover a disabled
+scheduler by enabling execution or by fabricating qualification evidence.
+
 ## Restore drill
 
 1. Restore into an isolated environment with Paper disabled and no order-capable

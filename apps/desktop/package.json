@@ -10,6 +10,8 @@
     "lint": "eslint .",
     "test": "tsx tests/index.test.ts",
     "e2e": "playwright test",
+    "verify:release-config": "tsx scripts/verify-release-config.ts",
+    "bundle:windows": "npm run verify:release-config && tauri build --bundles nsis --ci -- --locked",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -27,6 +29,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.61.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@testing-library/react": "^16.3.2",
     "@types/jsdom": "^28.0.3",
     "@types/react": "^18.3.5",

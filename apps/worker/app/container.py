@@ -310,7 +310,7 @@ def build_operations_v2_runtime(
         account_id=account_id,
         holder_id=worker_id,
         current_release_sha=worker_api.release_sha,
-        lease_provider=lambda: lease_manager.current,
+        lease_provider=lease_manager.current_lease,
     )
     execution = RunExecutionSupervisorV2(
         execution_source,
@@ -325,7 +325,7 @@ def build_operations_v2_runtime(
         environment=settings.execution_v2_environment,
         holder_id=worker_id,
         release_sha=worker_api.release_sha,
-        lease_provider=lambda: lease_manager.current,
+        lease_provider=lease_manager.current_lease,
     )
     reconciliation = RunExecutionReconciliationStageV2(
         ApplyUnknownExecutionResolutionsV2(
@@ -334,7 +334,7 @@ def build_operations_v2_runtime(
             environment=settings.execution_v2_environment,
             holder_id=worker_id,
             release_sha=worker_api.release_sha,
-            lease_provider=lambda: lease_manager.current,
+            lease_provider=lease_manager.current_lease,
         ),
         ReconcileExecutionV2(
             worker_api,
@@ -346,7 +346,7 @@ def build_operations_v2_runtime(
             account_id=account_id,
             worker_id=worker_id,
             current_release_sha=worker_api.release_sha,
-            lease_provider=lambda: lease_manager.current,
+            lease_provider=lease_manager.current_lease,
         ),
     )
     outbox = DispatchAlertOutbox(
