@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$PreflightOnly,
-    [switch]$RequireSignature
+    [switch]$RequireSignature,
+    [string]$InspectPePath
 )
 
 Set-StrictMode -Version Latest
@@ -9,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $tauriManifest = Join-Path $repoRoot "apps\desktop\src-tauri\Cargo.toml"
+$applicationExecutable = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\kr_auto_trading_lab_desktop.exe"
 $bundleDirectory = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\bundle\nsis"
 
 function Assert-CommandAvailable {
@@ -31,6 +33,59 @@ function Invoke-CheckedStep {
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE."
     }
+}
+
+function Get-WindowsPeSubsystem {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+            throw "Application executable is not a valid PE file."
+        }
+
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0 -or $peOffset + 24 -gt $stream.Length) {
+            throw "Application executable has an invalid PE header offset."
+        }
+
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "Application executable has an invalid PE signature."
+        }
+
+        $optionalHeaderStart = $peOffset + 24
+        $stream.Position = $peOffset + 20
+        $optionalHeaderSize = $reader.ReadUInt16()
+        if ($optionalHeaderSize -lt 70 -or $optionalHeaderStart + $optionalHeaderSize -gt $stream.Length) {
+            throw "Application executable has an invalid PE optional header size."
+        }
+
+        $stream.Position = $optionalHeaderStart
+        $optionalHeaderMagic = $reader.ReadUInt16()
+        if ($optionalHeaderMagic -notin @(0x010B, 0x020B)) {
+            throw "Application executable has an unsupported PE optional header."
+        }
+
+        $stream.Position = $optionalHeaderStart + 68
+        return $reader.ReadUInt16()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+if ($InspectPePath) {
+    $resolvedInspectPath = (Resolve-Path -LiteralPath $InspectPePath).Path
+    Write-Output (Get-WindowsPeSubsystem -Path $resolvedInspectPath)
+    return
 }
 
 if (-not $IsWindows) {
@@ -80,6 +135,14 @@ try {
         -Executable "npm" `
         -Arguments @("--workspace", "apps/desktop", "run", "bundle:windows")
 
+    if (-not (Test-Path -LiteralPath $applicationExecutable -PathType Leaf)) {
+        throw "Expected release application executable was not created."
+    }
+    $applicationSubsystem = Get-WindowsPeSubsystem -Path $applicationExecutable
+    if ($applicationSubsystem -ne 2) {
+        throw "Release application PE subsystem must be Windows GUI (2); found $applicationSubsystem."
+    }
+
     $installers = @(
         Get-ChildItem -LiteralPath $bundleDirectory -Filter "*-setup.exe" -File |
             Where-Object { $_.LastWriteTimeUtc -ge $buildStartedUtc.AddSeconds(-5) }
@@ -104,6 +167,7 @@ try {
     }
 
     Write-Host "Windows installer: $($installer.FullName)"
+    Write-Host "Application PE subsystem: Windows GUI ($applicationSubsystem)"
     Write-Host "SHA-256: $($checksum.Hash)"
     Write-Host "Checksum file: $checksumPath"
     Write-Host "Authenticode: $($signature.Status)"

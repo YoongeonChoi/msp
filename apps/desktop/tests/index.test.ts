@@ -1,5 +1,6 @@
 await import("./supabaseConfigSecurity.test");
 await import("./desktopReleaseConfig.test");
+await import("./windowsSubsystem.test");
 await import("./operationsContracts.test");
 await import("./unknownResolutionContracts.test");
 await import("./operationRequests.test");
