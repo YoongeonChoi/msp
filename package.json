@@ -13,6 +13,7 @@
     "desktop:lint": "npm --workspace apps/desktop run lint",
     "desktop:test": "npm --workspace apps/desktop run test",
     "desktop:e2e": "npm --workspace apps/desktop run e2e",
+    "desktop:bundle:windows": "pwsh -NoLogo -NoProfile -File scripts/build-windows-desktop.ps1",
     "local-paper:bootstrap": "pwsh -NoLogo -NoProfile -File scripts/bootstrap-local-paper.ps1",
     "local-paper:start": "pwsh -NoLogo -NoProfile -File scripts/start-local-paper.ps1",
     "local-paper:worker": "pwsh -NoLogo -NoProfile -File scripts/start-local-paper.ps1 -NoDesktop",

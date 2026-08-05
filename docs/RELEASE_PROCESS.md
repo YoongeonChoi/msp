@@ -32,6 +32,8 @@ remains fail closed.
 - Worker type check passes.
 - Desktop lint/typecheck/build pass.
 - Desktop Playwright E2E and Tauri/Rust check, test, and build pass.
+- Windows release candidates are rebuilt as an NSIS `setup.exe`; the emitted
+  SHA-256 and Authenticode status are retained with the candidate.
 - Migration check passes.
 - Every migration present in the PR base is byte/mode-identical in every
   candidate commit and in the merge candidate; only a new migration may be
@@ -56,6 +58,23 @@ remains fail closed.
 - `bot_settings.enabled=false`.
 - `live_order_allowed=false`.
 - Rollback target identified.
+
+## Windows Desktop Artifact
+
+On a Windows release host, follow [Windows Desktop](WINDOWS_DESKTOP.md) and run:
+
+```powershell
+npm ci
+npx playwright install chromium
+npm run desktop:bundle:windows
+```
+
+The command validates only the hosted Supabase URL and publishable key, runs the
+Desktop and native gates, builds NSIS explicitly, and emits a SHA-256 file. A
+successful unsigned build is a local/test artifact, not a trusted public release.
+External distribution additionally requires an operator-owned Authenticode signing
+identity and a successful `-RequireSignature` run. The installer never packages
+Worker, broker, Supabase service-role, Render, or provider secrets.
 
 ## Manual Deployment
 
